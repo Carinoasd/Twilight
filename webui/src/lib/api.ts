@@ -154,7 +154,7 @@ import type {
   V2TicketReplyResponse,
 } from "./api-types-v2";
 import { confirmPhrases } from "./confirm-phrases";
-import { API_BASE, ApiError, apiRequest, apiRequestForm, type ApiRequestExtraOptions } from "./api-request";
+import { API_BASE, ApiError, apiRequest, apiRequestForm, DEFAULT_API_VERSION, type ApiRequestExtraOptions } from "./api-request";
 import { deepClone } from "./deep-clone";
 import { normalizeMediaRequestStatus } from "./media-status";
 
@@ -648,7 +648,10 @@ class ApiClient {
       telegram_id?: number;
       telegram_username?: string;
     }>(
-      `/users/telegram/register/bind-code/status?${q}`,
+      // V2 把公开注册流的绑定码状态收在 /registration 命名空间下
+      // （/api/v2/registration/telegram/bind-code/status）。/users/telegram/...
+      // 只剩 V1 形状，继续用它会在默认 v2 下恒定 404。
+      `/registration/telegram/bind-code/status?${q}`,
       { signal, cache: "no-store" },
       { timeoutMs: 10_000, cacheRead: false, dedupe: false },
     );
@@ -656,7 +659,9 @@ class ApiClient {
 
   getRegisterBindCodeStatusWebSocketUrl(code: string) {
     const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
-    const url = new URL("/api/v1/users/telegram/register/bind-code/ws", base);
+    // 版本号跟随 DEFAULT_API_VERSION，避免写死 v1：整站退回 v1 时这条
+    // WebSocket 还留在 v2，两个通道会指向不同后端契约。
+    const url = new URL(`/api/${DEFAULT_API_VERSION}/users/telegram/register/bind-code/ws`, base);
     url.searchParams.set("code", code);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return url.toString();

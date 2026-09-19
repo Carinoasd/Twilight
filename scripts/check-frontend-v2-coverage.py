@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Cross-check every webui API call against the registered /api/v2 routes.
+"""Cross-check every webui API call against the registered route tables.
 
-Extracts (method, path) pairs from webui/src/lib/api.ts request call sites and
-from internal/api/routes_v2.go, then reports calls that have no V2 route.
-Template interpolations are normalised to :param so they match route patterns.
+Extracts (version, method, path) triples from the webui request call sites and
+(METHOD, path) pairs from the Go route tables, then fails on either drift:
+
+  * no route registered for the path            -> 404 at runtime
+  * path registered, but not for that verb      -> 405 at runtime
+
+The verb check is deliberately strict. An earlier revision accepted a
+path-only match as "covered", which is exactly how a frontend PUT against a
+PATCH-only route shipped green and broke the page: the path existed, the verb
+did not.
+
+Template interpolations are normalised to :param so they match route patterns,
+and a template with two literal alternatives (`${on ? "enable" : "disable"}`)
+expands into both concrete paths.
 """
 
 import pathlib
@@ -11,8 +22,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(".")
-API_TS = ROOT / "webui/src/lib/api.ts"
-ROUTES = ROOT / "internal/api/routes_v2.go"
+WEBUI = ROOT / "webui/src"
+ROUTE_FILES = sorted((ROOT / "internal/api").glob("routes*.go"))
 
 METHOD_CONST = {
     "MethodGet": "GET",
@@ -21,44 +32,76 @@ METHOD_CONST = {
     "MethodPatch": "PATCH",
     "MethodDelete": "DELETE",
     "MethodHead": "HEAD",
+    "MethodOptions": "OPTIONS",
 }
 
-ROUTE_RE = re.compile(
-    r'a\.add\(http\.Method(\w+),\s*"([^"]+)"'
-)
-PATH_LITERAL_RE = re.compile(r'["`](/(?:[^"`\s]|(?:\$\{[^}]*\}))+)["`]')
-PARAM_RE = re.compile(r"\$\{[^}]*\}")
-METHOD_RE = re.compile(r'method:\s*"([A-Z]+)"')
-# `${enable ? "enable" : "disable"}` — two literal alternatives, no interpolation.
-TERNARY_RE = re.compile(r'\$\{[^}]*?\?\s*["\'`]([^"\'`]*)["\'`]\s*:\s*["\'`]([^"\'`]*)["\'`]\s*\}')
+ROUTE_RE = re.compile(r'a\.add\(http\.Method(\w+),\s*"([^"]+)"')
+METHOD_RE = re.compile(r"""method:\s*['"]([A-Z]+)['"]""")
+VERSION_RE = re.compile(r"""apiVersion:\s*['"](\w+)['"]""")
+FORM_VERB_RE = re.compile(r"""[,(]\s*['"](POST|PUT)['"]\s*[,)]""")
+
+CALL_RE = re.compile(r"\b(?:this\.request|this\.requestForm|apiRequest|apiRequestForm)\s*(?:<[^>]*>)?\s*\(")
+FETCH_RE = re.compile(r"\bfetch\s*\(\s*([`\"'])")
+WS_RE = re.compile(r"\bnew\s+(?:WebSocket|EventSource)\s*\(\s*([`\"'])")
 
 
-def expand_interpolations(path: str) -> list[str]:
+def normalise(path: str) -> str:
+    # Route params carry descriptive names (:uid vs :log_id); collapse them.
+    resolved = re.sub(r":\w+", ":param", path)
+    resolved = re.sub(r":param[^/]*", ":param", resolved)
+    return resolved.split("?", 1)[0].rstrip("/") or "/"
+
+
+def interpolations(path: str) -> list[tuple[int, int, str]]:
+    """Locate `${...}` spans, brace-aware so nested `${}` inside is kept whole."""
+    spans: list[tuple[int, int, str]] = []
+    i, n = 0, len(path)
+    while i < n:
+        if path[i] == "$" and i + 1 < n and path[i + 1] == "{":
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if path[j] == "{":
+                    depth += 1
+                elif path[j] == "}":
+                    depth -= 1
+                j += 1
+            spans.append((i, j, path[i:j]))
+            i = j
+        else:
+            i += 1
+    return spans
+
+
+def expand(path: str) -> list[str]:
     """Expand a template literal into the concrete paths it can produce.
 
-    Two shapes occur in api.ts:
+    Three shapes occur in the client:
       * `${cond ? "enable" : "disable"}` -> two registered routes
-      * `${suffix ? "?a=1" : ""}`        -> an optional query string, i.e. no path text
-    Everything else collapses to a `:param` placeholder.
+      * `${suffix ? `?${q}` : ""}`       -> an optional query string, no path text
+      * `${uid}`                         -> one route parameter
+    A ternary is detected by its ` ? ` / ` : ` shape rather than a regex, because
+    the query-string form embeds a nested template that no flat pattern matches.
     """
     slots: list[tuple[str, list[str]]] = []
-    cursor = 0
-    for match in PARAM_RE.finditer(path):
-        token = match.group(0)
-        if ternary := TERNARY_RE.fullmatch(token):
-            left, right = ternary.group(1), ternary.group(2)
-            if left.startswith("?") or right.startswith("?"):
-                options = ["", ""] if left and right else [""]
+    for start, end, token in interpolations(path):
+        if " ? " in token and " : " in token:
+            branches = [lit for lit in string_literals(token)]
+            # Both branches are a query suffix or empty: the slot contributes no
+            # path text, it only decides whether a query string is appended.
+            if branches and all(branch == "" or branch.startswith("?") for branch in branches):
+                options = [""]
+            elif branches:
+                options = [branch for branch in branches if branch and not branch.startswith("?")] or [":param"]
             else:
-                options = [left, right]
-        elif match.start() == 0 or path[match.start() - 1] != "/":
+                options = [":param"]
+        elif start == 0 or path[start - 1] != "/":
             # Glued to the end of a segment (`/tickets${suffix}`); it can only
             # append a query string, never introduce a path segment.
             options = [""]
         else:
             options = [":param"]
         slots.append((token, options))
-        cursor = match.end()
 
     variants = [path]
     for token, options in slots:
@@ -67,86 +110,196 @@ def expand_interpolations(path: str) -> list[str]:
             for option in options:
                 nxt.append(variant.replace(token, option, 1))
         variants = nxt
-    return variants
+    return [normalise(v) for v in variants]
 
 
-def normalise(path: str) -> str:
-    # Route params carry descriptive names (:uid vs :log_id); collapse them.
-    resolved = re.sub(r":\w+", ":param", path)
-    # A placeholder that is not a whole segment (query suffix) is noise.
-    resolved = re.sub(r":param[^/]*", ":param", resolved)
-    return resolved.split("?", 1)[0].rstrip("/") or "/"
-
-
-def normalised_variants(path: str) -> list[str]:
-    seen: list[str] = []
-    for variant in expand_interpolations(path):
-        resolved = normalise(variant)
-        if resolved not in seen:
-            seen.append(resolved)
-    return seen
-
-
-def load_v2_routes():
-    routes = set()
-    text = ROUTES.read_text(encoding="utf-8")
-    for const, path in ROUTE_RE.findall(text):
-        method = METHOD_CONST.get("Method" + const)
-        if not method or not path.startswith("/api/v2"):
+def balanced(text: str, start: int) -> str:
+    """Return the argument list starting at the open paren at `start`."""
+    depth = 0
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            quote = ch
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if quote == "`" and text[i] == "$" and i + 1 < n and text[i + 1] == "{":
+                    brace = 1
+                    i += 2
+                    while i < n and brace:
+                        if text[i] == "{":
+                            brace += 1
+                        elif text[i] == "}":
+                            brace -= 1
+                        i += 1
+                    continue
+                if text[i] == quote:
+                    i += 1
+                    break
+                i += 1
             continue
-        routes.add((method, normalise(path[len("/api/v2"):])))
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return text[start:]
+
+
+def string_literals(text: str) -> list[str]:
+    """Extract every string/template literal, tolerating quotes inside ${...}."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch not in "\"'`":
+            i += 1
+            continue
+        quote = ch
+        buf: list[str] = []
+        i += 1
+        while i < n:
+            c = text[i]
+            if c == "\\":
+                buf.append(text[i : i + 2])
+                i += 2
+                continue
+            if quote == "`" and c == "$" and i + 1 < n and text[i + 1] == "{":
+                buf.append("${")
+                brace = 1
+                i += 2
+                while i < n and brace:
+                    inner = text[i]
+                    if inner == "{":
+                        brace += 1
+                    elif inner == "}":
+                        brace -= 1
+                        if brace == 0:
+                            buf.append("}")
+                            i += 1
+                            break
+                    buf.append(inner)
+                    i += 1
+                continue
+            if c == quote:
+                i += 1
+                break
+            buf.append(c)
+            i += 1
+        out.append("".join(buf))
+    return out
+
+
+def load_routes() -> dict[str, dict[str, set[str]]]:
+    routes: dict[str, dict[str, set[str]]] = {"v1": {}, "v2": {}}
+    for file in ROUTE_FILES:
+        text = file.read_text(encoding="utf-8")
+        for const, raw in ROUTE_RE.findall(text):
+            method = METHOD_CONST.get("Method" + const)
+            if not method:
+                continue
+            for version in ("v1", "v2"):
+                prefix = f"/api/{version}"
+                if raw.startswith(prefix):
+                    routes[version].setdefault(normalise(raw[len(prefix) :]), set()).add(method)
     return routes
 
 
-def load_frontend_calls():
-    calls = []
-    lines = API_TS.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines, start=1):
-        if "request" not in line:
-            continue
-        if "/api/" in line:
-            continue
-        # The verb is frequently on a following line; look ahead a little.
-        window = "\n".join(lines[index - 1 : index + 5])
-        if 'apiVersion: "v1"' in window:
-            continue
-        method_match = METHOD_RE.search(window)
-        method = method_match.group(1) if method_match else "GET"
-        # The endpoint literal often sits on its own line below the call. The
-        # window covers a multi-line response generic plus the init object, so a
-        # call whose path lands a few lines down is still checked (a `/usage`
-        # vs `/users` drift once hid behind a too-narrow window).
-        for offset, candidate in enumerate(lines[index - 1 : index + 4]):
-                for raw in PATH_LITERAL_RE.findall(candidate):
-                    for path in normalised_variants(raw):
-                        if len(path) < 2 or path.startswith("/_next") or "uploads" in path:
-                            continue
-                        calls.append((method, path, index + offset, candidate.strip()[:110]))
-    return calls
+def load_calls() -> tuple[list[tuple[str, str, str, str]], list[str]]:
+    calls: list[tuple[str, str, str, str]] = []
+    unresolved: list[str] = []
+    for file in sorted(WEBUI.rglob("*.ts")) + sorted(WEBUI.rglob("*.tsx")):
+        text = file.read_text(encoding="utf-8")
+        rel = file.relative_to(ROOT)
+
+        for match in CALL_RE.finditer(text):
+            arglist = balanced(text, text.index("(", match.end() - 1))
+            line = text.count("\n", 0, match.start()) + 1
+            version_match = VERSION_RE.search(arglist)
+            version = version_match.group(1) if version_match else "v2"
+            is_form = "requestForm" in match.group(0)
+            if method_match := METHOD_RE.search(arglist):
+                method = method_match.group(1)
+            elif is_form and (verb := FORM_VERB_RE.search(arglist)):
+                method = verb.group(1)
+            elif is_form:
+                method = "POST"
+            else:
+                # fetch() and friends default to GET when no verb is given.
+                method = "GET"
+
+            for raw in string_literals(arglist):
+                if not raw.startswith("/"):
+                    continue
+                if raw.startswith("/api/"):
+                    if not raw.startswith(f"/api/{version}"):
+                        continue
+                    body = raw[len(f"/api/{version}") :]
+                else:
+                    body = raw
+                for variant in expand(body):
+                    calls.append((version, method, variant, f"{rel}:{line}"))
+                break
+            else:
+                # Delegating wrappers (`request(endpoint, options, extra)`) have
+                # no literal; they are not call sites.
+                unresolved.append(f"{rel}:{line}  {method}  {arglist[:80]!r}")
+
+        for regex in (FETCH_RE, WS_RE):
+            for match in regex.finditer(text):
+                quote = match.group(1)
+                rest = text[match.end() - 1 : match.end() + 400]
+                lit = re.match(re.escape(quote) + r"(/[^" + quote + r"]*)", rest)
+                if not lit:
+                    continue
+                raw = lit.group(1)
+                if not raw.startswith("/api/v2"):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                window = text[match.start() : match.end() + 300]
+                method_match = METHOD_RE.search(window)
+                for variant in expand(raw[len("/api/v2") :]):
+                    calls.append(("v2", method_match.group(1) if method_match else "GET", variant, f"{rel}:{line}"))
+    return calls, unresolved
 
 
 def main() -> int:
-    routes = load_v2_routes()
-    calls = load_frontend_calls()
-    print(f"v2 routes: {len(routes)}   frontend call sites: {len(calls)}")
+    routes = load_routes()
+    calls, unresolved = load_calls()
+    print(
+        f"v2 routes: {sum(len(m) for m in routes['v2'].values())}   "
+        f"v1 routes: {sum(len(m) for m in routes['v1'].values())}   "
+        f"call sites: {len(calls)}"
+    )
+    if unresolved:
+        print(f"({len(unresolved)} delegating wrappers without a literal path)")
 
-    missing = []
-    for method, path, lineno, snippet in calls:
-        if (method, path) in routes:
-            continue
-        # Fall back to a method-agnostic match: some helpers infer the verb.
-        if any(existing == path for _, existing in routes):
-            continue
-        missing.append((method, path, lineno, snippet))
+    missing: list[tuple[str, str, str, str]] = []
+    mismatch: list[tuple[str, str, str, list[str], str]] = []
+    for version, method, path, where in calls:
+        methods = routes[version].get(path)
+        if methods is None:
+            missing.append((version, method, path, where))
+        elif method not in methods:
+            mismatch.append((version, method, path, sorted(methods), where))
 
-    if not missing:
-        print("all extracted frontend calls resolve to a registered v2 route")
+    if mismatch:
+        print(f"\n{len(mismatch)} call sites whose verb is not registered for the path (405 at runtime):")
+        for version, method, path, allowed, where in mismatch:
+            print(f"  {where}  [{version}] {method} {path}   (registered: {','.join(allowed)})")
+    if missing:
+        print(f"\n{len(missing)} call sites with no route for the path (404 at runtime):")
+        for version, method, path, where in missing:
+            print(f"  {where}  [{version}] {method} {path}")
+
+    if not mismatch and not missing:
+        print("all extracted frontend calls resolve to a registered route with the same verb")
         return 0
-
-    print(f"\n{len(missing)} call sites without a v2 route:")
-    for method, path, lineno, snippet in missing:
-        print(f"  api.ts:{lineno}  {method} {path}")
-        print(f"      {snippet}")
     return 1
 
 
