@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-频道-blue?logo=telegram)](https://t.me/Twilightpanel)
 
-[快速开始](#快速开始) · [功能特性](#功能特性) · [在线文档](docs/README.md) · [Telegram 群组](https://t.me/TwilightPanelChat)
+[快速开始](#快速开始) · [功能特性](#功能特性) · [在线文档](docs/README.md) · [社区支持](#社区支持)
 
 </div>
 
@@ -85,15 +85,6 @@ sudo bash deploy/setup-systemd.sh
 
 完整部署指南：[安装文档](docs/guides/install.md) | [Docker 部署](docs/guides/docker.md)
 
-## 系统截图
-
-<details>
-<summary>点击展开查看</summary>
-
-> 待补充：仪表盘、用户管理、Telegram 面板等截图
-
-</details>
-
 ## 在线文档
 
 | 文档 | 说明 |
@@ -116,7 +107,6 @@ sudo bash deploy/setup-systemd.sh
 ## 社区支持
 
 - 💬 [Telegram 频道](https://t.me/Twilightpanel) - 更新公告
-- 👥 [Telegram 群组](https://t.me/TwilightPanelChat) - 交流讨论
 - 🐛 [提交 Issue](https://github.com/Prejudice-Studio/Twilight/issues) - 反馈问题
 - 📖 [开发文档](docs/guides/development.md) - 参与贡献
 
