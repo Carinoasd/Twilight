@@ -4,7 +4,7 @@
 # 原则：
 #   - 构建产物、运行时数据、本地配置和私密文件不上库
 #   - 项目必需的模板文件 (.example) 和部署脚本保留
-#   - Dockerfile / docker-compose.yml 作为正式部署方案保留，仅本地覆写排除
+#   - Dockerfile / compose 示例保留；推荐部署方式为 Linux + systemd
 # ============================================================
 
 # ─── IDE & Editor ───
@@ -94,7 +94,8 @@ data/
 
 # ─── Logs ───
 *.log
-logs/
+/logs/
+/webui/logs/
 api_error.log
 npm-debug.log*
 yarn-debug.log*
@@ -152,6 +153,7 @@ coverage.html
 *.coverprofile
 *.prof
 *.pprof
+*.trace
 # pprof 抓取落盘目录（cmd/twilight 的 TWILIGHT_PPROF_ADDR 只用于在线抓取，
 # 但 `go tool pprof -http` / 手工 curl 保存的快照不应进库）
 pprof/
@@ -188,9 +190,7 @@ ENV/
 Thumbs.db
 *.lnk
 desktop.ini
-*.bat
-*.cmd
-*.ps1
+# Shell / PowerShell scripts are source files; do not ignore by extension.
 
 # ─── Keys & Credentials ───
 *.pem
@@ -220,7 +220,6 @@ id_ecdsa.*
 # ─── Project-specific Local Files ───
 OPTIMIZATION_SUMMARY.md
 DEPLOY_LOCAL.txt
-/tests
 .claude/
 /memory/
 .notes/
@@ -260,3 +259,8 @@ kubeconfig*
 /.dev-*.txt
 # 本地 agent 工作目录（会话记忆、临时笔记），与仓库内容无关
 /.workbuddy/
+
+# Root-level scratch output from local checks (not source or fixtures).
+/_*.txt
+/.*.txt
+/artifacts/local/
