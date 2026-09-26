@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,12 +27,12 @@ const (
 )
 
 var migrationDataFileNames = map[string]struct{}{
-	"data/state.json":            {},
-	"data/runtime-logs.json":     {},
-	"data/audit-logs.json":       {},
-	"data/telegram-roster.json":  {},
-	"data/telegram-runtime.json": {},
-	"data/playback-records.json": {},
+	"data/state.json":                     {},
+	"data/runtime-logs.json":              {},
+	"data/audit-logs.json":                {},
+	"data/telegram-roster.json":           {},
+	"data/telegram-runtime.json":          {},
+	"data/playback-records.json":          {},
 	"data/trusted-playback-events.json":   {},
 	"data/trusted-playback-segments.json": {},
 	"data/trusted-playback-daily.json":    {},
@@ -169,7 +170,7 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 		failWithCode(w, http.StatusBadRequest, ErrMigrationArchiveBad, "迁移资源校验失败")
 		return
 	}
-	configContent, hasConfig, err := a.prepareMigrationConfig(archive)
+	_, hasConfig, err := a.prepareMigrationConfig(archive)
 	if err != nil {
 		failWithCode(w, http.StatusBadRequest, ErrMigrationArchiveBad, "迁移配置校验失败")
 		return
@@ -196,28 +197,11 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 		return
 	}
 
-	previousConfig, hadConfig := readOptionalFile(a.configFilePath())
-	if options.ApplyConfig {
-		info, status, message := a.saveConfigContent(configContent)
-		if status != http.StatusOK {
-			failWithCode(w, status, ErrMigrationImportFail, message)
-			return
-		}
-		_ = info
-	}
-	rollbackResources, err := a.applyMigrationResources(plan, options.ResourceMode == migrationResourceModeReplace)
-	if err != nil {
-		rollbackMigrationConfig(a, previousConfig, hadConfig)
-		failWithCode(w, http.StatusInternalServerError, ErrMigrationImportFail, "迁移资源写入失败")
+	status, message := a.applyMigrationImport(r, archive, plan, options)
+	if status != http.StatusOK {
+		failWithCode(w, status, ErrMigrationImportFail, message)
 		return
 	}
-	if _, err := a.store().ImportMigrationArchive(r.Context(), archive); err != nil {
-		rollbackResources()
-		rollbackMigrationConfig(a, previousConfig, hadConfig)
-		failWithCode(w, http.StatusInternalServerError, ErrMigrationImportFail, "迁移数据库导入失败")
-		return
-	}
-	rollbackResources = func() {}
 	summary["dry_run"] = false
 	summary["requires_confirmation"] = false
 	summary["config_applied"] = options.ApplyConfig
@@ -226,6 +210,75 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 		"files": len(archive.Files), "resources": len(plan.Entries), "config_applied": options.ApplyConfig,
 	})
 	ok(w, "迁移数据已导入", summary)
+}
+
+// Keep configuration application and failure rollback in one serialized scope.
+// A resource/database failure must never roll back another editor's newer file.
+func (a *App) applyMigrationImport(r *http.Request, archive migration.Archive, plan migrationResourcePlan, options migrationImportOptions) (int, string) {
+	status, message := http.StatusInternalServerError, "迁移导入失败"
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	err := config.WithWriteLock(ctx, a.configFilePath(), func() error {
+		a.runtimeMu.Lock()
+		defer a.runtimeMu.Unlock()
+		var previous, candidate []byte
+		var existed bool
+		if options.ApplyConfig {
+			snapshot, err := a.configEditSnapshot()
+			if err != nil {
+				message = "读取当前配置失败"
+				return nil
+			}
+			previous = []byte(snapshot.content)
+			_, statErr := os.Stat(a.configFilePath())
+			existed = statErr == nil
+			content, _, err := a.prepareMigrationConfigFromSnapshot(archive, snapshot)
+			if err != nil {
+				message = "迁移配置校验失败"
+				return nil
+			}
+			_, status, message = a.saveConfigContentLocked(content, snapshot.revision)
+			if status != http.StatusOK {
+				return nil
+			}
+			candidate, err = os.ReadFile(a.configFilePath())
+			if err != nil {
+				status, message = http.StatusInternalServerError, "读取已应用配置失败，请检查配置文件"
+				return nil
+			}
+		}
+		rollbackConfig := func() {
+			if !options.ApplyConfig {
+				return
+			}
+			if err := rollbackConfigCandidate(a.configFilePath(), string(candidate), previous, existed); err != nil {
+				message += "；配置回滚失败，请检查配置文件"
+				return
+			}
+			if _, err := a.reloadConfigLocked(); err != nil {
+				message += "；配置回滚后重载失败"
+			}
+		}
+		rollbackResources, commitResources, err := a.stageMigrationResources(plan, options.ResourceMode == migrationResourceModeReplace)
+		if err != nil {
+			status, message = http.StatusInternalServerError, "迁移资源写入失败"
+			rollbackConfig()
+			return nil
+		}
+		if _, err := a.store().ImportMigrationArchive(r.Context(), archive); err != nil {
+			rollbackResources()
+			status, message = http.StatusInternalServerError, "迁移数据库导入失败"
+			rollbackConfig()
+			return nil
+		}
+		commitResources()
+		status, message = http.StatusOK, ""
+		return nil
+	})
+	if err != nil {
+		return http.StatusServiceUnavailable, "迁移配置锁暂不可用，请稍后重试"
+	}
+	return status, message
 }
 
 func (a *App) migrationEnabled(w http.ResponseWriter) bool {
@@ -410,22 +463,27 @@ func validateMigrationUploadRoot(root string) error {
 }
 
 func (a *App) applyMigrationResources(plan migrationResourcePlan, replace bool) (func(), error) {
+	_, commit, err := a.stageMigrationResources(plan, replace)
+	return commit, err
+}
+
+func (a *App) stageMigrationResources(plan migrationResourcePlan, replace bool) (func(), func(), error) {
 	if len(plan.Entries) == 0 {
-		return func() {}, nil
+		return func() {}, func() {}, nil
 	}
 	root, err := filepath.Abs(firstNonEmpty(a.cfg().UploadDir, "uploads"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := validateMigrationUploadRoot(root); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tmp, err := os.MkdirTemp(filepath.Dir(root), ".twilight-migration-")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	changes := make([]migrationResourceRollbackEntry, 0, len(plan.Entries))
 	rollback := func() {
@@ -447,27 +505,27 @@ func (a *App) applyMigrationResources(plan migrationResourcePlan, replace bool) 
 		}
 		if entry.Exists && !replace {
 			rollback()
-			return nil, errMigrationResourceConflict
+			return nil, nil, errMigrationResourceConflict
 		}
 		if err := ensureMigrationParent(root, entry.TargetPath); err != nil {
 			rollback()
-			return nil, err
+			return nil, nil, err
 		}
 		backup := ""
 		if entry.Exists {
 			backup = filepath.Join(tmp, fmt.Sprintf("backup-%d", len(changes)))
 			if err := copyMigrationFile(entry.TargetPath, backup); err != nil {
 				rollback()
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if err := store.WriteFileAtomicSync(entry.TargetPath, entry.Data, 0o600); err != nil {
 			rollback()
-			return nil, err
+			return nil, nil, err
 		}
 		changes = append(changes, migrationResourceRollbackEntry{target: entry.TargetPath, backup: backup, existed: entry.Exists})
 	}
-	return func() { _ = os.RemoveAll(tmp) }, nil
+	return rollback, func() { _ = os.RemoveAll(tmp) }, nil
 }
 
 func ensureMigrationParent(root, target string) error {
@@ -508,6 +566,17 @@ func copyMigrationFile(source, target string) error {
 }
 
 func (a *App) prepareMigrationConfig(archive migration.Archive) (string, bool, error) {
+	if _, ok := archive.Files["config/effective.toml"]; !ok {
+		return "", false, nil
+	}
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		return "", false, err
+	}
+	return a.prepareMigrationConfigFromSnapshot(archive, snapshot)
+}
+
+func (a *App) prepareMigrationConfigFromSnapshot(archive migration.Archive, snapshot configEditSnapshot) (string, bool, error) {
 	content, ok := archive.Files["config/effective.toml"]
 	if !ok {
 		return "", false, nil
@@ -528,11 +597,11 @@ func (a *App) prepareMigrationConfig(archive migration.Archive) (string, bool, e
 	if err := tmp.Close(); err != nil {
 		return "", false, err
 	}
-	imported, err := config.Load(name)
+	imported, err := config.LoadFileOnly(name)
 	if err != nil {
 		return "", false, err
 	}
-	current := configValues(*a.cfg())
+	current := configValues(snapshot.file)
 	source := configValues(imported)
 	for section, fields := range source {
 		if current[section] == nil {
@@ -548,7 +617,8 @@ func (a *App) prepareMigrationConfig(archive migration.Archive) (string, bool, e
 			current[section][field] = value
 		}
 	}
-	return renderConfigTOML(current), true, nil
+	merged, err := mergeConfigTOML(snapshot.content, current)
+	return merged, true, err
 }
 
 func migrationConfigFieldPortable(section, field string) bool {
@@ -564,22 +634,6 @@ func migrationConfigFieldPortable(section, field string) bool {
 	default:
 		return true
 	}
-}
-
-func readOptionalFile(filename string) ([]byte, bool) {
-	data, err := os.ReadFile(filename)
-	return data, err == nil
-}
-
-func rollbackMigrationConfig(a *App, data []byte, existed bool) {
-	if existed {
-		if err := store.WriteFileAtomicSync(a.configFilePath(), data, 0o600); err == nil {
-			_, _ = a.reloadConfig()
-		}
-		return
-	}
-	_ = os.Remove(a.configFilePath())
-	_, _ = a.reloadConfig()
 }
 
 func migrationArchiveSummary(archive migration.Archive, plan migrationResourcePlan, hasConfig bool) map[string]any {
