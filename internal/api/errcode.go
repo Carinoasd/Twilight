@@ -14,6 +14,8 @@ package api
 type ErrCode = string
 
 const (
+	ErrConfigRevisionConflict    = "CONFIG_REVISION_CONFLICT"
+	ErrSchedulerRevisionConflict = "SCHEDULER_REVISION_CONFLICT"
 	// === 鉴权 / 会话 ===
 	ErrLoginRateLimited ErrCode = "AUTH_LOGIN_RATE_LIMITED"
 	ErrLoginInvalid     ErrCode = "AUTH_LOGIN_INVALID"
