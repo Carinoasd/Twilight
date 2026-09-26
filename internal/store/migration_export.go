@@ -145,6 +145,16 @@ func migrationStateTx(ctx context.Context, tx *sql.Tx) (State, error) {
 		}
 	}
 	state.ensure()
+	runs, err := schedulerQueueRows(ctx, tx)
+	if err != nil {
+		return State{}, err
+	}
+	state.SchedulerRuns = mergeSchedulerHistory(state.SchedulerRuns, runs)
+	for _, run := range state.SchedulerRuns {
+		if run.ID >= state.NextSchedulerRunID {
+			state.NextSchedulerRunID = run.ID + 1
+		}
+	}
 	return state, nil
 }
 

@@ -81,6 +81,10 @@ func (s *Store) ImportMigrationArchive(ctx context.Context, archive migration.Ar
 		return MigrationImportSummary{}, err
 	}
 	defer tx.Rollback()
+	// Use the same lock order as LoadSnapshot: scheduler gate before state row.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, schedulerQueueLock); err != nil {
+		return MigrationImportSummary{}, err
+	}
 
 	// Serialize with normal state writers before replacing the authoritative
 	// JSONB row. The row lock is held until the dedicated tables are restored.
@@ -97,6 +101,9 @@ func (s *Store) ImportMigrationArchive(ctx context.Context, archive migration.Ar
 	}
 
 	state := data.state
+	if err := resetSchedulerQueueTx(ctx, tx, &state); err != nil {
+		return MigrationImportSummary{}, err
+	}
 	state.RuntimeLogs = nil
 	state.AuditLogs = nil
 	state.TelegramRoster = nil

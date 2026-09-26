@@ -4843,59 +4843,48 @@ func telegramButtonLabelsContain(labels []string, want string) bool {
 	return false
 }
 
+func schedulerHistoryForTest(t *testing.T, app *App, id string) []store.SchedulerRun {
+	t.Helper()
+	overview, err := app.store().ReadSchedulerHistory(context.Background(), id, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return overview.Runs[id].Runs
+}
 func TestSchedulerManualRunUpdatesSingleHistoryEntry(t *testing.T) {
 	app := newTestApp(t)
-	run, okRun := app.startManualSchedulerJob(context.Background(), "daily_stats", nil)
-	if !okRun {
-		t.Fatal("manual scheduler job did not start")
+	run, ok := app.startManualSchedulerJob(context.Background(), "daily_stats", nil)
+	if !ok {
+		t.Fatal("enqueue failed")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	before := schedulerHistoryForTest(t, app, "daily_stats")
+	if len(before) != 1 || before[0].Status != "queued" {
+		t.Fatalf("not queued: %#v", before)
+	}
+	app.claimSchedulerJobs(context.Background())
+	deadline := time.Now().Add(3 * time.Second)
 	for app.schedulerJobRunning("daily_stats") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if app.schedulerJobRunning("daily_stats") {
-		t.Fatal("manual scheduler job did not finish")
-	}
-	runs := app.store().SchedulerRuns("daily_stats", 10)
-	if len(runs) != 1 {
-		t.Fatalf("manual run should update one history entry, got %d: %#v", len(runs), runs)
-	}
-	if runs[0].ID != run.ID || runs[0].Status != "success" || runs[0].Type != "manual" || runs[0].FinishedAt == 0 {
-		t.Fatalf("unexpected manual run history: %#v", runs[0])
+	runs := schedulerHistoryForTest(t, app, "daily_stats")
+	if len(runs) != 1 || runs[0].ID != run.ID || runs[0].Status != "success" || runs[0].FinishedAt == 0 {
+		t.Fatalf("unexpected history: %#v", runs)
 	}
 }
-
-// TestSchedulerAutoRunRecordVisibleBeforeReturn 复现 R56-1：之前 daemon 用
-// `go a.runScheduledJob` 异步起动，AddSchedulerRunReturning 还没落库 daemon
-// 主循环就推进到下一轮 tick，schedulerJobDue 看不到新 auto 记录就再判 due
-// 一次。改造后 runScheduledJob 在拿到锁 + INSERT 完成之前 *不* 返回，重活
-// 仍走内层 goroutine。这条测试在 runScheduledJob 返回的瞬间断言 PG 已经有
-// 这条 running 记录——即拿到了"daemon 视角下的 last 已经更新"的可观测保证。
 func TestSchedulerAutoRunRecordVisibleBeforeReturn(t *testing.T) {
 	app := newTestApp(t)
-	before := app.store().SchedulerRuns("daily_stats", 10)
-	if len(before) != 0 {
-		t.Fatalf("precondition: expected no daily_stats runs, got %d", len(before))
-	}
 	app.runScheduledJob(context.Background(), "daily_stats")
-	// 同步段返回时记录必须已经在 store 里——不论内层 goroutine 是否已经 finish。
-	immediate := app.store().SchedulerRuns("daily_stats", 10)
-	if len(immediate) != 1 {
-		t.Fatalf("auto run record not persisted before runScheduledJob returned: %#v", immediate)
+	runs := schedulerHistoryForTest(t, app, "daily_stats")
+	if len(runs) != 1 || runs[0].Type != "auto" || runs[0].Status != "queued" {
+		t.Fatalf("enqueue not durable: %#v", runs)
 	}
-	if immediate[0].Type != "auto" || immediate[0].Trigger != "scheduler" {
-		t.Fatalf("unexpected auto run row: %#v", immediate[0])
-	}
-	deadline := time.Now().Add(2 * time.Second)
+	app.claimSchedulerJobs(context.Background())
+	deadline := time.Now().Add(3 * time.Second)
 	for app.schedulerJobRunning("daily_stats") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if app.schedulerJobRunning("daily_stats") {
-		t.Fatal("auto scheduler job did not finish in time")
-	}
-	final := app.store().SchedulerRuns("daily_stats", 10)
-	if len(final) != 1 || final[0].ID != immediate[0].ID || final[0].Status != "success" || final[0].FinishedAt == 0 {
-		t.Fatalf("auto run did not converge to success: %#v", final)
+	if got := schedulerHistoryForTest(t, app, "daily_stats"); len(got) != 1 || got[0].Status != "success" {
+		t.Fatalf("unexpected history: %#v", got)
 	}
 }
 
@@ -4972,7 +4961,7 @@ func TestSchedulerJobsReconcileStaleRunningHistory(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("jobs status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	runs := app.store().SchedulerRuns("enforce_group_membership", 1)
+	runs := schedulerHistoryForTest(t, app, "enforce_group_membership")
 	if len(runs) != 1 || runs[0].ID != run.ID || runs[0].Status == "running" || runs[0].FinishedAt == 0 {
 		t.Fatalf("stale running history was not reconciled: %#v", runs)
 	}
@@ -5060,35 +5049,31 @@ func TestSchedulerTerminateIsIdempotentWhenJobAlreadyStopped(t *testing.T) {
 	}
 }
 
-func TestSchedulerTerminateMarksRunningRunImmediately(t *testing.T) {
+func TestSchedulerTerminateKeepsLockUntilExecutionStops(t *testing.T) {
 	app := newTestApp(t)
-	runCtx, processRun, finish, ok := app.startSchedulerRun(context.Background(), "enforce_group_membership")
+	runCtx, _, finish, ok := app.startSchedulerRun(context.Background(), "daily_stats")
 	if !ok {
-		t.Fatal("scheduler run did not start")
+		t.Fatal("lock unavailable")
 	}
 	defer finish()
-	run, err := app.store().AddSchedulerRunReturning(store.SchedulerRun{JobID: "enforce_group_membership", Type: "manual", Trigger: "manual", Status: "running", Message: "running", StartedAt: time.Now().Unix()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	processRun.runID.Store(run.ID)
-	if !app.terminateSchedulerJob("enforce_group_membership") {
-		t.Fatal("terminateSchedulerJob returned false")
+	if !app.terminateSchedulerJob("daily_stats") {
+		t.Fatal("cancel failed")
 	}
 	select {
 	case <-runCtx.Done():
 	default:
-		t.Fatal("terminate did not cancel run context")
+		t.Fatal("context not cancelled")
 	}
-	if app.schedulerJobRunning("enforce_group_membership") {
-		t.Fatal("terminated job should be removed from process lock table")
+	if !app.schedulerJobRunning("daily_stats") {
+		t.Fatal("released before execution stopped")
 	}
-	runs := app.store().SchedulerRuns("enforce_group_membership", 1)
-	if len(runs) != 1 || runs[0].ID != run.ID {
-		t.Fatalf("unexpected scheduler runs: %#v", runs)
+	_, _, _, started := app.startSchedulerRun(context.Background(), "daily_stats")
+	if started {
+		t.Fatal("overlapping execution allowed")
 	}
-	if runs[0].Status != "failed" || runs[0].Message != "job terminated by administrator" || runs[0].FinishedAt == 0 || !boolish(runs[0].Summary["terminated"]) {
-		t.Fatalf("terminated run was not persisted immediately: %#v", runs[0])
+	finish()
+	if app.schedulerJobRunning("daily_stats") {
+		t.Fatal("lock not released after completion")
 	}
 }
 
@@ -5108,7 +5093,9 @@ func TestSchedulerTerminatedRunNotOverwrittenByLateCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.executeSchedulerRun(context.Background(), run, "daily_stats", "manual", "manual", "/scheduler/manual", started, nil, true, func() {})
+	if err := app.store().FinishSchedulerRun(context.Background(), run, "stale-owner"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected stale-owner rejection: %v", err)
+	}
 	runs := app.store().SchedulerRuns("daily_stats", 1)
 	if len(runs) != 1 || runs[0].ID != run.ID {
 		t.Fatalf("unexpected scheduler runs: %#v", runs)
