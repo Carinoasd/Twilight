@@ -432,21 +432,29 @@ type SigninRecord struct {
 }
 
 type SchedulerRun struct {
-	ID         int64          `json:"id"`
-	JobID      string         `json:"job_id"`
-	Type       string         `json:"type"`
-	Trigger    string         `json:"trigger"`
-	Status     string         `json:"status"`
-	Message    string         `json:"message"`
-	Summary    map[string]any `json:"summary,omitempty"`
-	Logs       []string       `json:"logs,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	StartedAt  int64          `json:"started_at"`
-	FinishedAt int64          `json:"finished_at,omitempty"`
-	EndedAt    int64          `json:"ended_at"`
+	CreatedAt        int64          `json:"created_at,omitempty"`
+	HeartbeatAt      int64          `json:"heartbeat_at,omitempty"`
+	LeaseUntil       int64          `json:"lease_until,omitempty"`
+	Owner            string         `json:"-"`
+	Params           map[string]any `json:"params,omitempty"`
+	ScheduleRevision int64          `json:"schedule_revision,omitempty"`
+	ConfigRevision   string         `json:"config_revision,omitempty"`
+	ID               int64          `json:"id"`
+	JobID            string         `json:"job_id"`
+	Type             string         `json:"type"`
+	Trigger          string         `json:"trigger"`
+	Status           string         `json:"status"`
+	Message          string         `json:"message"`
+	Summary          map[string]any `json:"summary,omitempty"`
+	Logs             []string       `json:"logs,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	StartedAt        int64          `json:"started_at"`
+	FinishedAt       int64          `json:"finished_at,omitempty"`
+	EndedAt          int64          `json:"ended_at"`
 }
 
 type SchedulerSchedule struct {
+	Revision      int64          `json:"revision"`
 	JobID         string         `json:"job_id"`
 	TriggerSpec   map[string]any `json:"trigger_spec"`
 	RuntimeParams map[string]any `json:"runtime_params,omitempty"`
@@ -1267,6 +1275,18 @@ func (s *Store) Snapshot() ([]byte, error) {
 		return nil, err
 	}
 	state.TelegramRoster = roster
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runs, err := schedulerQueueRows(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	state.SchedulerRuns = mergeSchedulerHistory(state.SchedulerRuns, runs)
+	for _, run := range state.SchedulerRuns {
+		if run.ID >= state.NextSchedulerRunID {
+			state.NextSchedulerRunID = run.ID + 1
+		}
+	}
 	return json.MarshalIndent(state, "", "  ")
 }
 
@@ -1381,6 +1401,10 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err = resetSchedulerQueueTx(ctx, tx, &s.state); err != nil {
+		s.restoreStateLocked(before)
+		return err
+	}
 	raw, version, err := s.saveStateInTxLocked(ctx, tx, true)
 	if err == nil {
 		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges`)

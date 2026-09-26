@@ -89,13 +89,17 @@ func (a *App) handleSchedulerRunV2(w http.ResponseWriter, r *http.Request, param
 		failWithCode(w, http.StatusNotFound, ErrSchedulerJobNotFound, "调度任务不存在")
 		return
 	}
-	run, okRun := a.startManualSchedulerJob(context.Background(), jobID, schedulerRequestParams(r))
+	run, okRun, err := a.enqueueSchedulerJob(r.Context(), jobID, schedulerRequestParams(r), "manual")
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "任务入队失败，请稍后重试")
+		return
+	}
 	if !okRun {
 		failWithCode(w, http.StatusConflict, ErrSchedulerJobRunning, "调度任务正在运行中")
 		return
 	}
 	a.audit(r, "scheduler_run", "admin", 0, map[string]any{"job_id": jobID, "run_id": run.ID, "type": "manual"})
-	ok(w, "job started", map[string]any{"job_id": run.JobID, "last_run": run})
+	ok(w, "job queued", map[string]any{"job_id": run.JobID, "last_run": run})
 }
 
 func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []string, error) {
@@ -910,6 +914,9 @@ func schedulerRequestParams(r *http.Request) map[string]any {
 }
 
 func (a *App) schedulerEffectiveParams(r *http.Request, jobID string) map[string]any {
+	if params, ok := r.Context().Value(schedulerFrozenParamsKey{}).(map[string]any); ok {
+		return params
+	}
 	var stored map[string]any
 	if schedule, ok := a.store().SchedulerSchedule(jobID); ok {
 		stored = schedule.RuntimeParams

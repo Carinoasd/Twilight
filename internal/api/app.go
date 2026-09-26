@@ -131,7 +131,8 @@ type App struct {
 	// 测试 setup 反复 New() 出多个 App 时这张表共享 → 一个 case cancel 的 job
 	// 让另一 case 的 LoadOrStore 误判为 already running，flake 出现。收回到
 	// instance 字段后每个 App 自带独立锁表。零值即可使用。
-	schedulerLocks sync.Map
+	schedulerLocks   sync.Map
+	schedulerWorkers sync.WaitGroup
 }
 
 // runtimeState 把 reload 期间会一并替换的运行时句柄打包成一个不可变快照，
@@ -466,10 +467,20 @@ func (a *App) Routes() []Route {
 }
 
 func (a *App) reloadConfig() (map[string]any, error) {
-	a.runtimeMu.Lock()
-	defer a.runtimeMu.Unlock()
-	return a.reloadConfigLocked()
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	var info map[string]any
+	err := config.WithWriteLock(ctx, a.configFilePath(), func() error {
+		a.runtimeMu.Lock()
+		defer a.runtimeMu.Unlock()
+		var err error
+		info, err = a.reloadConfigLocked()
+		return err
+	})
+	return info, err
 }
+
+var errSchedulerRuntimeBusy = errors.New("active scheduler runs must stop before replacing runtime resources")
 
 func (a *App) reloadConfigLocked() (map[string]any, error) {
 	prevState := a.runtimeSnapshot()
@@ -482,6 +493,13 @@ func (a *App) reloadConfigLocked() (map[string]any, error) {
 		return nil, err
 	}
 
+	if storeBackendChanged(previous, next) || previous.RedisURL != next.RedisURL || previous.SessionTTL != next.SessionTTL {
+		active := false
+		a.schedulerLocks.Range(func(_, _ any) bool { active = true; return false })
+		if active {
+			return nil, errSchedulerRuntimeBusy
+		}
+	}
 	// 在快照副本上累积所有变更：开新 store / 新 redis / 新 sessions 等都先
 	// 写 nextState，最后一次 atomic.Store 把整组 hot 字段一并切换。读端走
 	// 访问器只能看到旧快照或新快照两种自洽视图，不会出现"cfg 已是 next、
@@ -510,6 +528,9 @@ func (a *App) reloadConfigLocked() (map[string]any, error) {
 	if previous.RedisURL != next.RedisURL || previous.SessionTTL != next.SessionTTL {
 		redisClient, err := newRedisClient(next)
 		if err != nil {
+			if closeOldStore {
+				_ = nextState.store.Close()
+			}
 			return nil, err
 		}
 		nextState.sessions = newSessionStoreWithDB(next.SessionTTL, redisClient, nextState.store)
@@ -681,28 +702,31 @@ func (a *App) reloadConfigIfChanged() {
 	}
 	current := configFileSignature(a.cfg().ConfigFile)
 	a.runtimeMu.Lock()
-	if current == "" || current == a.configSignature {
-		a.runtimeMu.Unlock()
-		return
-	}
-	info, err := a.reloadConfigLocked()
-	if err != nil {
-		// 失败也要把 configSignature 推到当前值。否则只要 admin 写错一次配置，
-		// 每个 ServeHTTP 都会再走一次 reloadConfigLocked → config.Read →
-		// 同样的解析错误，QPS 直接归零。等 admin 真的再改一次文件、
-		// signature 再次变化，自然会触发下一轮 reload 重试。
-		a.configSignature = current
-		a.runtimeMu.Unlock()
-		zap.L().Warn("config hot reload check failed", zap.Error(err))
-		return
-	}
+	unchanged := current == "" || current == a.configSignature
 	a.runtimeMu.Unlock()
-	// 与 scheduler_daemon.go / telegram_bot.go 对齐：日志值统一走
-	// redactSensitiveText 而非 zap.Any 反射 dump。当前 info 仅包含元数据
-	// （reloaded / reinitialized 等），但任何未来加进来的字段（如 emby_url
-	// / database_url 摘要）一旦上线就会沿用同一条日志路径，提前把敏感
-	// 字段拦在 redact 这一步比逐 PR 审查每个新字段稳妥。
-	zap.L().Info("config file change applied", zap.String("reload", redactSensitiveText(fmt.Sprintf("%+v", info))))
+	if unchanged {
+		return
+	}
+	// A hot-reload reader must not publish another process's uncommitted file.
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err := config.WithWriteLock(ctx, a.configFilePath(), func() error {
+		a.runtimeMu.Lock()
+		defer a.runtimeMu.Unlock()
+		current = configFileSignature(a.cfg().ConfigFile)
+		if current == "" || current == a.configSignature {
+			return nil
+		}
+		_, err := a.reloadConfigLocked()
+		if err != nil && !errors.Is(err, errSchedulerRuntimeBusy) {
+			a.configSignature = current
+		}
+		return err
+	})
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errSchedulerRuntimeBusy) {
+		zap.L().Warn("config hot reload check failed", zap.Error(err))
+	}
+
 }
 
 func configFileSignature(path string) string {

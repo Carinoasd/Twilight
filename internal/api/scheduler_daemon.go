@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,7 +17,6 @@ import (
 
 const (
 	schedulerRunningWindowSeconds      = int64(30 * 60)
-	schedulerAutoConcurrency           = 4
 	schedulerMaxPersistedLogLines      = 100
 	schedulerMaxPersistedTextRunes     = 1024
 	schedulerMaxPersistedErrorRunes    = 2048
@@ -28,6 +26,9 @@ const (
 )
 
 func (a *App) RunScheduler(ctx context.Context) error {
+	// The CLI closes shared stores only after this method returns. Keep leases
+	// and persistence available until cancelled executions finish unwinding.
+	defer a.schedulerWorkers.Wait()
 	zap.L().Info("scheduler runner started")
 	// 主循环 panic 兜底：reloadConfigIfChanged / runDueSchedulerJobs 调用栈深，
 	// 一处空指针或 map race 会让整个 RunScheduler 协程退出，所有定时任务静默
@@ -58,81 +59,72 @@ func (a *App) runSchedulerLoop(ctx context.Context) (err error) {
 			// panic value 可能携带敏感字段，强制走 redactSensitiveText 字符串路径，
 			// 不走 zap.Any 的反射 dump。
 			zap.L().Error("scheduler loop panic", zap.String("panic", redactSensitiveText(fmt.Sprintf("%v", r))))
-			err = fmt.Errorf("scheduler loop panic: %v", r)
+			err = fmt.Errorf("scheduler loop panic")
 		}
 	}()
-	ticker := time.NewTicker(time.Duration(clamp(a.cfg().SchedulerTickIntervalSeconds, 10, 300)) * time.Second)
-	defer ticker.Stop()
-	a.runDueSchedulerJobs(ctx)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	var nextDue time.Time
+	var lastInterval int
 	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		a.reloadConfigIfChanged()
+		now := time.Now()
+		interval := clamp(a.cfg().SchedulerTickIntervalSeconds, 10, 300)
+		if interval != lastInterval {
+			nextDue = time.Time{}
+			lastInterval = interval
+		}
+		if !now.Before(nextDue) {
+			a.runDueSchedulerJobs(ctx)
+			nextDue = now.Add(time.Duration(clamp(a.cfg().SchedulerTickIntervalSeconds, 10, 300)) * time.Second)
+		}
+		a.claimSchedulerJobs(ctx)
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticker.C:
-			a.reloadConfigIfChanged()
-			a.runDueSchedulerJobs(ctx)
+		case <-tick.C:
 		}
 	}
 }
 
 func (a *App) runDueSchedulerJobs(ctx context.Context) {
-	cfg := a.cfg()
-	if !cfg.SchedulerEnabled {
+	if !a.cfg().SchedulerEnabled {
+		return
+	}
+	if err := a.store().Refresh(); err != nil {
+		zap.L().Warn("scheduler state unavailable")
+		return
+	}
+	ids := make([]string, 0, len(schedulerJobs))
+	for _, job := range schedulerJobs {
+		if !boolish(job["manual_only"]) && schedulerJobEnabledByConfig(a.cfg().SystemUpdateEnabled, job) {
+			ids = append(ids, fmt.Sprint(job["id"]))
+		}
+	}
+	overview, err := a.store().ReadSchedulerOverview(ctx, ids, 20)
+	if err != nil {
+		zap.L().Warn("scheduler history unavailable")
 		return
 	}
 	now := time.Now()
-	jobIDs := make([]string, 0, len(schedulerJobs))
-	activeJobIDs := make(map[string]bool)
-	for _, job := range schedulerJobs {
-		jobID := fmt.Sprint(job["id"])
-		if jobID == "" || boolish(job["manual_only"]) || !schedulerJobEnabledByConfig(cfg.SystemUpdateEnabled, job) {
-			continue
-		}
-		jobIDs = append(jobIDs, jobID)
-		if a.schedulerJobRunning(jobID) {
-			activeJobIDs[jobID] = true
-		}
-	}
-	if len(jobIDs) == 0 {
-		return
-	}
-	overview, err := a.store().SchedulerStateOverview(jobIDs, 20, activeJobIDs, now.Unix()-schedulerRunningWindowSeconds, now.Unix())
-	if err != nil {
-		zap.L().Warn("scheduler state refresh failed", zap.Error(err))
-		return
-	}
-	dueIDs := make([]string, 0, len(jobIDs))
-	for _, jobID := range jobIDs {
-		spec := a.schedulerDefaultTriggerSpec(jobID)
-		if schedule, ok := overview.Schedules[jobID]; ok && len(schedule.TriggerSpec) > 0 {
+	for _, id := range ids {
+		spec := a.schedulerDefaultTriggerSpec(id)
+		schedule := overview.Schedules[id]
+		if schedule.IsCustom {
 			spec = schedule.TriggerSpec
 		}
-		if schedulerTriggerDisabled(spec) || !schedulerJobDueFromSnapshot(spec, now, overview.Runs[jobID]) {
+		if schedulerTriggerDisabled(spec) || !schedulerJobDueFromSnapshot(spec, now, overview.Runs[id]) {
 			continue
 		}
-		dueIDs = append(dueIDs, jobID)
-	}
-	if len(dueIDs) == 0 {
-		return
-	}
-	sem := make(chan struct{}, schedulerAutoConcurrency)
-	for _, jobID := range dueIDs {
-		sem <- struct{}{}
-		go func(id string) {
-			defer func() {
-				<-sem
-				if r := recover(); r != nil {
-					zap.L().Error("scheduler auto job launch panic",
-						zap.String("job_id", id),
-						zap.String("panic", redactSensitiveText(fmt.Sprintf("%v", r))))
-				}
-			}()
-			a.runScheduledJob(ctx, id)
-		}(jobID)
-	}
-	// Block until all due jobs have completed their lock+insert phase.
-	for range schedulerAutoConcurrency {
-		sem <- struct{}{}
+		last := overview.Runs[id].LatestAuto.ID
+		params := a.schedulerRuntimeParamsFromSchedule(id, schedule.RuntimeParams)
+		_, _, err = a.store().EnqueueSchedulerRun(ctx, store.SchedulerRun{JobID: id, Type: "auto", Trigger: "scheduler", Params: params, ScheduleRevision: schedule.Revision}, &last)
+		if err != nil {
+			zap.L().Warn("scheduler enqueue failed", zap.String("job_id", id))
+		}
 	}
 }
 
@@ -162,6 +154,9 @@ func schedulerJobDueFromSnapshot(spec map[string]any, now time.Time, snapshot st
 	last := int64(0)
 	if snapshot.HasLatestAuto {
 		last = snapshot.LatestAuto.StartedAt
+		if last == 0 {
+			last = snapshot.LatestAuto.CreatedAt
+		}
 	}
 	switch strings.ToLower(asString(spec["type"])) {
 	case "cron_daily", "daily":
@@ -178,102 +173,23 @@ func schedulerJobDueFromSnapshot(spec map[string]any, now time.Time, snapshot st
 }
 
 func schedulerSnapshotRecentlyRunning(snapshot store.SchedulerRunSnapshot, now time.Time) bool {
-	return snapshot.HasLatestRunning && now.Unix()-snapshot.LatestRunning.StartedAt < schedulerRunningWindowSeconds
+	return snapshot.HasLatestRunning && (snapshot.LatestRunning.Status == "queued" || snapshot.LatestRunning.LeaseUntil > now.Unix() || (snapshot.LatestRunning.LeaseUntil == 0 && now.Unix()-snapshot.LatestRunning.StartedAt < schedulerRunningWindowSeconds))
 }
 
+// Compatibility entry points enqueue only. A running scheduler/all worker owns execution.
 func (a *App) runScheduledJob(ctx context.Context, jobID string) {
-	// 同步段：拿锁 + INSERT auto run 记录。daemon 在这两步完成前 *不* 返回，
-	// 保证下一轮 30s tick 调用 schedulerJobDue 时 PG 已经能看到这条 auto 行；
-	// 之前整个函数运行在 `go a.runScheduledJob` 里，慢 PG 上 INSERT 还没落
-	// 盘 ticker 就推进了，schedulerJobDue 看不到 last → 又一次判定 due → 同
-	// job 并发起跑。重活仍在内层 goroutine 跑，daemon 主循环不会被堵住。
-	runCtx, processRun, finish, ok := a.startSchedulerRun(ctx, jobID)
-	if !ok {
-		return
-	}
-	started := time.Now().Unix()
-	run, acquired, err := a.store().TryStartSchedulerRun(store.SchedulerRun{JobID: jobID, Type: "auto", Trigger: "scheduler", Status: "running", Message: "running", StartedAt: started}, started-schedulerRunningWindowSeconds, started)
+	_, _, err := a.enqueueSchedulerJob(ctx, jobID, nil, "auto")
 	if err != nil {
-		finish()
-		zap.L().Warn("scheduler job run record create failed", zap.String("job_id", jobID), zap.Error(err))
-		return
+		zap.L().Warn("scheduler enqueue failed", zap.String("job_id", jobID))
 	}
-	if !acquired {
-		finish()
-		zap.L().Debug("scheduler job already running in shared state", zap.String("job_id", jobID))
-		return
-	}
-	processRun.runID.Store(run.ID)
-	if processRun.terminated.Load() {
-		a.markSchedulerRunTerminated(run.ID)
-	}
-	zap.L().Info("scheduler job started", zap.String("job_id", jobID), zap.String("type", "auto"), zap.Int64("run_id", run.ID))
-	go a.executeSchedulerRun(runCtx, run, jobID, "auto", "scheduler", "/scheduler/internal", started, nil, false, finish)
 }
 
 func (a *App) startManualSchedulerJob(ctx context.Context, jobID string, params map[string]any) (store.SchedulerRun, bool) {
-	runCtx, processRun, finish, ok := a.startSchedulerRun(ctx, jobID)
-	if !ok {
-		return store.SchedulerRun{}, false
-	}
-	started := time.Now().Unix()
-	run, acquired, err := a.store().TryStartSchedulerRun(store.SchedulerRun{JobID: jobID, Type: "manual", Trigger: "manual", Status: "running", Message: "running", StartedAt: started}, started-schedulerRunningWindowSeconds, started)
+	run, created, err := a.enqueueSchedulerJob(ctx, jobID, params, "manual")
 	if err != nil {
-		finish()
-		zap.L().Warn("manual scheduler job run record create failed", zap.String("job_id", jobID), zap.Error(err))
-		return store.SchedulerRun{}, false
+		zap.L().Warn("scheduler enqueue failed", zap.String("job_id", jobID))
 	}
-	if !acquired {
-		finish()
-		return store.SchedulerRun{}, false
-	}
-	processRun.runID.Store(run.ID)
-	if processRun.terminated.Load() {
-		a.markSchedulerRunTerminated(run.ID)
-	}
-	zap.L().Info("scheduler job started", zap.String("job_id", jobID), zap.String("type", "manual"), zap.Int64("run_id", run.ID))
-	go a.executeSchedulerRun(runCtx, run, jobID, "manual", "manual", "/scheduler/manual", started, params, true, finish)
-	return run, true
-}
-
-func (a *App) executeSchedulerRun(runCtx context.Context, run store.SchedulerRun, jobID, runType, trigger, requestPath string, started int64, params map[string]any, manual bool, finish func()) {
-	var (
-		summary map[string]any
-		logs    []string
-		jobErr  error
-	)
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			panicText := redactSensitiveText(fmt.Sprintf("%v", recovered))
-			jobErr = fmt.Errorf("scheduler job panic: %s", panicText)
-			summary = map[string]any{"success": false, "panic": true}
-			logs = append(logs, "job panic: "+panicText)
-			zap.L().Error("scheduler job panic", zap.String("job_id", jobID), zap.Int64("run_id", run.ID), zap.String("panic", panicText))
-		}
-		finished := schedulerFinishedRun(jobID, runType, trigger, started, summary, logs, jobErr)
-		finished.ID = run.ID
-		if _, updateErr := a.store().UpdateSchedulerRun(run.ID, func(current *store.SchedulerRun) error {
-			if schedulerRunTerminatedByAdministrator(*current) {
-				return nil
-			}
-			*current = finished
-			return nil
-		}); updateErr != nil {
-			zap.L().Warn("scheduler job run record update failed", zap.String("job_id", jobID), zap.Int64("run_id", run.ID), zap.Error(updateErr))
-		}
-		if jobErr != nil {
-			zap.L().Warn("scheduler job failed", zap.String("job_id", jobID), zap.String("type", runType), zap.Error(jobErr))
-		} else {
-			zap.L().Info("scheduler job completed", zap.String("job_id", jobID), zap.String("type", runType))
-		}
-		finish()
-	}()
-	req, _ := http.NewRequestWithContext(runCtx, http.MethodPost, requestPath, nil)
-	if manual {
-		req = req.WithContext(context.WithValue(req.Context(), schedulerParamsContextKey, params))
-		req = req.WithContext(context.WithValue(req.Context(), schedulerManualContextKey, true))
-	}
-	summary, logs, jobErr = a.runSchedulerJob(req, jobID)
+	return run, created && err == nil
 }
 
 func schedulerFinishedRun(jobID, runType, trigger string, started int64, summary map[string]any, logs []string, err error) store.SchedulerRun {
@@ -456,6 +372,9 @@ func schedulerNextRunAtFromSnapshot(spec map[string]any, now time.Time, snapshot
 	last := int64(0)
 	if snapshot.HasLatestAuto {
 		last = snapshot.LatestAuto.StartedAt
+		if last == 0 {
+			last = snapshot.LatestAuto.CreatedAt
+		}
 	}
 	switch strings.ToLower(asString(spec["type"])) {
 	case "cron_daily", "daily":
@@ -463,7 +382,7 @@ func schedulerNextRunAtFromSnapshot(spec map[string]any, now time.Time, snapshot
 		minute := clamp(int(numeric(spec["minute"])), 0, 59)
 		due := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
 		if !now.Before(due) || last >= due.Unix() {
-			due = due.Add(24 * time.Hour)
+			due = due.AddDate(0, 0, 1)
 		}
 		return due.Unix()
 	case "interval":
@@ -591,44 +510,6 @@ func (a *App) terminateSchedulerJob(jobID string) bool {
 	}
 	run.terminated.Store(true)
 	run.cancel()
-	a.markSchedulerRunTerminated(run.runID.Load())
-	// 立即把 jobID 从注册表里摘掉。原实现只 cancel，依赖 runSchedulerJob 自己
-	// 的 finish() 闭包在 deferred 里 Delete；但被取消的任务若卡在不响应 ctx
-	// 的远端调用（emby 慢响应、git pull 远端无应答、Bangumi 5xx 无超时），
-	// finish() 永不执行，下一次 admin 点"重跑"被 LoadOrStore 短路成 not started。
-	// finish() 的 `current == run` 守卫保证：旧 goroutine 若日后真的醒来，
-	// 不会误删新一轮起的同名任务。
-	if current, ok := a.schedulerLocks.Load(jobID); ok && current == run {
-		a.schedulerLocks.Delete(jobID)
-	}
+
 	return true
-}
-
-func (a *App) markSchedulerRunTerminated(runID int64) {
-	if runID == 0 {
-		return
-	}
-	now := time.Now().Unix()
-	if _, err := a.store().UpdateSchedulerRun(runID, func(current *store.SchedulerRun) error {
-		if current.Status != "running" {
-			return nil
-		}
-		current.Status = "failed"
-		current.Message = "job terminated by administrator"
-		current.Error = current.Message
-		current.FinishedAt = now
-		current.EndedAt = now
-		if current.Summary == nil {
-			current.Summary = map[string]any{}
-		}
-		current.Summary["success"] = false
-		current.Summary["terminated"] = true
-		return nil
-	}); err != nil && !errors.Is(err, store.ErrNotFound) {
-		zap.L().Warn("scheduler job run termination update failed", zap.Int64("run_id", runID), zap.Error(err))
-	}
-}
-
-func schedulerRunTerminatedByAdministrator(run store.SchedulerRun) bool {
-	return run.Status != "running" && run.Message == "job terminated by administrator" && boolish(run.Summary["terminated"])
 }

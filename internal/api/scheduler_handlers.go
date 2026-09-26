@@ -1,8 +1,10 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
@@ -43,11 +45,10 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		jobIDs = append(jobIDs, fmt.Sprint(job["id"]))
 	}
 	activeJobIDs := a.schedulerActiveJobIDs(jobIDs)
-	overview, err := a.store().SchedulerStateOverview(jobIDs, 20, activeJobIDs, now.Unix()-schedulerRunningWindowSeconds, now.Unix())
+	overview, err := a.store().ReadSchedulerOverview(r.Context(), jobIDs, 20)
 	if err != nil {
-		zap.L().Warn("scheduler overview refresh failed; using in-memory snapshot", zap.Error(err))
-		overview.Runs = a.store().BatchSchedulerRunSnapshots(jobIDs, 20)
-		overview.Schedules = a.store().SchedulerSchedules(jobIDs)
+		fail(w, http.StatusServiceUnavailable, "调度状态暂不可用")
+		return
 	}
 
 	for i, job := range schedulerJobs {
@@ -60,7 +61,11 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 			spec = map[string]any{"type": "manual"}
 			item["is_custom"] = false
 			item["runtime_params"] = a.schedulerDefaultRuntimeParams(jobID)
-		} else if schedule, okSchedule := overview.Schedules[jobID]; okSchedule {
+			if schedule := overview.Schedules[jobID]; schedule.IsCustom {
+				item["is_custom"] = true
+				item["runtime_params"] = a.schedulerRuntimeParamsFromSchedule(jobID, schedule.RuntimeParams)
+			}
+		} else if schedule, okSchedule := overview.Schedules[jobID]; okSchedule && schedule.IsCustom {
 			spec = schedule.TriggerSpec
 			item["is_custom"] = schedule.IsCustom
 			item["runtime_params"] = a.schedulerRuntimeParamsFromSchedule(jobID, schedule.RuntimeParams)
@@ -69,6 +74,7 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 			item["is_custom"] = false
 			item["runtime_params"] = a.schedulerDefaultRuntimeParams(jobID)
 		}
+		item["schedule_revision"] = overview.Schedules[jobID].Revision
 		item["trigger_spec"] = spec
 		item["default_trigger_spec"] = a.schedulerDefaultTriggerSpec(jobID)
 		item["last_run"] = nil
@@ -97,17 +103,22 @@ func (a *App) handleSchedulerTerminate(w http.ResponseWriter, r *http.Request, p
 		failWithCode(w, http.StatusNotFound, ErrSchedulerJobNotFound, "调度任务不存在")
 		return
 	}
-	if !a.terminateSchedulerJob(jobID) {
-		a.reconcileSchedulerRunState(jobID, false, time.Now())
-		a.audit(r, "scheduler_terminate", "admin", 0, map[string]any{"job_id": jobID, "terminated": false, "already_stopped": true})
-		ok(w, "job is not running", map[string]any{"job_id": jobID, "terminated": false, "already_stopped": true})
+	run, found, err := a.store().RequestSchedulerCancellation(r.Context(), jobID)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "取消请求暂不可用")
 		return
 	}
-	a.audit(r, "scheduler_terminate", "admin", 0, map[string]any{"job_id": jobID, "terminated": true})
-	ok(w, "job termination requested", map[string]any{"job_id": jobID, "terminated": true})
+	// The owner observes the persisted request on its heartbeat. Cancelling by
+	// job ID here could accidentally cancel a newer run after this one finishes.
+	a.audit(r, "scheduler_terminate", "admin", 0, map[string]any{"job_id": jobID, "cancel_requested": found})
+	ok(w, "cancellation request processed", map[string]any{"job_id": jobID, "cancel_requested": found, "terminated": found && run.Status == "cancelled", "already_stopped": !found, "last_run": run})
 }
 func (a *App) handleSchedulerLastRun(w http.ResponseWriter, r *http.Request, params Params) {
-	runs := a.schedulerRunsForRead(params["job_id"], 1, time.Now())
+	runs, err := a.schedulerRunsForRead(r, params["job_id"], 1)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "调度历史暂不可用")
+		return
+	}
 	var last any
 	if len(runs) > 0 {
 		last = schedulerRunListView(runs[0])
@@ -118,7 +129,11 @@ func (a *App) handleSchedulerHistory(w http.ResponseWriter, r *http.Request, par
 	// The UI only needs a short, bounded history. Do not let an arbitrary
 	// query value turn persisted log output into a large response.
 	limit := clamp(queryInt(r, "limit", 20), 1, 20)
-	runs := a.schedulerRunsForRead(params["job_id"], limit, time.Now())
+	runs, err := a.schedulerRunsForRead(r, params["job_id"], limit)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "调度历史暂不可用")
+		return
+	}
 	ok(w, "OK", map[string]any{"job_id": params["job_id"], "history": runs, "total": len(runs)})
 }
 func (a *App) handleSchedulerSchedule(w http.ResponseWriter, r *http.Request, params Params) {
@@ -127,16 +142,38 @@ func (a *App) handleSchedulerSchedule(w http.ResponseWriter, r *http.Request, pa
 		failWithCode(w, http.StatusNotFound, ErrSchedulerJobNotFound, "调度任务不存在")
 		return
 	}
+	var expected *int64
+	if raw := r.URL.Query().Get("expected_revision"); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 0 || value > 9007199254740991 {
+			fail(w, http.StatusBadRequest, "调度版本无效")
+			return
+		}
+		expected = &value
+	}
 	if r.Method == http.MethodDelete {
-		schedule, err := a.store().SetSchedulerSchedule(jobID, a.schedulerDefaultTriggerSpec(jobID), false)
+		schedule, err := a.store().SetSchedulerScheduleRevision(jobID, a.schedulerDefaultTriggerSpec(jobID), nil, false, expected)
+		if errors.Is(err, store.ErrConflict) {
+			failWithCode(w, http.StatusConflict, ErrSchedulerRevisionConflict, "调度配置已被修改，请重新加载")
+			return
+		}
 		if statusFromError(w, err) {
 			return
 		}
 		a.audit(r, "scheduler_reset_schedule", "admin", 0, map[string]any{"job_id": jobID})
-		ok(w, "schedule reset", map[string]any{"job_id": jobID, "trigger_spec": schedule.TriggerSpec, "runtime_params": a.schedulerDefaultRuntimeParams(jobID), "is_custom": false})
+		ok(w, "schedule reset", map[string]any{"job_id": jobID, "trigger_spec": schedule.TriggerSpec, "runtime_params": a.schedulerDefaultRuntimeParams(jobID), "is_custom": false, "schedule_revision": schedule.Revision})
 		return
 	}
 	payload := decodeMap(r)
+	if value, ok := payload["expected_revision"]; ok {
+		number, valid := value.(float64)
+		if !valid || number < 0 || number > 9007199254740991 || number != float64(int64(number)) {
+			fail(w, http.StatusBadRequest, "调度版本无效")
+			return
+		}
+		revision := int64(number)
+		expected = &revision
+	}
 	spec := map[string]any{"type": firstNonEmpty(stringValue(payload, "type"), "interval")}
 	if schedulerJobManualOnly(jobID) {
 		// Do not allow a crafted PUT to opt manual maintenance jobs into the
@@ -152,12 +189,16 @@ func (a *App) handleSchedulerSchedule(w http.ResponseWriter, r *http.Request, pa
 		spec["seconds"] = clamp(intValue(payload, "seconds", 3600), 60, 604800)
 	}
 	runtimeParams := a.schedulerRuntimeParamsFromPayload(jobID, payload)
-	schedule, err := a.store().SetSchedulerScheduleWithParams(jobID, spec, runtimeParams, true)
+	schedule, err := a.store().SetSchedulerScheduleRevision(jobID, spec, runtimeParams, true, expected)
+	if errors.Is(err, store.ErrConflict) {
+		failWithCode(w, http.StatusConflict, ErrSchedulerRevisionConflict, "调度配置已被修改，请重新加载")
+		return
+	}
 	if statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "scheduler_update_schedule", "admin", 0, map[string]any{"job_id": jobID, "trigger_type": spec["type"]})
-	ok(w, "schedule updated", map[string]any{"job_id": jobID, "trigger_spec": schedule.TriggerSpec, "runtime_params": a.schedulerRuntimeParamsFromSchedule(jobID, schedule.RuntimeParams), "is_custom": true})
+	ok(w, "schedule updated", map[string]any{"job_id": jobID, "trigger_spec": schedule.TriggerSpec, "runtime_params": a.schedulerRuntimeParamsFromSchedule(jobID, schedule.RuntimeParams), "is_custom": true, "schedule_revision": schedule.Revision})
 }
 
 func schedulerJobManualOnly(jobID string) bool {
@@ -252,6 +293,8 @@ func (a *App) normalizeSchedulerRuntimeParams(jobID string, params map[string]an
 		return map[string]any{"max_users": clamp(intValue(params, "max_users", 1000), 1, 50000)}
 	case "sync_emby_activity_logs":
 		return map[string]any{"since_hours": clamp(intValue(params, "since_hours", 24), 1, 720)}
+	case "cleanup_unlinked_emby":
+		return map[string]any{"dry_run": boolValue(params, "dry_run", true), "delete": boolValue(params, "delete", false)}
 	case "cleanup_emby_devices":
 		return map[string]any{
 			"dry_run":        boolValue(params, "dry_run", true),
@@ -287,14 +330,9 @@ func (a *App) schedulerActiveJobIDs(jobIDs []string) map[string]bool {
 	return active
 }
 
-func (a *App) schedulerRunsForRead(jobID string, limit int, now time.Time) []store.SchedulerRun {
-	active := a.schedulerActiveJobIDs([]string{jobID})
-	overview, err := a.store().SchedulerStateOverview([]string{jobID}, limit, active, now.Unix()-schedulerRunningWindowSeconds, now.Unix())
-	if err != nil {
-		zap.L().Warn("scheduler run refresh failed; using in-memory history", zap.String("job_id", jobID), zap.Error(err))
-		return a.store().SchedulerRuns(jobID, limit)
-	}
-	return overview.Runs[jobID].Runs
+func (a *App) schedulerRunsForRead(r *http.Request, jobID string, limit int) ([]store.SchedulerRun, error) {
+	overview, err := a.store().ReadSchedulerHistory(r.Context(), jobID, limit)
+	return overview.Runs[jobID].Runs, err
 }
 
 func schedulerRunListView(run store.SchedulerRun) store.SchedulerRun {

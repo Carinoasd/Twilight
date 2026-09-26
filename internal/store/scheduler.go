@@ -214,17 +214,17 @@ func schedulerRunSnapshots(runs []SchedulerRun, jobIDs []string, limit int) map[
 		}
 		switch run.Type {
 		case "auto":
-			if !snap.HasLatestAuto || run.StartedAt > snap.LatestAuto.StartedAt {
+			if !snap.HasLatestAuto || schedulerRunTime(run) > schedulerRunTime(snap.LatestAuto) {
 				snap.LatestAuto = run
 				snap.HasLatestAuto = true
 			}
 		case "manual":
-			if !snap.HasLatestManual || run.StartedAt > snap.LatestManual.StartedAt {
+			if !snap.HasLatestManual || schedulerRunTime(run) > schedulerRunTime(snap.LatestManual) {
 				snap.LatestManual = run
 				snap.HasLatestManual = true
 			}
 		}
-		if run.Status == "running" && (!snap.HasLatestRunning || run.StartedAt > snap.LatestRunning.StartedAt) {
+		if SchedulerRunActive(run.Status) && (!snap.HasLatestRunning || run.StartedAt > snap.LatestRunning.StartedAt) {
 			snap.LatestRunning = run
 			snap.HasLatestRunning = true
 		}
@@ -347,18 +347,24 @@ func (s *Store) SetSchedulerSchedule(jobID string, spec map[string]any, custom b
 }
 
 func (s *Store) SetSchedulerScheduleWithParams(jobID string, spec map[string]any, params map[string]any, custom bool) (SchedulerSchedule, error) {
+	return s.SetSchedulerScheduleRevision(jobID, spec, params, custom, nil)
+}
+
+// Resets keep a revision tombstone so a stale editor cannot recreate an override.
+func (s *Store) SetSchedulerScheduleRevision(jobID string, spec, params map[string]any, custom bool, expected *int64) (SchedulerSchedule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return SchedulerSchedule{}, err
-	}
-	schedule := SchedulerSchedule{JobID: jobID, TriggerSpec: spec, RuntimeParams: params, IsCustom: custom, UpdatedAt: time.Now().Unix()}
-	if !custom {
-		delete(s.state.SchedulerSchedules, jobID)
-		return schedule, s.saveLocked()
-	}
-	s.state.SchedulerSchedules[jobID] = schedule
-	return schedule, s.saveLocked()
+	var result SchedulerSchedule
+	err := s.mutateAndSaveLocked(func() error {
+		previous := s.state.SchedulerSchedules[jobID]
+		if expected != nil && previous.Revision != *expected {
+			return ErrConflict
+		}
+		result = SchedulerSchedule{JobID: jobID, TriggerSpec: cloneSchedulerMap(spec), RuntimeParams: cloneSchedulerMap(params), IsCustom: custom, UpdatedAt: time.Now().Unix(), Revision: previous.Revision + 1}
+		s.state.SchedulerSchedules[jobID] = result
+		return nil
+	})
+	return result, err
 }
 
 func (s *Store) MarkInterruptedSchedulerRuns(jobID string, beforeUnix int64, nowUnix int64) (int, error) {
@@ -417,11 +423,18 @@ func (s *Store) SchedulerSchedule(jobID string) (SchedulerSchedule, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	schedule, ok := s.state.SchedulerSchedules[jobID]
-	return schedule, ok
+	return cloneSchedulerSchedule(schedule), ok && schedule.IsCustom
 }
 
 func normalizeSchedulerRunTimestamps(run *SchedulerRun) {
 	if run.FinishedAt == 0 && run.EndedAt != 0 {
 		run.FinishedAt = run.EndedAt
 	}
+}
+
+func schedulerRunTime(run SchedulerRun) int64 {
+	if run.StartedAt > 0 {
+		return run.StartedAt
+	}
+	return run.CreatedAt
 }

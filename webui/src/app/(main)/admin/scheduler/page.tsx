@@ -67,7 +67,7 @@ function formatTimestamp(seconds: number | null | undefined): string {
 }
 
 function formatDuration(startSec: number, endSec: number | null): string {
-  if (!endSec) return "—";
+  if (!startSec || !endSec || endSec < startSec) return "—";
   const ms = (endSec - startSec) * 1000;
   if (ms < 1000) return `${ms} ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
@@ -339,7 +339,7 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
         }
         payload.runtime_params = runtimeParams;
       }
-      const res = await api.setSchedulerJobSchedule(job.id, payload);
+      const res = await api.setSchedulerJobSchedule(job.id, {...payload,expected_revision:job.schedule_revision});
       if (res.success) {
         toast({ title: t("adminScheduler.updatedTitle"), description: cleanupConfig ? t("adminScheduler.triggerAndCleanupSaved") : describeTriggerSpec(t, res.data?.trigger_spec), variant: "success" });
         onOpenChange(false);
@@ -357,7 +357,7 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
   const handleReset = async () => {
     setResetting(true);
     try {
-      const res = await api.resetSchedulerJobSchedule(job.id);
+      const res = await api.resetSchedulerJobSchedule(job.id,job.schedule_revision);
       if (res.success) {
         toast({ title: t("adminScheduler.resetDoneTitle"), description: describeTriggerSpec(t, res.data?.trigger_spec), variant: "success" });
         onOpenChange(false);
@@ -559,7 +559,7 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
             variant="ghost"
             size="sm"
             onClick={handleReset}
-            disabled={resetting || !job.is_custom}
+            disabled={saving || resetting || !job.is_custom}
             title={job.is_custom ? t("adminScheduler.resetTitleCustom") : t("adminScheduler.resetTitleDefault")}
           >
             {resetting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RotateCcw className="mr-2 h-4 w-4" />}
@@ -567,7 +567,7 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
           </Button>
           <div className="flex gap-2 sm:justify-end">
             <Button variant="outline" onClick={() => onOpenChange(false)}>{t("common.cancel")}</Button>
-            <Button onClick={handleSave} disabled={saving}>
+            <Button onClick={handleSave} disabled={saving || resetting}>
               {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {t("common.save")}
             </Button>
@@ -578,12 +578,17 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
   );
 }
 
+function schedulerStatusLabel(t: TFunc,status: SchedulerJobRun["status"]) {
+  const keys = {queued:"statusQueued",running:"statusRunning",cancel_requested:"statusCancelling",cancelled:"statusCancelled",interrupted:"statusInterrupted",success:"statusLastSuccess",failed:"statusLastFailed"} as const;
+  return t(`adminScheduler.${keys[status]}` as MessageKey);
+}
+
 function StatusBadge({ t, job, isRunning }: { t: TFunc; job: SchedulerJobItem; isRunning?: boolean }) {
   if (isRunning ?? job.is_running) {
     return (
       <Badge variant="outline" className="text-[10px] border-sky-500/40 text-sky-600 dark:text-sky-400">
         <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-        {t("adminScheduler.statusRunning")}
+        {schedulerStatusLabel(t,job.last_run?.status || "running")}
       </Badge>
     );
   }
@@ -594,6 +599,7 @@ function StatusBadge({ t, job, isRunning }: { t: TFunc; job: SchedulerJobItem; i
       </Badge>
     );
   }
+  if (["cancelled","interrupted"].includes(job.last_run.status)) return <Badge variant="outline">{schedulerStatusLabel(t,job.last_run.status)}</Badge>;
   if (job.last_run.status === "success") {
     return (
       <Badge variant="success" className="text-[10px]">
@@ -925,7 +931,7 @@ export default function AdminSchedulerPage() {
             <div className="min-w-0 space-y-3">
               <Badge variant="outline" className="w-fit border-primary/30 bg-background/70 text-primary">
                 <CalendarClock className="mr-1 h-3.5 w-3.5" />
-                Scheduler Console
+                {t("adminScheduler.title")}
               </Badge>
               <div className="space-y-1">
                 <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{t("adminScheduler.title")}</h1>
@@ -1093,7 +1099,7 @@ export default function AdminSchedulerPage() {
                           <p className="font-medium">{t("adminScheduler.lastRunTitle")}</p>
                           {lr ? (
                             <Badge variant={lr.status === "success" ? "success" : lr.status === "failed" ? "destructive" : "outline"} className="text-[10px]">
-                              {lr.status}
+                              {schedulerStatusLabel(t,lr.status)}
                             </Badge>
                           ) : (
                             <Badge variant="outline" className="text-[10px] text-muted-foreground">{t("adminScheduler.none")}</Badge>
@@ -1141,7 +1147,7 @@ export default function AdminSchedulerPage() {
                             variant="destructive"
                             size="sm"
                             onClick={() => void handleTerminate(job)}
-                            disabled={!isRunning || Boolean(terminating[job.id])}
+                            disabled={!isRunning || job.last_run?.status === "cancel_requested" || Boolean(terminating[job.id])}
                           >
                             {terminating[job.id] ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Square className="mr-2 h-4 w-4" />}
                             {t("adminScheduler.terminate")}
@@ -1331,7 +1337,7 @@ export default function AdminSchedulerPage() {
                     <div className="space-y-2">
                       {logsHistory.map((run) => (
                         <details
-                          key={run.id || `${run.started_at}-${run.status}`}
+                          key={run.id || `${run.started_at}-${schedulerStatusLabel(t,run.status)}`}
                           className="rounded-md border border-border/40 px-3 py-2 text-xs"
                         >
                           <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2">
@@ -1343,7 +1349,7 @@ export default function AdminSchedulerPage() {
                                 variant={run.status === "success" ? "success" : run.status === "failed" ? "destructive" : "outline"}
                                 className="text-[10px]"
                               >
-                                {run.status}
+                                {schedulerStatusLabel(t,run.status)}
                               </Badge>
                               <span className="text-muted-foreground">{formatDuration(run.started_at, run.finished_at)}</span>
                               <span className="text-muted-foreground">[{formatRunType(t, run)}]</span>
