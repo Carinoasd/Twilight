@@ -343,7 +343,7 @@ func TestBindCodeCreationGETRequiresWebUIIntent(t *testing.T) {
 	}
 }
 
-func TestRegcodesPersistAcrossAppRestartButBindCodesDoNot(t *testing.T) {
+func TestRegcodesAndChallengesPersistAcrossAppRestart(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:ABC"
@@ -385,7 +385,7 @@ func TestRegcodesPersistAcrossAppRestartButBindCodesDoNot(t *testing.T) {
 		t.Fatalf("empty bind code in response: %#v", bindEnv.Data)
 	}
 	if _, ok := app.bindCode(bindCode); !ok {
-		t.Fatalf("created bind code was not present in memory hub: %s", bindCode)
+		t.Fatalf("created challenge was not present in dedicated table: %s", bindCode)
 	}
 	if _, ok := app.store().BindCode(bindCode); ok {
 		t.Fatalf("bind code leaked into persistent store: %s", bindCode)
@@ -407,8 +407,8 @@ func TestRegcodesPersistAcrossAppRestartButBindCodesDoNot(t *testing.T) {
 	if _, ok := restarted.store().RegCode(regcode); !ok {
 		t.Fatalf("regcode disappeared after app restart: %s", regcode)
 	}
-	if _, ok := restarted.bindCode(bindCode); ok {
-		t.Fatalf("in‑memory bind code hub should be empty after restart: %s", bindCode)
+	if _, ok := restarted.bindCode(bindCode); !ok {
+		t.Fatalf("challenge disappeared after restart: %s", bindCode)
 	}
 	if _, ok := restarted.store().BindCode(bindCode); ok {
 		t.Fatalf("bind code was persisted after app restart: %s", bindCode)
@@ -2566,7 +2566,7 @@ func TestSystemUpdateValidationHelpers(t *testing.T) {
 	}
 }
 
-func TestBindCodesAreMemoryOnly(t *testing.T) {
+func TestBindCodesAreDedicatedRowsOutsideStateJSON(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	if err := app.upsertBindCode(store.BindCode{Code: "MEMORY12345", Scene: "register", Confirmed: true, TelegramID: 12345, TelegramUsername: "memory", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
@@ -2577,7 +2577,7 @@ func TestBindCodesAreMemoryOnly(t *testing.T) {
 	}
 	bind, ok := app.bindCode("MEMORY12345")
 	if !ok || bind.TelegramID != 12345 || !bind.Confirmed || bind.TelegramUsername != "memory" {
-		t.Fatalf("bind code did not stay in memory correctly: ok=%v bind=%#v", ok, bind)
+		t.Fatalf("challenge was not loaded correctly: ok=%v bind=%#v", ok, bind)
 	}
 }
 
@@ -2592,10 +2592,6 @@ func TestConfirmedRegisterBindCodeHonorsTTL(t *testing.T) {
 	state := app.telegramBindCodeState("REGEXPIRED12", 0, "register", now, true)
 	if state.Status != "expired" || !state.Terminal || state.Confirmed {
 		t.Fatalf("confirmed-but-expired register code should be expired, got %#v", state)
-	}
-	// cleanupExpired=true 时读路径应顺手清掉它，避免静默堆积。
-	if _, ok := app.bindCode("REGEXPIRED12"); ok {
-		t.Fatal("expired confirmed register code should be cleaned up on read")
 	}
 	// 仍在有效期内的已确认注册码继续返回 confirmed。
 	if err := app.upsertBindCode(store.BindCode{Code: "REGVALID1234", Scene: "register", Confirmed: true, TelegramID: 778, TelegramUsername: "ok", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
@@ -2627,7 +2623,7 @@ func TestCleanupExpiredBindCodesKeepsValidCodes(t *testing.T) {
 	}
 }
 
-func TestRepairTelegramBindResidueClearsLegacyStoreAndExpiredMemoryCodes(t *testing.T) {
+func TestRepairTelegramBindResidueClearsLegacyStateAndExpiredChallenges(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	if err := app.store().UpsertBindCode(store.BindCode{Code: "LEGACYTG1", Scene: "register", Confirmed: true, TelegramID: 12345, CreatedAt: now - 3600, ExpiresAt: now - 3500}); err != nil {
@@ -2646,10 +2642,10 @@ func TestRepairTelegramBindResidueClearsLegacyStoreAndExpiredMemoryCodes(t *test
 		t.Fatal("legacy persisted bind code should be removed by repair")
 	}
 	if _, ok := app.bindCode("MEMEXPIRED1"); ok {
-		t.Fatal("expired in-memory bind code should be removed by repair")
+		t.Fatal("expired persistent challenge should be removed by repair")
 	}
 	if _, ok := app.bindCode("MEMVALID123"); !ok {
-		t.Fatal("valid in-memory bind code should remain")
+		t.Fatal("valid persistent challenge should remain")
 	}
 }
 
@@ -3105,7 +3101,7 @@ func TestRegisterConsumesConfirmedTelegramBindCode(t *testing.T) {
 	if confirmed.Code != http.StatusOK {
 		t.Fatalf("confirm status=%d body=%s", confirmed.Code, confirmed.Body.String())
 	}
-	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"alice","password":"Alice123456","telegram_bind_code":%q}`, code), nil)
+	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"alice","password":"Alice123456","telegram_bind_code":%q}`, code), codeResp.Result().Cookies())
 	if registered.Code != http.StatusCreated {
 		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
 	}
@@ -3118,7 +3114,7 @@ func TestRegisterConsumesConfirmedTelegramBindCode(t *testing.T) {
 	}
 }
 
-func TestRegisterBindCodeCreateFailureClearsConfirmedState(t *testing.T) {
+func TestRegisterBindCodeCreateFailurePreservesConfirmedState(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	code := "REGFAIL1234"
@@ -3134,21 +3130,19 @@ func TestRegisterBindCodeCreateFailureClearsConfirmedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, consumedBind, err := app.consumeConfirmedRegisterBindCode(code, now, func(bind store.BindCode) (store.User, store.RegCode, error) {
-		return store.User{}, store.RegCode{}, store.ErrConflict
-	})
+	_, _, consumedBind, err := app.store().RegisterWithTelegramChallenge(context.Background(), store.User{Username: "retryuser"}, "", code, store.TelegramBrowserHash(store.TelegramChallengeHash(code)), func(*store.User, store.RegCode, store.BindCode) error { return store.ErrConflict })
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("consume error=%v want ErrConflict", err)
 	}
 	if consumedBind.Code != code || consumedBind.TelegramID != 424242 {
 		t.Fatalf("consume should return the failed bind for diagnostics: %#v", consumedBind)
 	}
-	if _, ok := app.bindCode(code); ok {
-		t.Fatal("failed register consumption should not leave a confirmed bind code behind")
+	if bind, ok := app.bindCode(code); !ok || !bind.Confirmed {
+		t.Fatal("failed registration must preserve its verified bind code for retry")
 	}
 	state := app.telegramBindCodeState(code, 0, "register", now, false)
-	if state.Status != "register_failed" || !state.Invalid || !state.Terminal || state.Confirmed {
-		t.Fatalf("failed register bind code should be terminal failure, got %#v", state)
+	if state.Status != "confirmed" || state.Invalid || !state.Terminal || !state.Confirmed {
+		t.Fatalf("failed registration should leave a confirmed code, got %#v", state)
 	}
 	if _, ok := app.store().FindUserByTelegramID(424242); ok {
 		t.Fatal("failed register consumption should not create a user with the Telegram ID")
@@ -3177,9 +3171,6 @@ func TestConfirmedRegisterBindCodeDetectsTelegramTakenBeforeSubmit(t *testing.T)
 	state := app.telegramBindCodeState(code, 0, "register", now, true)
 	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal || state.Confirmed {
 		t.Fatalf("confirmed register bind should become terminal when Telegram is taken, got %#v", state)
-	}
-	if _, ok := app.bindCode(code); ok {
-		t.Fatal("telegram-taken register bind code should be cleared")
 	}
 	state = app.telegramBindCodeState(code, 0, "register", now, false)
 	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal {
@@ -3218,9 +3209,6 @@ func TestConfirmedUserBindCodeDetectsDatabaseMismatch(t *testing.T) {
 	state := app.telegramBindCodeState(code, user.UID, "user", now, true)
 	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal || state.TelegramBound {
 		t.Fatalf("stale user bind code should not report bound, got %#v", state)
-	}
-	if _, ok := app.bindCode(code); ok {
-		t.Fatal("stale user bind code should be cleared")
 	}
 }
 
@@ -3356,7 +3344,7 @@ func TestRegisterWithTelegramBindCodeAllowsBootstrapAdminUIDOnlyConfig(t *testin
 		t.Fatalf("confirm status=%d body=%s", confirmed.Code, confirmed.Body.String())
 	}
 
-	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"bootstrap","password":"Admin123456","telegram_bind_code":%q}`, code), nil)
+	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"bootstrap","password":"Admin123456","telegram_bind_code":%q}`, code), codeResp.Result().Cookies())
 	if registered.Code != http.StatusCreated {
 		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
 	}
@@ -3405,6 +3393,7 @@ func TestBindCodeLongPollUsesHubNotifications(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/users/telegram/register/bind-code/status?code=EVENT12&wait=5", nil)
+	request.AddCookie(testTelegramCookies(bind.Code)[0])
 	response := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
@@ -3447,13 +3436,10 @@ func TestBindCodeLongPollUsesHubNotifications(t *testing.T) {
 	}
 }
 
-// TestTelegramBindConfirmLoopbackOnly 锁定 bind-confirm 的新鉴权模型：不再校验
-// 共享密钥，改为“同机回环直连 + 无反代转发头”才放行，外部一律拒绝。覆盖三种来源：
-//   - 外部 IP（默认 RemoteAddr）→ 拒；
-//   - 回环直连、无代理头（= 独立 Bot 直连 127.0.0.1）→ 放行；
-//   - 回环对端但带 X-Forwarded-For（= 同机反代转进来的外部流量）→ 拒。
+// A valid signature does not bypass the existing loopback/proxy restrictions.
 func TestTelegramBindConfirmLoopbackOnly(t *testing.T) {
 	app := newTestApp(t)
+	app.cfg().BotInternalSecret = "test-bind-signing-key"
 	now := time.Now().Unix()
 	mustUpsert := func(code string) {
 		if err := app.upsertBindCode(store.BindCode{Code: code, Scene: "register", CreatedAt: now, ExpiresAt: now + 60}); err != nil {
@@ -3463,6 +3449,7 @@ func TestTelegramBindConfirmLoopbackOnly(t *testing.T) {
 	serve := func(remoteAddr string, headers map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/telegram/bind-confirm", strings.NewReader(`{"code":"LOOPBK12","telegram_id":42}`))
 		req.Header.Set("Content-Type", "application/json")
+		signTelegramBindRequest(req, []byte(`{"code":"LOOPBK12","telegram_id":42}`), app.telegramBindSigningKey(), time.Now())
 		if remoteAddr != "" {
 			req.RemoteAddr = remoteAddr
 		}
@@ -5976,7 +5963,7 @@ func TestRegisterCodeLimitHonorsTelegramTarget(t *testing.T) {
 	if err := app.upsertBindCode(store.BindCode{Code: "TGREG123456", Scene: "register", Confirmed: true, TelegramID: 424242, TelegramUsername: "target_tg", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
 		t.Fatal(err)
 	}
-	created := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"tg-target","password":"User123456","reg_code":"TG-REGISTER","telegram_bind_code":"TGREG123456"}`, nil)
+	created := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"tg-target","password":"User123456","reg_code":"TG-REGISTER","telegram_bind_code":"TGREG123456"}`, testTelegramCookies("TGREG123456"))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("telegram targeted register should succeed with matching bind, status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -7844,14 +7831,17 @@ func doJSON(app *App, method, path, body string, cookies []*http.Cookie) *httpte
 	return doJSONWithHeaders(app, method, path, body, cookies, nil)
 }
 
-// doLoopbackJSON 模拟“同机内部直连”：RemoteAddr 设为回环、无任何反代转发头。
-// 用于 bind-confirm 这类只接受本机内部调用的端点（取代旧的共享密钥头）。
+// doLoopbackJSON models an authenticated same-host Bot request.
 func doLoopbackJSON(app *App, method, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.RemoteAddr = "127.0.0.1:54321"
+	if app.telegramBindSigningKey() == "" {
+		app.cfg().BotInternalSecret = "test-bind-signing-key"
+	}
+	signTelegramBindRequest(req, []byte(body), app.telegramBindSigningKey(), time.Now())
 	rr := httptest.NewRecorder()
 	app.ServeHTTP(rr, req)
 	return rr

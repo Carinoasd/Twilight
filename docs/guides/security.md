@@ -200,7 +200,13 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 
 ## 12. Telegram 相关安全
 
-- 启用 Bot 内部回调时，必须配置强随机的 `Security.bot_internal_secret`。内部绑定确认端点 `POST /api/v1/users/me/telegram/bind-confirm`（`internal/api/telegram_bind_secure.go`）虽然挂在免登录路由上，但要求请求携带 `X-Internal-Secret`（或 `Authorization: Bearer <secret>`）并与配置值做常量时间比对；未配置密钥时该端点直接拒绝。
+- 新签发绑定码使用 128 位随机熵、SHA-256 用途隔离摘要；观察 ID 与 Bot 码独立。注册另需 256 位随机浏览器证明（HttpOnly、SameSite=Lax、主机专用 Cookie），数据库只保存证明摘要。观察 ID 本身不能向 Bot 确认；Bot 码本身不能在另一浏览器注册。已登录绑定挑战归属当前 UID。
+- 挑战表总数限制为 10,000；签发前回收过期记录，同一所有者重新签发会取消旧 pending/verified 记录。注册消费和账号/权益/身份历史同事务，失败不消耗有效已确认挑战。临时外部校验失败不可污染已确认状态。新版本 Bot 直接读写共享 PostgreSQL，回环签名端点仅保留兼容。
+- Twilight 逻辑备份/迁移排除挑战与浏览器证明，恢复时事务内使当前挑战失效。物理数据库备份仍可能含短期认证记录，按凭据备份处理。
+
+
+- 内部绑定确认端点 `POST /api/v1/users/me/telegram/bind-confirm` 及 V2 适配器同时要求回环直连、无转发头和 HMAC-SHA256 请求签名。`X-Twilight-Bind-Timestamp`、`X-Twilight-Bind-Signature` 对用途、时间戳、方法、路径及原始 JSON 请求体签名，允许正负 60 秒时间偏差并以常量时间比较。优先使用 `Security.bot_internal_secret`，未配置时使用共享 Telegram Bot Token；两者均为空则拒绝。不会把原始密钥传给回环 API，也不再接受旧的裸密钥头。API/Bot 必须协调升级，并保持有效配置一致。同一签名请求在有效窗口内允许幂等重试，不能改变签名覆盖的身份或绑定码。
+- 普通绑定码只允许绑定尚未绑定的账号；已绑定身份的变更必须先完成审批及解绑，不能只在前端隐藏入口。解绑时在同一数据库事务校验并消费审批、清除身份、设置换绑标志及追加历史；并发身份变化或审批撤销会使旧请求失败。绑定码、签名和 Token 不得写入日志。挑战服务故障仅记录操作名、失败类别和 SQLSTATE，原始驱动/上游错误不进入日志。
 - Telegram JSON 请求统一复用经过 SSRF 校验的端点、共享连接池和同源重定向策略。成功响应最多解码 4 MiB，错误响应只读取有界正文；网络错误、Telegram 错误正文和被拒绝重定向的 `Location` 在离开 App 协议层前都会清除 Bot Token。不得在命令实现中自行拼接 Bot URL 或绕过该脱敏出口。
 - 入站 update、Bot 身份、聊天和群成员响应只解码业务需要的强类型字段，未知 Telegram 字段不会进入通用动态对象。配置管理员 ID 使用不可变快照索引，但本地账号角色仍从 Store 的 Telegram ID 索引实时读取，避免缓存角色变更。群组面板 callback 仅接受 `gadm:auth:<token>` / `gadm:act:<action>:<token>`，开发者 JS callback 仅接受 `djs:<token>:<index>`；空段、多余段和非法序号必须拒绝，不能用宽松 `Split` 后忽略中间内容。
 - 开启群组 / 频道强制校验时，确保 Bot 在目标群有足够权限，避免误判。
@@ -282,7 +288,7 @@ Git 自动更新（`internal/api/system_update.go`）：
 - [ ] CORS 策略符合部署预期：兼容模式留空/`*`，限制模式填写可信 Origin 列表
 - [ ] HTTPS 与安全 Cookie（`session_cookie_secure` / 合理 `samesite`）已启用
 - [ ] 双子域部署已正确设置 `session_cookie_domain`，前端和 API 能共享 session cookie
-- [ ] `bot_internal_secret` 已配置并验证（若启用内部回调）
+- [ ] API/Bot 已协调升级，签名使用的有效配置一致；如配置 `bot_internal_secret`，双方均已同步并验证
 - [ ] 多副本部署已配置 Redis（会话 + 限流共享）
 - [ ] `trust_proxy_headers` 与 `trusted_proxy_cidrs` 配置一致（启用代理头时 CIDR 不为空）
 - [ ] 公开端点的速率限制阈值已按预期流量评估

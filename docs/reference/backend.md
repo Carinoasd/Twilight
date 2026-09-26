@@ -247,7 +247,7 @@ Go 后端按统一的业务状态与前端响应形状实现，主要模块：
 
 ## 数据库与状态模型
 
-后端把**主要持久业务状态保存在单一状态文档**里（`internal/store/store.go` 的 `State` 结构）。该文档包含用户、API Key、求片、公告、邀请码、邀请关系（`invite_relations`）、注册码、签到、调度记录、设备、登录日志、IP 黑名单、播放记录、改绑申请、Telegram 花名册、违规日志、Bangumi 同步日志与 Bangumi 收藏缓存等实体——它们都是同一份 `State` 里的字段（map / slice），而**不是各自独立的数据库或表**。高频追加的操作审计和运行日志例外，分别落在 `twilight_audit_logs` 与 `twilight_runtime_logs`。Telegram 注册/绑定码是当前 App 进程内存中的临时票据，旧 `bind_codes` 字段只作为历史状态字段保留，运行期不再用于新绑定码持久化。
+后端把**主要持久业务状态保存在单一状态文档**里（`internal/store/store.go` 的 `State` 结构）。该文档包含用户、API Key、求片、公告、邀请码、邀请关系（`invite_relations`）、注册码、签到、调度记录、设备、登录日志、IP 黑名单、播放记录、改绑申请、Telegram 花名册、违规日志、Bangumi 同步日志与 Bangumi 收藏缓存等实体——它们都是同一份 `State` 里的字段（map / slice），而**不是各自独立的数据库或表**。高频追加的操作审计和运行日志例外，分别落在 `twilight_audit_logs` 与 `twilight_runtime_logs`。Telegram 注册/绑定挑战存入独立 `twilight_telegram_challenges` 表，API/Bot 共享；旧 `bind_codes` 字段只作历史兼容并在启动清理，不用于新挑战。
 
 绑定码状态的 WebSocket 与 HTTP 长轮询共用 `bindStatusHub` 事件通知。HTTP 长轮询注册 watcher 后会立即复查一次状态以关闭订阅竞态，并只在状态变化、绑定码到期、请求超时或客户端取消时唤醒；不再为每个等待请求运行 500ms 周期轮询。
 
@@ -354,3 +354,9 @@ govulncheck ./...
 ```
 
 更多本地开发与构建说明见 [开发指南](../guides/development.md)。
+
+### Telegram 认证挑战
+
+`twilight_telegram_challenges` 是 API、Bot 共享的短期认证表；版本由 `twilight_telegram_challenge_schema` 管理。状态包含 pending、verified、consumed、cancelled，过期由 expires_at 判断。签发与确认使用主状态行在前、挑战行在后的锁顺序；仅注册/账号绑定修改主 JSONB，普通挑战状态读取不刷新整个 Store。新发码是 128 位随机令牌，表中仅存摘要；注册所有者为 HttpOnly 浏览器证明摘要，账号所有者为 UID。进程内 hub 只用于本地唤醒。
+
+升级 API、Bot、Scheduler 和 WebUI 需协调完成，连接同一个 PostgreSQL。旧内存码不会迁移，新挑战在 TTL 内跨重启有效。旧业务账号不需要重绑。逻辑导出不携带挑战，导入和快照恢复会清空目标现有挑战。用户绑定确认维持现有即时绑定语义；完整设计中的浏览器最终批准与通知 outbox 尚未引入。

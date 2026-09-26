@@ -499,6 +499,10 @@ func (a *App) telegramMembershipMissing(ctx context.Context, telegramID int64, s
 }
 
 func (a *App) telegramBindRequirementMissing(ctx context.Context, telegramID int64) ([]string, error) {
+	// Bound the whole group/channel check, leaving time for the internal
+	// Bot-to-API transport to return a useful business error.
+	ctx, cancel := context.WithTimeout(ctx, telegramBindMembershipTimeout)
+	defer cancel()
 	chats := []string{}
 	if a.cfg().TelegramForceBindGroup {
 		chats = append(chats, telegramChatIDs(a.cfg().TelegramGroupIDs)...)

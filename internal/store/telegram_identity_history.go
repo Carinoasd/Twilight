@@ -22,8 +22,16 @@ func (s *Store) RecordTelegramIdentity(ctx context.Context, uid, telegramID int6
 	if s.db == nil {
 		return nil
 	}
+	return recordTelegramIdentity(ctx, s.db, uid, telegramID, username, changeType)
+}
+
+type telegramIdentityWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func recordTelegramIdentity(ctx context.Context, writer telegramIdentityWriter, uid, telegramID int64, username, changeType string) error {
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := writer.ExecContext(ctx, `
 		INSERT INTO twilight_telegram_identity_history (uid, telegram_id, telegram_username, change_type, recorded_at, recorded_unix)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, uid, telegramID, username, changeType, now, now.Unix())

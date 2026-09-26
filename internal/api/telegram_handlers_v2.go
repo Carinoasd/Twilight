@@ -12,14 +12,8 @@ func (a *App) handleV2TelegramStatus(w http.ResponseWriter, r *http.Request, _ P
 	ok(w, "OK", result)
 }
 
-func (a *App) handleV2TelegramUnbind(w http.ResponseWriter, r *http.Request, _ Params) {
-	result, err := a.telegram().unbind(r.Context(), current(r).User)
-	if err != nil {
-		failWithCode(w, http.StatusForbidden, ErrTGUnbindForbidden, err.Error())
-		return
-	}
-	a.audit(r, "unbind_telegram", "user", 0, nil)
-	ok(w, result.Message, publicUser(*result.User))
+func (a *App) handleV2TelegramUnbind(w http.ResponseWriter, r *http.Request, p Params) {
+	a.handleUnbindTelegram(w, r, p)
 }
 
 func (a *App) handleV2TelegramRebindRequest(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -29,10 +23,10 @@ func (a *App) handleV2TelegramRebindRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	req, err := a.store().CreateRebindRequest(store.RebindRequest{
-		UID:            u.UID,
-		Username:       u.Username,
-		OldTelegramID:  u.TelegramID,
-		Reason:         truncateString(stringValue(decodeMap(r), "reason"), 500),
+		UID:           u.UID,
+		Username:      u.Username,
+		OldTelegramID: u.TelegramID,
+		Reason:        truncateString(stringValue(decodeMap(r), "reason"), 500),
 	})
 	if statusFromError(w, err) {
 		return

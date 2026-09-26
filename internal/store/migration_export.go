@@ -92,6 +92,7 @@ func (s *Store) ExportMigrationFiles(ctx context.Context) ([]migration.InputFile
 	state.AuditLogs = nil
 	state.TelegramRoster = nil
 	state.TelegramBotOffset = 0
+	state.BindCodes = map[string]BindCode{}
 
 	stateData, err := json.Marshal(state)
 	if err != nil {

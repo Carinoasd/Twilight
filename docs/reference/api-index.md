@@ -786,7 +786,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | 方法 | 路径 | 鉴权 | 说明 |
 | ---- | ---- | ---- | ---- |
 | GET | `/api/v2/me/sessions` | User | 当前用户的 Emby 播放会话；只保留 `UserId` 等于本人 `EmbyID` 的会话，未绑定即返回空列表，不泄露他人信息 |
-| GET | `/api/v2/me/telegram/bind-code/status` | User | 查自己发起的绑定码状态：`code` 必填，`wait` 为可选长轮询秒数（0–60）。带 uid 校验，只能查自己的 |
+| GET | `/api/v2/me/telegram/bind-code/status` | User | 查自己发起的绑定码状态：`code` 填观察 ID，`wait` 为可选长轮询秒数（0–60，单次最多等待 2 秒）。带 UID 校验，只能查自己的 |
 | POST | `/api/v2/me/telegram/rebind-complete` | User | 结束自己的 Telegram 换绑流程：校验新账号已加入要求的群组/频道，未加入返回 403 `TG_BIND_GROUP_CHECK_FAILED` 并保持换绑中 |
 | POST | `/api/v2/me/use-code` | User | 使用注册码/续期码/邀请码：`code`（或 `reg_code`）必填，`check_only` 为 true 时只预览不消费，`emby_username` 可选。要求邮箱已验证，限流 10 次/分钟 |
 | GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}` <!-- 待确认 --> |
@@ -805,7 +805,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | ---- | ---- | ---- | ---- |
 | GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列 <!-- 待确认 --> |
 | GET | `/api/v2/registration/regcode/check` | Public | 注册前校验注册码，按 IP 限流 10 次/分钟。**诱饵码与定向码（指名用户名/Telegram/TargetUID）一律按 404 处理**，避免枚举；命中返回 `type`、`type_name`、`days`、`valid` |
-| GET | `/api/v2/registration/telegram/bind-code/status` | Public | 注册场景（`scene=register`、`uid=0`）查绑定码状态：`code` 必填，`wait` 为 0–60 秒长轮询。以 Store 中的用户记录为准，避免陈旧票据把"已绑定"反转成 pending |
+| GET | `/api/v2/registration/telegram/bind-code/status` | Public | 注册场景查持久化挑战状态：`code` 填观察 ID，必须携带签发 Cookie；`wait` 接受 0–60，单次最多等 2 秒后读库。503 不作为过期处理 |
 | POST | `/api/v2/registration/telegram/bind-confirm` | Public | 同机 Bot 进程确认绑定码。**免登录，但只接受回环直连**：`RemoteAddr` 须是回环 IP，且不得携带 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` / `Forwarded` 任一转发头（经反代进来的外部流量一律 403）。含幂等重放保护与加群校验 |
 | GET | `/api/v2/signin/config` | Public | 签到公开规则：`enabled`、`currency_name`、`daily_min`、`daily_max`、`streak_bonus_enabled`、`bonus_table`、`reset_after_miss`、`renewal`。与 `/system/config` 的 `signin` 字段同源 |
 | GET | `/api/v2/signin/history` | User | 自己的签到历史：`limit` 默认 30（>365 时回退 30），返回 `records[]` 与 `currency_name` |

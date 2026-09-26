@@ -84,6 +84,7 @@ export default function SettingsPage() {
 
   // Telegram bind code
   const [bindCode, setBindCode] = useState<string | null>(null);
+  const [challengeId, setChallengeId] = useState("");
   const [bindCodeExpiry, setBindCodeExpiry] = useState<number>(0);
   const [isTgLoading, setIsTgLoading] = useState(false);
   const bindCodeRequestId = useRef(0);
@@ -354,7 +355,7 @@ export default function SettingsPage() {
   // 生成绑定码后自动轮询，不再要求用户手动刷新页面（刷新会丢掉 bindCode 这块
   // React 状态、销毁整个绑定流程）。带超时中断 + 请求中断，见 useBindCodeStatus。
   useBindCodeStatus({
-    code: bindCode,
+    code: bindCode ? challengeId : null,
     scene: "user",
     expiresIn: bindCodeExpiry,
     enabled: Boolean(bindCode) && !telegramStatus?.bound,
@@ -463,6 +464,7 @@ export default function SettingsPage() {
       if (requestId !== bindCodeRequestId.current) return;
       if (res.success && res.data?.bind_code) {
         setBindCode(res.data.bind_code);
+        setChallengeId(res.data.challenge_id);
         setBindCodeExpiry(res.data.expires_in);
         toast({
           title: t("settings.bindCodeGenerated"),
@@ -1111,7 +1113,7 @@ export default function SettingsPage() {
               <div className="rounded-lg bg-blue-500/10 p-4 space-y-2">
                 <p className="font-medium text-blue-500">{t("settings.bindCodeGenerated")}</p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <code className="text-2xl font-mono font-bold tracking-widest bg-background/50 px-4 py-2 rounded-lg">
+                  <code className="min-w-0 max-w-full break-all rounded-lg bg-background/50 px-4 py-2 font-mono text-base font-semibold tracking-wide">
                     {bindCode}
                   </code>
                   <Button

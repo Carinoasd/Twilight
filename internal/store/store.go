@@ -1026,13 +1026,20 @@ func (s *Store) restoreStateLocked(snap stateSnapshot) {
 // 这里在变更前用 snapshotStateLocked 拍快照，save 失败时用快照覆盖回去，
 // 保证内存与磁盘要么一起前进、要么一起回到上一个一致点。
 //
-// mutate 自身返回 error 时不会触发 save / 回滚——还没真改盘，调用方自行处理。
+// mutate 自身返回 error 时不会持久化，并恢复变更前快照。
 func (s *Store) mutateAndSaveLocked(mutate func() error) error {
+	return s.mutateAndSaveWithTxLocked(mutate, nil)
+}
+
+// mutateAndSaveWithTxLocked extends the state version/rollback boundary to
+// dedicated tables. persist runs inside the same transaction and must contain
+// only database writes: a version conflict can retry the entire operation.
+func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(context.Context, *sql.Tx) error) error {
 	// Postgres 后端多进程并发写会撞版本守卫（errStateVersionConflict）。撞上时
 	// 说明他进程已提交更新：重新 refreshLocked 拉到最新 state + version、以新基线
 	// 重放 mutate 再写。mutate 闭包必须基于「当前 s.state」重新计算（分配新 ID、
 	// 读队列长度等都在闭包内基于最新状态进行），故重放天然吸收他进程的写而非覆盖。
-	// 有界重试防病态活锁；JSON 后端不会返回该哨兵，一次即走完。
+	// 有界重试防止病态活锁。
 	const maxAttempts = 8
 	for attempt := 0; ; attempt++ {
 		if err := s.refreshLocked(); err != nil {
@@ -1047,7 +1054,11 @@ func (s *Store) mutateAndSaveLocked(mutate func() error) error {
 			s.restoreStateLocked(prev)
 			return err
 		}
-		err = s.saveLocked()
+		if persist == nil {
+			err = s.saveLocked()
+		} else {
+			err = s.saveStateWithTxLocked(persist)
+		}
 		if err == nil {
 			return nil
 		}
@@ -1060,6 +1071,28 @@ func (s *Store) mutateAndSaveLocked(mutate func() error) error {
 		}
 		return err
 	}
+}
+
+func (s *Store) saveStateWithTxLocked(persist func(context.Context, *sql.Tx) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	data, version, err := s.saveStateInTxLocked(ctx, tx, false)
+	if err != nil {
+		return err
+	}
+	if err := persist(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.stateVersion, s.stateRaw = version, data
+	return nil
 }
 
 // saveLocked 走版本守卫写：要求持久层 version 仍等于本进程读到的 s.stateVersion，
@@ -1326,13 +1359,36 @@ func (s *Store) LoadSnapshot(data []byte) error {
 	state.TelegramRoster = nil
 	state.NextAuditLogID = 1
 	state.TelegramBotOffset = 0
+	before, err := s.snapshotStateLocked()
+	if err != nil {
+		return err
+	}
+	state.BindCodes = map[string]BindCode{}
 	s.state = state
 	// admin 恢复 / 迁移：本次快照就是权威，必须无条件盖掉持久层现值（不能因版本守卫
 	// 失败而拒绝恢复）。saveLockedForce 的 ON CONFLICT 分支从持久层真实 version 递增，
 	// 无论本地 s.stateVersion 是否新鲜都保证覆盖生效，并回填本地版本作后续写基线。
-	if err := s.saveLockedForce(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.restoreStateLocked(before)
 		return err
 	}
+	defer tx.Rollback()
+	raw, version, err := s.saveStateInTxLocked(ctx, tx, true)
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges`)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		s.restoreStateLocked(before)
+		return err
+	}
+	s.stateRaw, s.stateVersion = raw, version
+	s.rebuildUserIndexes()
 	if err := s.advanceTelegramBotOffset(legacyTelegramBotOffset); err != nil {
 		return err
 	}
@@ -1868,83 +1924,30 @@ func (s *Store) CreateUserForRegistration(u User, regCode, telegramBindCode stri
 	defer s.mu.Unlock()
 	var created User
 	var consumed RegCode
-	var consumedBind BindCode
+	var bind BindCode
 	err := s.mutateAndSaveLocked(func() error {
-		if s.usernameExistsLocked(u.Username) || s.emailTakenLocked(u.Email, 0) || s.embyIDTakenLocked(u.EmbyID, 0) {
-			return ErrConflict
-		}
 		if now == 0 {
 			now = time.Now().Unix()
 		}
 		if telegramBindCode != "" {
-			bind, ok := s.state.BindCodes[telegramBindCode]
+			var ok bool
+			bind, ok = s.state.BindCodes[telegramBindCode]
 			if !ok {
 				return ErrNotFound
 			}
-			if bind.ExpiresAt > 0 && bind.ExpiresAt <= now {
-				delete(s.state.BindCodes, telegramBindCode)
-				return ErrExpired
-			}
-			if bind.Scene != "register" || !bind.Confirmed || bind.TelegramID == 0 {
-				return ErrConflict
-			}
-			if s.telegramIDTakenLocked(bind.TelegramID, 0) {
-				return ErrConflict
-			}
-			u.TelegramID = bind.TelegramID
-			u.TelegramUsername = bind.TelegramUsername
-			consumedBind = bind
-		} else if s.telegramIDTakenLocked(u.TelegramID, 0) {
-			return ErrConflict
 		}
-
-		if regCode != "" {
-			// 创建路径：账号尚未分配 UID，传 (0,0) 跳过 per-identity 守卫（每次都是新身份）。
-			reg, err := s.consumableRegCodeLocked(regCode, 0, 0, now)
-			if err != nil {
-				return err
-			}
-			if reg.Type != 1 || reg.IsDecoy || !regCodeMatchesUser(reg, u) {
-				return ErrNotFound
-			}
-			consumed = reg
+		var err error
+		created, consumed, err = s.createRegistrationUserLocked(u, regCode, bind, now, fn)
+		if err != nil {
+			return err
 		}
-
-		u.UID = s.state.NextUserID
-		s.state.NextUserID++
-		if u.CreatedAt == 0 {
-			u.CreatedAt = now
-		}
-		if u.RegisterTime == 0 {
-			u.RegisterTime = now
-		}
-		if u.ExpiredAt == 0 {
-			u.ExpiredAt = -1
-		}
-		u.Active = true
-		if consumed.Code != "" {
-			consumed = s.consumeRegCodeLocked(consumed, u.UID, u.TelegramID)
-		}
-		if fn != nil {
-			if err := fn(&u, consumed, consumedBind); err != nil {
-				return err
-			}
-		}
-		if s.embyIDTakenLocked(u.EmbyID, u.UID) {
-			return ErrConflict
-		}
-		if telegramBindCode != "" {
-			delete(s.state.BindCodes, telegramBindCode)
-		}
-		s.state.Users[u.UID] = u
-		s.maintainUserIndexes(User{}, u, u.UID)
-		created = u
+		delete(s.state.BindCodes, telegramBindCode)
 		return nil
 	})
 	if err != nil {
 		return User{}, RegCode{}, BindCode{}, err
 	}
-	return created, consumed, consumedBind, nil
+	return created, consumed, bind, nil
 }
 
 func regCodeMatchesUser(reg RegCode, user User) bool {
@@ -2577,19 +2580,29 @@ func (s *Store) BindUserTelegramAtomic(uid int64, tgid int64, currentUID int64) 
 // in one state mutation. An empty username clears a stale name when the ID is
 // changed, but preserves the current name for an idempotent same-ID bind.
 func (s *Store) BindUserTelegramAtomicWithUsername(uid int64, tgid int64, telegramUsername string, currentUID int64) (User, int64, error) {
+	return s.bindUserTelegram(uid, tgid, telegramUsername, currentUID, false)
+}
+
+func (s *Store) bindUserTelegram(uid int64, tgid int64, telegramUsername string, currentUID int64, requireUnbound bool) (User, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var (
 		updated User
 		old     int64
 	)
-	err := s.mutateAndSaveLocked(func() error {
+	err := s.mutateAndSaveWithTxLocked(func() error {
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
 		}
 		if u.Role == RoleAdmin && u.UID != currentUID {
 			return ErrConflict
+		}
+		if requireUnbound && u.TelegramID != 0 {
+			return ErrTelegramAlreadyBound
+		}
+		if requireUnbound && (!u.Active || tgid <= 0) {
+			return ErrInvalid
 		}
 		if s.telegramIDTakenLocked(tgid, uid) {
 			return ErrConflict
@@ -2607,18 +2620,20 @@ func (s *Store) BindUserTelegramAtomicWithUsername(uid int64, tgid int64, telegr
 		s.maintainUserIndexes(oldUser, u, uid)
 		updated = u
 		return nil
-	})
-	if err != nil {
-		return User{}, 0, err
-	}
-	if tgid != 0 {
+	}, func(ctx context.Context, tx *sql.Tx) error {
+		if tgid == 0 {
+			return nil
+		}
 		changeType := "bind"
 		if old != 0 && old != tgid {
 			changeType = "rebind"
 		} else if old == tgid {
 			changeType = "update"
 		}
-		_ = s.RecordTelegramIdentity(context.Background(), uid, tgid, updated.TelegramUsername, changeType)
+		return recordTelegramIdentity(ctx, tx, uid, tgid, updated.TelegramUsername, changeType)
+	})
+	if err != nil {
+		return User{}, 0, err
 	}
 	return updated, old, nil
 }
@@ -2717,6 +2732,7 @@ func (s *Store) DeleteUser(uid int64) error {
 		if err != nil {
 			return err
 		}
+		deletedUser := s.state.Users[uid]
 		if err := s.deleteUserStateLocked(uid); err != nil {
 			s.restoreStateLocked(previous)
 			return err
@@ -2734,6 +2750,9 @@ func (s *Store) DeleteUser(uid int64) error {
 						break
 					}
 				}
+			}
+			if err == nil {
+				_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges WHERE uid=$1 OR ($2::bigint>0 AND telegram_id=$2)`, uid, deletedUser.TelegramID)
 			}
 			if err == nil {
 				err = tx.Commit()
@@ -5185,6 +5204,10 @@ func (s *Store) ReviewRebindRequest(id, reviewerUID int64, status, note string) 
 func (s *Store) UserLatestRebindRequest(uid int64) (RebindRequest, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.latestRebindRequestLocked(uid)
+}
+
+func (s *Store) latestRebindRequestLocked(uid int64) (RebindRequest, bool) {
 	var (
 		best  RebindRequest
 		found bool

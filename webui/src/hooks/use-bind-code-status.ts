@@ -12,6 +12,7 @@ export type BindCodeStatusData = {
   expires_in?: number;
   invalid?: boolean;
   terminal?: boolean;
+  retryable?: boolean;
   telegram_bound?: boolean;
   telegram_id?: number;
   telegram_username?: string;
@@ -20,7 +21,7 @@ export type BindCodeStatusData = {
 export type BindCodeScene = "user" | "register";
 
 export interface UseBindCodeStatusOptions {
-  /** 绑定码；为 null / 空串时不订阅。 */
+  /** 观察 ID（challenge_id），不是发给 Bot 的绑定码；为空时不订阅。 */
   code: string | null | undefined;
   /** user = 个人设置 / 换绑，register = 注册。决定走哪组状态端点。默认 user。 */
   scene?: BindCodeScene;
@@ -39,6 +40,7 @@ export interface UseBindCodeStatusOptions {
 }
 
 function isBoundStatus(data: BindCodeStatusData): boolean {
+  if (data.invalid) return false;
   return (
     Boolean(data.telegram_bound) ||
     data.status === "bound" ||
@@ -115,7 +117,7 @@ export function useBindCodeStatus(options: UseBindCodeStatusOptions): void {
         optionsRef.current.onBound(data);
         return;
       }
-      // pending 不是终态；其余 terminal（过期 / 无效 / 被占用 / 加群未通过）算失败终态。
+      // 临时加群/网络失败保持 pending；只有服务端明确终态才停止。
       if (data.terminal && data.status !== "pending") {
         stop();
         optionsRef.current.onTerminalError(data);
@@ -134,7 +136,9 @@ export function useBindCodeStatus(options: UseBindCodeStatusOptions): void {
       controller = new AbortController();
       try {
         const res = await fetchStatus(controller.signal);
-        if (!stopped && res.success && res.data) {
+        // The legacy status envelope uses HTTP 200 + success=false for
+        // terminal failures. Its data still owns the lifecycle state.
+        if (!stopped && res.data) {
           handle(res.data as BindCodeStatusData);
         }
       } catch {

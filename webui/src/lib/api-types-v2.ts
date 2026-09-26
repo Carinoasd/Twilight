@@ -245,6 +245,7 @@ export interface V2CreateRegistrationBindCodeRequest {
 export interface V2CreateRegistrationBindCodeResponse {
   bind_code: string;
   expires_in: number;
+  challenge_id: string;
 }
 
 // ==================== 用户管理模块 ====================
@@ -442,21 +443,52 @@ export interface V2UserTicketListParams {
 }
 
 /**
- * V2 用户工单列表响应
+ * V2 工单回复。字段与后端 ticketReplyDTO 严格一一对应。
+ *
+ * 判断「这条回复是谁发的」只能看 is_admin：role 是服务端内部角色枚举
+ * （RoleAdmin=0 / RoleNormal=1），按数字大小推断会把管理员和普通用户判反。
+ * 这一层此前声明成 { id, ticket_id, is_admin }——后端从不输出 id/ticket_id，
+ * 也不输出 is_admin，前端按 is_admin 取值恒为 undefined，于是所有回复都被
+ * 折算成管理员，工单会话里出现「显示人物错误」。
+ */
+export interface V2TicketReply {
+  uid: number;
+  username: string;
+  role: number;
+  is_admin: boolean;
+  author: "admin" | "user";
+  content: string;
+  created_at: number;
+}
+
+/** V2 工单附件。url 已是可直接用于 <img> 的地址。 */
+export interface V2TicketAttachment {
+  filename: string;
+  url: string;
+  content_type: string;
+  size: number;
+  uploaded_uid: number;
+  created_at: number;
+}
+
+/**
+ * V2 用户工单列表响应。列表项是有意裁剪过的摘要：不含 content、
+ * replies 和 attachments，这些按需走详情接口。
  */
 export interface V2UserTicketListResponse {
   items: Array<{
     id: number;
-    uid: number;
-    username: string;
     title: string;
+    type: string;
     status: string;
     priority: string;
-    type: string;
+    reply_count: number;
+    attachment_count: number;
+    notify_telegram: boolean;
     created_at: number;
     updated_at: number;
-    last_reply_at: number;
-    unread_admin_replies: number;
+    resolved_at: number;
+    closed_at: number;
   }>;
   pagination: {
     page: number;
@@ -483,25 +515,10 @@ export interface V2UserTicketDetailResponse {
     notify_telegram: boolean;
     created_at: number;
     updated_at: number;
-    last_reply_at: number;
-    unread_admin_replies: number;
-    replies: Array<{
-      id: number;
-      ticket_id: number;
-      uid: number;
-      username: string;
-      content: string;
-      is_admin: boolean;
-      created_at: number;
-    }>;
-    attachments: Array<{
-      filename: string;
-      url: string;
-      content_type: string;
-      size: number;
-      uploaded_uid: number;
-      created_at: number;
-    }>;
+    resolved_at: number;
+    closed_at: number;
+    replies: V2TicketReply[];
+    attachments: V2TicketAttachment[];
   };
   ticket_types: string[];
 }
@@ -528,15 +545,18 @@ export interface V2AdminTicketListResponse {
     uid: number;
     username: string;
     title: string;
+    content: string;
+    type: string;
     status: string;
     priority: string;
-    type: string;
     admin_note: string;
+    reply_count: number;
+    attachment_count: number;
+    notify_telegram: boolean;
     created_at: number;
     updated_at: number;
-    last_reply_at: number;
-    unread_admin_replies: number;
-    unread_user_replies: number;
+    resolved_at: number;
+    closed_at: number;
   }>;
   pagination: {
     page: number;
@@ -564,46 +584,22 @@ export interface V2AdminTicketDetailResponse {
     notify_telegram: boolean;
     created_at: number;
     updated_at: number;
-    last_reply_at: number;
-    unread_admin_replies: number;
-    unread_user_replies: number;
-    replies: Array<{
-      id: number;
-      ticket_id: number;
-      uid: number;
-      username: string;
-      content: string;
-      is_admin: boolean;
-      created_at: number;
-    }>;
-    attachments: Array<{
-      filename: string;
-      url: string;
-      content_type: string;
-      size: number;
-      uploaded_uid: number;
-      created_at: number;
-    }>;
+    resolved_at: number;
+    closed_at: number;
+    replies: V2TicketReply[];
+    attachments: V2TicketAttachment[];
   };
   ticket_types: string[];
 }
 
 /**
- * V2 工单回复响应
+ * V2 工单回复响应。用户端与管理端都把更新后的整张工单放在 ticket 键下，
+ * 不再出现一端 item、另一端 ticket 的两种形状。
  */
 export interface V2TicketReplyResponse {
   ticket_id: number;
-  ticket?: any;
-  item?: any;
-  replies: Array<{
-    id: number;
-    ticket_id: number;
-    uid: number;
-    username: string;
-    content: string;
-    is_admin: boolean;
-    created_at: number;
-  }>;
+  ticket: V2AdminTicketDetailResponse["item"] | V2UserTicketDetailResponse["item"];
+  replies: V2TicketReply[];
 }
 
 // ==================== 公告系统模块 ====================

@@ -269,9 +269,9 @@ JSON 请求体只能包含一个 JSON 值，值后只允许空白字符与 EOF�
 | `GET /api/v2/registration/availability` | `GET /users/check-available` | IP | 60 / 60 秒 | 防扫描可用用户名 |
 | `GET /api/v2/registration/emby/queue-status` | `GET /users/register/emby/status` | request_id + IP | 60/60s + 240/60s | Emby 注册队列轮询 |
 | `POST /api/v2/registration/telegram/bind-code` | `GET /users/telegram/register/bind-code` | IP | 5 / 10 分钟 | 生成注册绑定码；需 `X-Twilight-Intent: create-bind-code` |
-| `GET /api/v2/registration/telegram/bind-code/status` | `GET /users/telegram/register/bind-code/status` | code + IP | 10s timeout / 进程内状态 | 注册绑定码 GET fallback 查询；主流程使用 WebSocket |
+| `GET /api/v2/registration/telegram/bind-code/status` | `GET /users/telegram/register/bind-code/status` | code + IP | PostgreSQL 状态；需浏览器证明；wait 最多等待 2 秒 | WebUI 使用可取消、可见性感知轮询；HTTP 200 的 `success=false` 响应仍可能包含终态 data，必须处理 |
 | `GET /api/v2/users/telegram/register/bind-code/ws` | `GET /users/telegram/register/bind-code/ws` | IP | 30/min 或登录限流配置较大者 | WebSocket 订阅注册绑定码状态 |
-| `GET /api/v2/me/telegram/bind-code` | `GET /users/me/telegram/bind-code` | UID | 5 / 10 分钟 | 已登录用户生成 TG 绑定码；需 `X-Twilight-Intent: create-bind-code` |
+| `GET /api/v2/me/telegram/bind-code` | `GET /users/me/telegram/bind-code` | UID | 5 / 10 分钟 | 尚未绑定的已登录用户生成 TG 绑定码；已绑定返回 409 / `TG_ALREADY_BOUND`；需 `X-Twilight-Intent: create-bind-code` |
 | `POST /api/v2/telegram/unbind` | `POST /users/me/telegram/unbind` | UID | 5 / 10 分钟 | 防恶意频繁解绑 |
 | `POST /api/v2/telegram/rebind-request` | `POST /users/me/telegram/rebind-request` | UID | 3 / 1 小时 | 换绑申请会进管理员队列，从严限制 |
 | `GET /api/v2/registration/regcode/check` | `GET /users/regcode/check` | IP | 10 / 60 秒 | 防注册码枚举 |
@@ -285,9 +285,9 @@ JSON 请求体只能包含一个 JSON 值，值后只允许空白字符与 EOF�
 
 #### Telegram 注册绑定码状态通道
 
-注册绑定码状态主通道是 `GET /users/telegram/register/bind-code/ws` WebSocket，后端会在握手前校验绑定码格式。`GET /users/telegram/register/bind-code/status` 只作为 WebSocket 不可用或提交前的 fallback 查询。
+注册、设置和换绑页统一使用可取消、页面可见性感知的状态轮询，间隔 2.5 秒。查询参数 `code` 传签发响应的 `challenge_id`；注册场景必须携带签发时的 HttpOnly Cookie，登录用户场景必须属于当前 UID。无权限返回通用不存在状态，不泄露 Telegram 身份。
 
-绑定码本身只保存在当前 App 进程内存中，重启后失效；多进程部署时 Web API 与 Bot 需要运行在同一 App 实例内才能共享绑定码状态。
+挑战持久化于 PostgreSQL，API/Bot 分进程共享，重启不会改变 TTL。可选 `wait` 参数仍接受 0–60，但单次等待最多 2 秒后重新读库，以发现另一进程的提交；旧 WebSocket 通道仅作兼容，并在握手前校验格式和归属。数据库故障返回 503，客户端继续重试至总截止时间。
 
 ## 4. 模块总览
 
@@ -530,13 +530,15 @@ curl -X GET "http://localhost:5000/api/v1/users/check-available?username=newuser
 
 `GET /users/telegram/register/bind-code` — 生成注册阶段的 Telegram 绑定码（公开，IP 限流 5/10 分钟）。该 GET 有副作用，调用方必须带 `X-Twilight-Client: webui` 与 `X-Twilight-Intent: create-bind-code`，后端会拒绝预取请求。
 
-`GET /users/telegram/register/bind-code/ws?code=<code>` — WebSocket 订阅绑定码状态（公开）。这是 Web 注册页主路径。
+`GET /users/telegram/register/bind-code/ws?code=<challenge_id>` — 旧 WebSocket 兼容通道；必须携带注册浏览器证明 Cookie。
 
-`GET /users/telegram/register/bind-code/status?code=<code>` — GET fallback 查询绑定码状态（公开，主要用于 WebSocket 不可用或提交前兜底）。
+`GET /users/telegram/register/bind-code/status?code=<challenge_id>` — V1 状态兼容入口。产品前端使用 `GET /api/v2/registration/telegram/bind-code/status`，携带相同浏览器证明 Cookie。
 
-常见响应字段：`status`（`pending` / `confirmed` / `expired` / `not_found` / `invalid_format` / `wrong_scene` / `telegram_taken`）、`confirmed`、`terminal`、`expires_in`、`telegram_id`、`telegram_username`、`message`。绑定码只保存在当前 App 进程内存，服务重启后失效；注册提交时，后端会在绑定码 hub 内原子消费已确认绑定码、复检 Telegram ID 唯一性并创建用户，成功后立即删除绑定码，创建失败则保留绑定码以便修正后重试。启动和配置热重载会清理历史版本遗留在状态文档里的 `bind_codes`，避免出现 Telegram 侧显示确认但本地没有用户记录的残留状态。
+签发返回 `{ bind_code, challenge_id, expires_in: 300 }`。`bind_code` 为仅交给 Bot 的 32 位随机十六进制码，数据库只保存摘要；`challenge_id` 为独立观察 ID。注册签发同时设置 600 秒、Path `/api`、HttpOnly、SameSite=Lax 的主机专用 Cookie，Secure 跟随配置。注册提交保留 `telegram_bind_code` 字段名，前端填写观察 ID，服务端同时复核浏览器证明。签发新码会取消同一所有者尚未消费的旧码。
 
-`POST /users/me/telegram/bind-confirm` — 注册流程中确认绑定（路由为 `AuthPublic`，由绑定码本身承载身份）。
+状态响应包含 `status`、`confirmed`、`terminal`、`retryable`、`expires_in`、`telegram_id`、`telegram_username`、`message`。终态包括确认、过期、取消、已消费、无效和身份冲突；临时资格检查失败仍为 `pending`、`terminal=false`、`retryable=true`。服务端在同一 PostgreSQL 事务创建账号、消费注册码、记录身份历史和消费挑战；失败全部回滚。启动只清理旧 `state.bind_codes` 和过期/孤立记录。有效挑战不进入 Twilight 逻辑备份或迁移包，恢复时清空。登录用户仍在 Bot 确认成功后直接绑定，换绑结束沿用现有流程。
+
+`POST /users/me/telegram/bind-confirm` — 注册流程中确认绑定（路由为 `AuthPublic`，但仅接受回环直连、无转发头且 HMAC 签名有效的内部请求）。
 请求体：
 
 ```json
@@ -812,7 +814,7 @@ curl -X DELETE "http://localhost:5000/api/v1/users/me/devices/abc123" \
 - 认证：登录用户（`AuthUser`）
 - 限流：UID，5 / 10 分钟
 
-> 注册流程中的绑定确认接口是 `POST /users/me/telegram/bind-confirm`（公开，见 [6.1](#61-注册与校验)），由绑定码本身承载身份。
+> 注册流程中的绑定确认接口是 `POST /users/me/telegram/bind-confirm`（内部签名保护，见 [6.1](#61-注册与校验)），不能仅凭绑定码从浏览器调用。
 
 ### 6.7 个人设置
 

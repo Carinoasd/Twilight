@@ -14,7 +14,7 @@ import (
 )
 
 // testDSN 保存 TWILIGHT_TEST_DSN。整套部署已收敛为单一 PostgreSQL 后端，
-// api 层测试同样打真库：设了才跑，没设整包直接跳过（见 TestMain）。
+// api 层真库用例未配置时逐个跳过，纯协议等测试仍执行（见 TestMain）。
 var testDSN string
 
 // TestMain only validates PostgreSQL when a DSN is configured. Tests that need
@@ -51,7 +51,7 @@ func resetTestDatabase(t *testing.T) {
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS twilight_state, twilight_audit_logs, twilight_runtime_logs, twilight_sessions, twilight_telegram_roster, twilight_telegram_runtime, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily CASCADE`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS twilight_state, twilight_telegram_challenges, twilight_telegram_challenge_schema, twilight_audit_logs, twilight_runtime_logs, twilight_sessions, twilight_telegram_roster, twilight_telegram_runtime, twilight_telegram_identity_history, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily CASCADE`); err != nil {
 		t.Fatalf("reset test database: %v", err)
 	}
 }

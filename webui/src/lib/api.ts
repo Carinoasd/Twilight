@@ -93,7 +93,6 @@ import type {
   TelegramCommandCatalogItem,
   Ticket,
   TicketAttachment,
-  TicketReply,
   UserTicketListItem,
   TelegramRebindRequest,
   TelegramStatus,
@@ -157,6 +156,12 @@ import { confirmPhrases } from "./confirm-phrases";
 import { API_BASE, ApiError, apiRequest, apiRequestForm, DEFAULT_API_VERSION, type ApiRequestExtraOptions } from "./api-request";
 import { deepClone } from "./deep-clone";
 import { normalizeMediaRequestStatus } from "./media-status";
+import {
+  normalizeAdminTicketListItem,
+  normalizeTicket,
+  normalizeTicketReplies,
+  normalizeUserTicketListItem,
+} from "./tickets";
 
 const BIND_CODE_CREATE_HEADERS = {
   "X-Twilight-Client": "webui",
@@ -167,6 +172,11 @@ const SETUP_COMPLETE_HEADERS = {
   "X-Twilight-Client": "webui",
   "X-Twilight-Intent": "complete-setup",
 };
+
+/** 写操作端点直接回传的整张工单（V2 DTO），用户端与管理端同形。 */
+type V2TicketPayload =
+  | V2UserTicketDetailResponse["item"]
+  | V2AdminTicketDetailResponse["item"];
 
 // emailCodeBody 把可选的邮箱验证码凭据展开进改密请求体。强制邮箱验证开启时后端
 // 要求 verification_id + email_code；未开启时省略，保持向后兼容。
@@ -609,7 +619,7 @@ class ApiClient {
   }
 
   async getBindCodeV2(signal?: AbortSignal) {
-    return this.request<{ bind_code: string; expires_in: number }>("/me/telegram/bind-code", {
+    return this.request<{ bind_code: string; challenge_id: string; expires_in: number }>("/me/telegram/bind-code", {
       headers: BIND_CODE_CREATE_HEADERS,
       cache: "no-store",
       signal,
@@ -3498,18 +3508,10 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data?.items) {
-      const v1Tickets: UserTicketListItem[] = response.data.items.map(item => ({
-        id: item.id,
-        title: item.title,
-        type: item.type,
-        status: item.status as "open" | "in_progress" | "resolved" | "closed",
-        priority: item.priority as "low" | "medium" | "high" | "urgent",
-        reply_count: 0, // V2 不提供此字段，使用默认值
-        attachment_count: 0, // V2 不提供此字段，使用默认值
-        notify_telegram: false, // V2 不提供此字段，使用默认值
-        created_at: item.created_at,
-        updated_at: item.updated_at,
-      }));
+      // 列表项本来就带 reply_count / attachment_count / notify_telegram，
+      // 此前这里统一填了 0 / false，导致列表永远显示「0 回复 0 图片」，
+      // 铃铛也永远是关的（点一下反而按 !false = true 去开启）。
+      const v1Tickets: UserTicketListItem[] = response.data.items.map(normalizeUserTicketListItem);
 
       return {
         success: true,
@@ -3540,37 +3542,11 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data?.item) {
-      const v2Item = response.data.item;
-      const v1Replies: TicketReply[] = v2Item.replies.map(reply => ({
-        uid: reply.uid,
-        username: reply.username,
-        role: reply.is_admin ? 1 : 0, // V2 使用 is_admin 布尔值，V1 使用 role 数字
-        author: reply.is_admin ? "admin" : "user",
-        content: reply.content,
-        created_at: reply.created_at,
-      }));
-
-      const v1Ticket: Ticket = {
-        id: v2Item.id,
-        uid: v2Item.uid,
-        username: v2Item.username,
-        title: v2Item.title,
-        content: v2Item.content,
-        status: v2Item.status as "open" | "in_progress" | "resolved" | "closed",
-        priority: v2Item.priority as "low" | "medium" | "high" | "urgent",
-        type: v2Item.type,
-        notify_telegram: v2Item.notify_telegram,
-        created_at: v2Item.created_at,
-        updated_at: v2Item.updated_at,
-        replies: v1Replies,
-        attachments: v2Item.attachments,
-      };
-
       return {
         success: true,
         message: response.message,
         data: {
-          ticket: v1Ticket,
+          ticket: normalizeTicket(response.data.item),
           ticket_types: response.data.ticket_types,
         }
       } as ApiResponse<{ ticket: Ticket; ticket_types: string[] }>;
@@ -3584,10 +3560,10 @@ class ApiClient {
   }
 
   async createTicketV2(payload: { title: string; content: string; type?: string; priority?: string; notify_telegram?: boolean }) {
-    return this.request<Ticket>("/tickets", {
+    return this.requestTicket("/tickets", {
       method: "POST",
       body: JSON.stringify(payload),
-    }, { apiVersion: "v2" });
+    });
   }
 
   async closeOwnTicket(id: number) {
@@ -3595,7 +3571,7 @@ class ApiClient {
   }
 
   async closeOwnTicketV2(id: number) {
-    return this.request<Ticket>(`/tickets/${id}/close`, { method: "POST" }, { apiVersion: "v2" });
+    return this.requestTicket(`/tickets/${id}/close`, { method: "POST" });
   }
 
   async reopenOwnTicket(id: number) {
@@ -3603,7 +3579,7 @@ class ApiClient {
   }
 
   async reopenOwnTicketV2(id: number) {
-    return this.request<Ticket>(`/tickets/${id}/reopen`, { method: "POST" }, { apiVersion: "v2" });
+    return this.requestTicket(`/tickets/${id}/reopen`, { method: "POST" });
   }
 
   async toggleTicketNotify(id: number, enabled: boolean) {
@@ -3611,10 +3587,27 @@ class ApiClient {
   }
 
   async toggleTicketNotifyV2(id: number, enabled: boolean) {
-    return this.request<Ticket>(`/tickets/${id}/notify-telegram`, {
+    return this.requestTicket(`/tickets/${id}/notify-telegram`, {
       method: "PUT",
       body: JSON.stringify({ enabled }),
-    }, { apiVersion: "v2" });
+    });
+  }
+
+  /**
+   * 写操作端点直接回传整张工单（V2 DTO）。统一走一层 normalizeTicket，
+   * 保证和详情接口拿到的是同一个形状——否则同一个页面的会话气泡会因为
+   * 「这次是刷新、那次是回复」而按两套字段渲染。
+   */
+  private async requestTicket(path: string, init: RequestInit = {}) {
+    const response = await this.request<V2TicketPayload>(
+      path,
+      init,
+      { apiVersion: "v2" },
+    );
+    if (response.success && response.data) {
+      return { ...response, data: normalizeTicket(response.data) } as ApiResponse<Ticket>;
+    }
+    return { ...response, data: undefined } as ApiResponse<Ticket>;
   }
 
   async replyTicket(id: number, content: string) {
@@ -3629,22 +3622,13 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data) {
-      const v1Replies: TicketReply[] = response.data.replies.map(reply => ({
-        uid: reply.uid,
-        username: reply.username,
-        role: reply.is_admin ? 1 : 0,
-        author: reply.is_admin ? "admin" : "user",
-        content: reply.content,
-        created_at: reply.created_at,
-      }));
-
       return {
         success: true,
         message: response.message,
         data: {
           ticket_id: response.data.ticket_id,
-          ticket: response.data.ticket || response.data.item,
-          replies: v1Replies,
+          ticket: normalizeTicket(response.data.ticket),
+          replies: normalizeTicketReplies(response.data.replies),
         }
       } as ApiResponse<{ ticket_id: number; ticket: Ticket; replies: Ticket["replies"] }>;
     }
@@ -3706,20 +3690,10 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data?.items) {
-      const v1Tickets: Ticket[] = response.data.items.map(item => ({
-        id: item.id,
-        uid: item.uid,
-        username: item.username,
-        title: item.title,
-        content: '', // V2 列表不返回 content
-        type: item.type,
-        status: item.status as "open" | "in_progress" | "resolved" | "closed",
-        priority: item.priority as "low" | "medium" | "high" | "urgent",
-        admin_note: item.admin_note,
-        notify_telegram: false, // V2 列表不返回此字段
-        created_at: item.created_at,
-        updated_at: item.updated_at,
-      }));
+      // 列表项同样带 content / reply_count / attachment_count / notify_telegram，
+      // 此前这里把 content 抹成空串、把计数丢掉，管理端列表上的回复数与图片数
+      // 因此永远是 0，编辑弹窗里的正文预览也是空的。
+      const v1Tickets: Ticket[] = response.data.items.map(normalizeAdminTicketListItem);
 
       return {
         success: true,
@@ -3750,38 +3724,11 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data?.item) {
-      const v2Item = response.data.item;
-      const v1Replies: TicketReply[] = v2Item.replies.map(reply => ({
-        uid: reply.uid,
-        username: reply.username,
-        role: reply.is_admin ? 1 : 0,
-        author: reply.is_admin ? "admin" : "user",
-        content: reply.content,
-        created_at: reply.created_at,
-      }));
-
-      const v1Ticket: Ticket = {
-        id: v2Item.id,
-        uid: v2Item.uid,
-        username: v2Item.username,
-        title: v2Item.title,
-        content: v2Item.content,
-        status: v2Item.status as "open" | "in_progress" | "resolved" | "closed",
-        priority: v2Item.priority as "low" | "medium" | "high" | "urgent",
-        type: v2Item.type,
-        admin_note: v2Item.admin_note,
-        notify_telegram: v2Item.notify_telegram,
-        created_at: v2Item.created_at,
-        updated_at: v2Item.updated_at,
-        replies: v1Replies,
-        attachments: v2Item.attachments,
-      };
-
       return {
         success: true,
         message: response.message,
         data: {
-          ticket: v1Ticket,
+          ticket: normalizeTicket(response.data.item),
           ticket_types: response.data.ticket_types,
         }
       } as ApiResponse<{ ticket: Ticket; ticket_types: string[] }>;
@@ -3795,10 +3742,10 @@ class ApiClient {
   }
 
   async adminUpdateTicketV2(id: number, payload: { status?: string; priority?: string; type?: string; admin_note?: string }) {
-    return this.request<Ticket>(`/admin/tickets/${id}`, {
+    return this.requestTicket(`/admin/tickets/${id}`, {
       method: "PUT",
       body: JSON.stringify(payload),
-    }, { apiVersion: "v2" });
+    });
   }
 
   async adminReplyTicket(id: number, content: string) {
@@ -3813,22 +3760,13 @@ class ApiClient {
 
     // V2 响应结构转换为 V1 格式
     if (response.success && response.data) {
-      const v1Replies: TicketReply[] = response.data.replies.map(reply => ({
-        uid: reply.uid,
-        username: reply.username,
-        role: reply.is_admin ? 1 : 0,
-        author: reply.is_admin ? "admin" : "user",
-        content: reply.content,
-        created_at: reply.created_at,
-      }));
-
       return {
         success: true,
         message: response.message,
         data: {
           ticket_id: response.data.ticket_id,
-          ticket: response.data.ticket || response.data.item,
-          replies: v1Replies,
+          ticket: normalizeTicket(response.data.ticket),
+          replies: normalizeTicketReplies(response.data.replies),
         }
       } as ApiResponse<{ ticket_id: number; ticket: Ticket; replies: Ticket["replies"] }>;
     }

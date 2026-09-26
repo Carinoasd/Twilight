@@ -7,7 +7,6 @@ import (
 )
 
 func (a *App) deleteLocalUser(ctx context.Context, u store.User) error {
-	a.cleanupUserTelegramResidue(u.UID, u.TelegramID)
 	if err := a.store().DeleteUser(u.UID); err != nil {
 		return err
 	}
@@ -18,18 +17,12 @@ func (a *App) deleteLocalUser(ctx context.Context, u store.User) error {
 }
 
 func (a *App) cleanupUserTelegramResidue(uid, telegramID int64) int {
-	if a.bindStatus == nil {
-		return 0
-	}
-	return a.bindStatus.deleteBindCodesForUser(uid, telegramID)
+	n, err := a.store().CleanupTelegramChallenges(context.Background(), 0, uid, telegramID)
+	logTelegramChallengeFailure("cleanup_identity", err)
+	return n
 }
-
 func (a *App) cleanupOrphanedUserBindCodes() int {
-	if a.bindStatus == nil || a.store() == nil {
-		return 0
-	}
-	return a.bindStatus.cleanupOrphanedUserBindCodes(func(uid int64) bool {
-		_, ok := a.store().User(uid)
-		return ok
-	})
+	n, err := a.store().CleanupOrphanedTelegramChallenges(context.Background())
+	logTelegramChallengeFailure("cleanup_orphaned", err)
+	return n
 }

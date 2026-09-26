@@ -1129,7 +1129,7 @@ func (a *App) handleRegisterBindCode(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, http.StatusTooManyRequests, ErrBindCodeRateLimited, "绑定码请求过于频繁")
 		return
 	}
-	a.createBindCode(w, 0, "register")
+	a.createBindCode(w, r, 0, "register")
 }
 
 func (a *App) handleUserBindCode(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -1140,40 +1140,24 @@ func (a *App) handleUserBindCode(w http.ResponseWriter, r *http.Request, _ Param
 		failWithCode(w, http.StatusServiceUnavailable, ErrTGNotConfigured, "Telegram Bot 未配置")
 		return
 	}
+	if current(r).User.TelegramID != 0 {
+		failWithCode(w, http.StatusConflict, ErrTGAlreadyBound, "当前账号已绑定 Telegram，请先完成换绑审批和解绑")
+		return
+	}
 	if !a.allowRate(r.Context(), rateKey("user-bind-code:", current(r).User.UID), a.cfg().RateLimitLoginPerMinute, time.Minute) {
 		failWithCode(w, http.StatusTooManyRequests, ErrBindCodeRateLimited, "绑定码请求过于频繁")
 		return
 	}
-	a.createBindCode(w, current(r).User.UID, "user")
-}
-
-func (a *App) createBindCode(w http.ResponseWriter, uid int64, scene string) {
-	a.cleanupExpiredBindCodes(time.Now().Unix())
-	code := ""
-	for attempt := 0; attempt < 20; attempt++ {
-		candidate := strings.ToUpper(randomCode(6))
-		if _, exists := a.bindCode(candidate); exists {
-			continue
-		}
-		code = candidate
-		break
-	}
-	if code == "" {
-		failWithCode(w, http.StatusConflict, ErrBindCodeConflict, "绑定码生成冲突，请重试")
-		return
-	}
-	now := time.Now().Unix()
-	if err := a.upsertBindCode(store.BindCode{Code: code, Scene: scene, UID: uid, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		failWithCode(w, http.StatusInternalServerError, ErrBindCodeSaveFailed, "绑定码保存失败，请稍后重试")
-		return
-	}
-	ok(w, "OK", map[string]any{"bind_code": code, "expires_in": 300})
+	a.createBindCode(w, r, current(r).User.UID, "user")
 }
 
 func (a *App) handleBindCodeStatus(w http.ResponseWriter, r *http.Request, _ Params) {
 	code := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("code")))
+	if !a.authorizeTelegramChallenge(w, r, code, 0) {
+		return
+	}
 	// Long-poll 支持：客户端传 wait=N（秒）表示愿意等待最多 N 秒。
-	// 等待期间复用 bindStatusHub 的状态通知，避免每个请求创建周期性轮询器。
+	// 等待期间复用本进程通知；最多等待 2 秒后重新读库，以观察独立 Bot 的提交。
 	// 不传 wait 或 wait<=0 时退化为即时响应（兼容旧客户端）。
 	waitSec := clamp(queryInt(r, "wait", 0), 0, 60)
 	state, respond := a.waitForTelegramBindCodeState(r, code, 0, "register", waitSec)
@@ -1192,11 +1176,16 @@ func (a *App) handleBindCodeStatusWS(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, http.StatusBadRequest, ErrTGBindCodeFormat, "Telegram 绑定码格式不正确")
 		return
 	}
+	if !a.authorizeTelegramChallenge(w, r, code, 0) {
+		return
+	}
 	conn, err := acceptWebSocket(w, r)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+	lifetime := time.NewTimer(5 * time.Minute)
+	defer lifetime.Stop()
 
 	sendState := func(state telegramBindCodeState) bool {
 		data := state.response()
@@ -1205,13 +1194,14 @@ func (a *App) handleBindCodeStatusWS(w http.ResponseWriter, r *http.Request, _ P
 		if err != nil {
 			return true
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return writeWebSocketText(conn, payload) == nil
 	}
 
 	updates, unsubscribe := a.bindStatus.subscribe(code)
 	defer unsubscribe()
 
-	state := a.telegramBindCodeState(code, 0, "register", time.Now().Unix(), true)
+	state := a.telegramBindCodeStateContext(r.Context(), code, 0, "register", time.Now().Unix())
 	if !sendState(state) || state.Terminal {
 		writeWebSocketClose(conn)
 		return
@@ -1237,21 +1227,23 @@ func (a *App) handleBindCodeStatusWS(w http.ResponseWriter, r *http.Request, _ P
 		case <-r.Context().Done():
 			return
 		case <-updates:
-			state = a.telegramBindCodeState(code, 0, "register", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, 0, "register", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
 			}
 			resetExpiryTimer(state)
 		case <-expiryTimer.C:
-			state = a.telegramBindCodeState(code, 0, "register", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, 0, "register", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
 			}
 			resetExpiryTimer(state)
+		case <-lifetime.C:
+			return
 		case <-heartbeat.C:
-			state = a.telegramBindCodeState(code, 0, "register", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, 0, "register", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
@@ -1262,6 +1254,9 @@ func (a *App) handleBindCodeStatusWS(w http.ResponseWriter, r *http.Request, _ P
 
 func (a *App) handleUserBindCodeStatus(w http.ResponseWriter, r *http.Request, _ Params) {
 	code := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("code")))
+	if !a.authorizeTelegramChallenge(w, r, code, current(r).User.UID) {
+		return
+	}
 	if !telegramBindCodePattern.MatchString(code) {
 		failWithCode(w, http.StatusBadRequest, ErrTGBindCodeFormat, "Telegram 绑定码格式不正确")
 		return
@@ -1278,7 +1273,7 @@ func (a *App) handleUserBindCodeStatus(w http.ResponseWriter, r *http.Request, _
 // than waking every long-poll request on a fixed ticker. The second lookup after
 // subscribing closes the race between the initial read and watcher registration.
 func (a *App) waitForTelegramBindCodeState(r *http.Request, code string, uid int64, scene string, waitSec int) (telegramBindCodeState, bool) {
-	state := a.telegramBindCodeState(code, uid, scene, time.Now().Unix(), true)
+	state := a.telegramBindCodeStateContext(r.Context(), code, uid, scene, time.Now().Unix())
 	if waitSec <= 0 || state.Terminal {
 		return state, true
 	}
@@ -1290,12 +1285,13 @@ func (a *App) waitForTelegramBindCodeState(r *http.Request, code string, uid int
 	}
 	defer unsubscribe()
 
-	state = a.telegramBindCodeState(code, uid, scene, time.Now().Unix(), true)
+	state = a.telegramBindCodeStateContext(r.Context(), code, uid, scene, time.Now().Unix())
 	if state.Terminal {
 		return state, true
 	}
 
-	wait := time.Duration(waitSec) * time.Second
+	// Bounded recheck sees confirmations committed by another API/Bot process.
+	wait := time.Duration(min(waitSec, 2)) * time.Second
 	if expiryWait := bindStateExpiryWait(state); expiryWait < wait {
 		wait = expiryWait
 	}
@@ -1306,9 +1302,9 @@ func (a *App) waitForTelegramBindCodeState(r *http.Request, code string, uid int
 		case <-r.Context().Done():
 			return state, false
 		case <-timer.C:
-			return a.telegramBindCodeState(code, uid, scene, time.Now().Unix(), true), true
+			return a.telegramBindCodeStateContext(r.Context(), code, uid, scene, time.Now().Unix()), true
 		case <-updates:
-			state = a.telegramBindCodeState(code, uid, scene, time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, uid, scene, time.Now().Unix())
 			if state.Terminal {
 				return state, true
 			}
@@ -1327,11 +1323,16 @@ func (a *App) handleUserBindCodeStatusWS(w http.ResponseWriter, r *http.Request,
 		failWithCode(w, http.StatusBadRequest, ErrTGBindCodeFormat, "Telegram 绑定码格式不正确")
 		return
 	}
+	if !a.authorizeTelegramChallenge(w, r, code, current(r).User.UID) {
+		return
+	}
 	conn, err := acceptWebSocket(w, r)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+	lifetime := time.NewTimer(5 * time.Minute)
+	defer lifetime.Stop()
 
 	sendState := func(state telegramBindCodeState) bool {
 		data := state.response()
@@ -1340,13 +1341,14 @@ func (a *App) handleUserBindCodeStatusWS(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			return true
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return writeWebSocketText(conn, payload) == nil
 	}
 
 	updates, unsubscribe := a.bindStatus.subscribe(code)
 	defer unsubscribe()
 
-	state := a.telegramBindCodeState(code, uid, "", time.Now().Unix(), true)
+	state := a.telegramBindCodeStateContext(r.Context(), code, uid, "", time.Now().Unix())
 	if !sendState(state) || state.Terminal {
 		writeWebSocketClose(conn)
 		return
@@ -1372,21 +1374,23 @@ func (a *App) handleUserBindCodeStatusWS(w http.ResponseWriter, r *http.Request,
 		case <-r.Context().Done():
 			return
 		case <-updates:
-			state = a.telegramBindCodeState(code, uid, "", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, uid, "", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
 			}
 			resetExpiryTimer(state)
 		case <-expiryTimer.C:
-			state = a.telegramBindCodeState(code, uid, "", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, uid, "", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
 			}
 			resetExpiryTimer(state)
+		case <-lifetime.C:
+			return
 		case <-heartbeat.C:
-			state = a.telegramBindCodeState(code, uid, "", time.Now().Unix(), true)
+			state = a.telegramBindCodeStateContext(r.Context(), code, uid, "", time.Now().Unix())
 			if !sendState(state) || state.Terminal {
 				writeWebSocketClose(conn)
 				return
@@ -1414,37 +1418,30 @@ func (a *App) handleRebindComplete(w http.ResponseWriter, r *http.Request, _ Par
 	}
 	// 换绑完成后检查新 Telegram 账号是否在要求的群组/频道中
 	if missing, err := a.telegramBindRequirementMissing(r.Context(), p.User.TelegramID); err != nil {
-		_, _ = a.store().UpdateUser(p.User.UID, func(u *store.User) error {
-			u.RebindingInProgress = true
-			u.RebindingSince = time.Now().Unix()
-			return nil
-		})
 		failWithCode(w, http.StatusForbidden, ErrTGBindGroupCheckFailed, "Telegram 账号未加入要求的群组/频道，换绑失败")
 		return
 	} else if len(missing) > 0 {
-		_, _ = a.store().UpdateUser(p.User.UID, func(u *store.User) error {
-			u.RebindingInProgress = true
-			u.RebindingSince = time.Now().Unix()
-			return nil
-		})
 		failWithCode(w, http.StatusForbidden, ErrTGBindGroupCheckFailed, "Telegram 账号未加入要求的群组/频道："+strings.Join(missing, "、"))
 		return
 	}
-	u, err := a.store().UpdateUser(p.User.UID, func(u *store.User) error {
-		u.RebindingInProgress = false
-		u.RebindingSince = 0
-		return nil
-	})
+	u, changed, err := a.store().CompleteUserTelegramRebind(p.User.UID, p.User.TelegramID, p.User.RebindingSince)
+	if errors.Is(err, store.ErrConflict) {
+		failWithCode(w, http.StatusConflict, ErrConflict, "绑定状态已变化，请刷新后重试")
+		return
+	}
 	if statusFromError(w, err) {
 		return
 	}
 	// 换绑完成后同步恢复 Emby 账号
-	if u.EmbyID != "" {
+	if changed && u.EmbyID != "" {
 		sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
 		if a.embyShouldEnableUser(u) {
 			_ = a.embyApplyEnabledState(sideCtx, u.UID, u.EmbyID, true)
 		}
 		sideCancel()
+	}
+	if changed {
+		a.audit(r, "complete_telegram_rebind", "user", 0, nil)
 	}
 	ok(w, "rebinding complete", publicUser(u))
 }
@@ -1456,45 +1453,8 @@ func (a *App) handleRebindComplete(w http.ResponseWriter, r *http.Request, _ Par
 // can_unbind 口径必须与 handleUnbindTelegram 的服务端校验完全一致：换绑一律走
 // 审批，非管理员仅在存在 approved 换绑请求时才可解绑（与 force_bind 无关），
 // 否则只能走 can_change 提交换绑申请。管理员不受限。
-func (a *App) telegramStatusFields(u store.User) map[string]any {
-	forceBind := a.cfg().ForceBindTelegram
-	admin := u.Role == store.RoleAdmin
-	canUnbind := admin
-	canChange := true
-	pendingRebind := false
-	rebindApproved := false
-	var rebindStatus any
-	var rebindID any
-	if latestReq, hasReq := a.store().UserLatestRebindRequest(u.UID); hasReq {
-		rebindStatus = latestReq.Status
-		rebindID = latestReq.ID
-		switch latestReq.Status {
-		case "pending":
-			pendingRebind = true
-			if !admin {
-				canChange = false
-			}
-		case "approved":
-			rebindApproved = true
-			canUnbind = true
-		}
-		// "used"（解绑已消费）/ "rejected"（被驳回）不再限制 canChange：用户应能
-		// 重新生成绑定码 / 重新发起换绑请求。
-	}
-	return map[string]any{
-		"bound":                  u.TelegramID != 0,
-		"telegram_id":            nullableInt(u.TelegramID),
-		"telegram_id_full":       nullableInt(u.TelegramID),
-		"telegram_username":      u.TelegramUsername,
-		"force_bind":             forceBind,
-		"can_unbind":             canUnbind,
-		"can_change":             canChange,
-		"rebind_approved":        rebindApproved,
-		"pending_rebind_request": pendingRebind,
-		"rebind_request_status":  rebindStatus,
-		"rebind_request_id":      rebindID,
-		"rebinding_in_progress":  u.RebindingInProgress,
-	}
+func (a *App) telegramStatusFields(u store.User) telegramStatusResult {
+	return a.telegram().status(u)
 }
 
 func (a *App) handleTelegramStatus(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -1502,53 +1462,16 @@ func (a *App) handleTelegramStatus(w http.ResponseWriter, r *http.Request, _ Par
 }
 
 func (a *App) handleUnbindTelegram(w http.ResponseWriter, r *http.Request, _ Params) {
-	p := current(r)
-	// 换绑一律走审批：非管理员解绑必须先有一条 approved 的换绑申请，解绑时消费掉
-	// （approved→used）。这条门禁与 force_bind_telegram 无关——即使关闭强制绑定，
-	// 也不允许用户自助无限解绑/重绑（每次更换都需管理员批准一次，用过即作废）。
-	// 管理员自身不受限。
-	var consumeRebindID int64
-	if p.User.Role != store.RoleAdmin {
-		latestReq, hasReq := a.store().UserLatestRebindRequest(p.User.UID)
-		if !hasReq || latestReq.Status != "approved" {
-			failWithCode(w, http.StatusForbidden, ErrTGUnbindForbidden, "更换 Telegram 需要先提交换绑申请并经管理员批准")
-			return
-		}
-		consumeRebindID = latestReq.ID
+	result, err := a.telegram().unbind(r.Context(), current(r).User)
+	if errors.Is(err, store.ErrTelegramRebindApprovalRequired) {
+		failWithCode(w, http.StatusForbidden, ErrTGUnbindForbidden, "更换 Telegram 需要先提交换绑申请并经管理员批准")
+		return
 	}
-	oldTelegramID := p.User.TelegramID
-	oldTelegramUsername := p.User.TelegramUsername
-	u, err := a.store().UpdateUser(p.User.UID, func(u *store.User) error { u.TelegramID = 0; u.TelegramUsername = ""; return nil })
 	if statusFromError(w, err) {
 		return
 	}
-	if oldTelegramID != 0 {
-		_ = a.store().RecordTelegramIdentity(r.Context(), p.User.UID, oldTelegramID, oldTelegramUsername, "unbind")
-	}
-	a.cleanupUserTelegramResidue(p.User.UID, oldTelegramID)
-	// Mark approved rebind request as consumed so it cannot be reused.
-	// 走 ConsumeRebindRequest 而非 ReviewRebindRequest：后者会把 ReviewerUID
-	// 覆盖成 0、用 "auto-consumed" 抹掉管理员原始审核备注、并把 ReviewedAt
-	// 重置为 now，等于销毁了"哪位管理员、何时、为何批准"的审计痕迹。
-	// ConsumeRebindRequest 只把 Status 由 approved 翻成 used，保留审核元数据。
-	if consumeRebindID > 0 {
-		_ = a.store().ConsumeRebindRequest(consumeRebindID)
-	}
-	_, _ = a.store().UpdateUser(p.User.UID, func(u2 *store.User) error {
-		if u2.Role != store.RoleAdmin {
-			u2.RebindingInProgress = true
-			u2.RebindingSince = time.Now().Unix()
-		}
-		return nil
-	})
-	// 解绑时同步禁用 Emby 账号，防止用户通过旧 TG 关联的 Emby 继续使用
-	if u.EmbyID != "" {
-		sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-		_, _ = a.disableRemoteEmbyForWebState(sideCtx, u)
-		sideCancel()
-	}
 	a.audit(r, "unbind_telegram", "user", 0, nil)
-	ok(w, "Telegram unbound. rebinding required", publicUser(u))
+	ok(w, result.Message, publicUser(*result.User))
 }
 
 func (a *App) handleTelegramRebindRequest(w http.ResponseWriter, r *http.Request, _ Params) {

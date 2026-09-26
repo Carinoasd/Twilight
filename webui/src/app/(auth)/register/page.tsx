@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useBindCodeStatus } from "@/hooks/use-bind-code-status";
 import { useToast } from "@/hooks/use-toast";
 import { api, type RegisterAvailability, type RegisterData } from "@/lib/api";
 import { ApiError } from "@/lib/api-request";
@@ -27,21 +28,6 @@ import { friendlyError, validateUsername } from "@/lib/validators";
 import { sanitizeExternalUrl, telegramBotUrl } from "@/lib/safe-url";
 import { useI18n } from "@/lib/i18n";
 import { AuthBrand, AuthStepDots, AUTH_PRIMARY_BTN } from "../auth-ui";
-
-type RegisterBindCodeStatusMessage = {
-  type?: string;
-  code?: string;
-  status?: string;
-  error_code?: string;
-  message?: string;
-  confirmed?: boolean;
-  expires_in?: number;
-  invalid?: boolean;
-  terminal?: boolean;
-  telegram_bound?: boolean;
-  telegram_id?: number;
-  telegram_username?: string;
-};
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -63,6 +49,7 @@ export default function RegisterPage() {
 
   // --- Telegram binding state ---
   const [bindCode, setBindCode] = useState("");
+  const [challengeId, setChallengeId] = useState("");
   const [bindCodeExpiry, setBindCodeExpiry] = useState(0);
   const [bindConfirmed, setBindConfirmed] = useState(false);
   const [isBindCodeLoading, setIsBindCodeLoading] = useState(false);
@@ -129,6 +116,7 @@ export default function RegisterPage() {
     try {
       const res = await api.getRegisterBindCode();
       setBindCode(res.data?.bind_code || "");
+      setChallengeId(res.data?.challenge_id || "");
       setBindCodeExpiry(res.data?.expires_in ?? 0);
       setBindConfirmed(false);
       toast({
@@ -147,91 +135,32 @@ export default function RegisterPage() {
     }
   };
 
-  // WebSocket waits for Bot confirmation
-  useEffect(() => {
-    if (!bindCode || bindConfirmed) return;
-
-    let cancelled = false;
-    let toastedConfirmed = false;
-    let retryTimer: number | null = null;
-    let socket: WebSocket | null = null;
-    let terminal = false;
-
-    const stopWithToast = (title: string, description: string) => {
-      terminal = true;
+  useBindCodeStatus({
+    code: bindCode ? challengeId : null,
+    scene: "register",
+    expiresIn: bindCodeExpiry,
+    enabled: !bindConfirmed,
+    onBound: () => {
+      setBindConfirmed(true);
+      toast({ title: t("auth.register.telegramBound"), variant: "success" });
+    },
+    onTerminalError: (data) => {
       setBindCode("");
-      setBindCodeExpiry(0);
       setBindConfirmed(false);
-      toast({ title, description, variant: "destructive" });
-    };
-
-    const markConfirmed = () => {
-      terminal = true;
-      if (!toastedConfirmed) {
-        toastedConfirmed = true;
-        setBindConfirmed(true);
-        toast({
-          title: t("auth.register.telegramBound"),
-          description: t("auth.register.telegramBoundDescription"),
-          variant: "success",
-        });
-      }
-    };
-
-    const handleStatus = (data: RegisterBindCodeStatusMessage) => {
-      if (typeof data.expires_in === "number") setBindCodeExpiry(data.expires_in);
-      if (!data.terminal) return;
-      if (data.status === "confirmed" || (data.confirmed && !data.invalid)) {
-        markConfirmed();
-        return;
-      }
-      const description =
-        friendlyError(data.error_code, data.message) ||
-        data.message ||
-        t("auth.register.retryBindCode");
-      stopWithToast(t("auth.register.telegramIncomplete"), description);
-    };
-
-    const connect = () => {
-      if (cancelled || terminal) return;
-      try {
-        socket = new WebSocket(api.getRegisterBindCodeStatusWebSocketUrl(bindCode));
-      } catch (error) {
-        stopWithToast(
-          t("auth.register.bindStatusFailed"),
-          error instanceof Error ? error.message : t("auth.register.websocketFailed"),
-        );
-        return;
-      }
-      socket.onmessage = (event) => {
-        if (cancelled) return;
-        try {
-          handleStatus(JSON.parse(String(event.data)) as RegisterBindCodeStatusMessage);
-        } catch {
-          // ignore unrecognised frames
-        }
-      };
-      socket.onerror = () => socket?.close();
-      socket.onclose = () => {
-        if (cancelled || terminal || bindConfirmed) return;
-        retryTimer = window.setTimeout(connect, 2000);
-      };
-    };
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      socket?.close();
-    };
-  }, [bindCode, bindConfirmed, t, toast]);
+      toast({ title: t("auth.register.telegramIncomplete"), description: friendlyError(data.error_code, data.message) || t("auth.register.retryBindCode"), variant: "destructive" });
+    },
+    onTimeout: () => {
+      setBindCode("");
+      setBindConfirmed(false);
+      toast({ title: t("auth.register.telegramIncomplete"), description: t("auth.register.retryBindCode"), variant: "destructive" });
+    },
+  });
 
   const refreshBindConfirmedBeforeSubmit = async (): Promise<boolean> => {
     if (!bindCode) return false;
     try {
-      const res = await api.getRegisterBindCodeStatus(bindCode);
-      if (res.data?.status === "confirmed" || (res.data?.confirmed && !res.data.invalid)) {
+      const res = await api.getRegisterBindCodeStatus(challengeId);
+      if (!res.data?.invalid && (res.data?.status === "confirmed" || res.data?.confirmed)) {
         setBindConfirmed(true);
         return true;
       }
@@ -253,7 +182,7 @@ export default function RegisterPage() {
   const reconcileBindCodeAfterRegisterFailure = async () => {
     if (!bindCode) return;
     try {
-      const res = await api.getRegisterBindCodeStatus(bindCode);
+      const res = await api.getRegisterBindCodeStatus(challengeId);
       const data = res.data;
       if (data?.terminal && data.invalid) {
         setBindCode("");
@@ -348,7 +277,7 @@ export default function RegisterPage() {
       const payload: RegisterData = {
         username: formData.username.trim(),
         email: formData.email || undefined,
-        telegram_bind_code: bindCode || undefined,
+        telegram_bind_code: bindCode ? challengeId : undefined,
         password: formData.password,
         reg_code: registerRequiresCode ? formData.regCode.trim() : undefined,
       };
@@ -599,7 +528,7 @@ export default function RegisterPage() {
         <div className="space-y-2 rounded-lg border border-border/70 bg-muted/50 px-3 py-3 text-sm">
           <p>{t("auth.register.sendCommandBelow")}</p>
           <div className="flex flex-wrap items-center gap-2">
-            <code className="rounded bg-background px-2 py-1 font-mono text-base select-all break-all max-w-full">
+            <code className="min-w-0 max-w-full select-all break-all rounded bg-background px-2 py-1 font-mono text-base">
               /bind {bindCode}
             </code>
             <Button

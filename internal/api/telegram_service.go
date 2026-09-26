@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
-	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
 )
@@ -13,18 +11,18 @@ type telegramService struct {
 }
 
 type telegramStatusResult struct {
-	Bound                 bool   `json:"bound"`
-	TelegramID            any    `json:"telegram_id"`
-	TelegramIDFull        any    `json:"telegram_id_full"`
-	TelegramUsername      string `json:"telegram_username"`
-	ForceBind             bool   `json:"force_bind"`
-	CanUnbind             bool   `json:"can_unbind"`
-	CanChange             bool   `json:"can_change"`
-	RebindApproved        bool   `json:"rebind_approved"`
-	PendingRebindRequest  bool   `json:"pending_rebind_request"`
-	RebindRequestStatus   any    `json:"rebind_request_status"`
-	RebindRequestID       any    `json:"rebind_request_id"`
-	RebindingInProgress   bool   `json:"rebinding_in_progress"`
+	Bound                bool   `json:"bound"`
+	TelegramID           any    `json:"telegram_id"`
+	TelegramIDFull       any    `json:"telegram_id_full"`
+	TelegramUsername     string `json:"telegram_username"`
+	ForceBind            bool   `json:"force_bind"`
+	CanUnbind            bool   `json:"can_unbind"`
+	CanChange            bool   `json:"can_change"`
+	RebindApproved       bool   `json:"rebind_approved"`
+	PendingRebindRequest bool   `json:"pending_rebind_request"`
+	RebindRequestStatus  any    `json:"rebind_request_status"`
+	RebindRequestID      any    `json:"rebind_request_id"`
+	RebindingInProgress  bool   `json:"rebinding_in_progress"`
 }
 
 type telegramUnbindResult struct {
@@ -33,11 +31,11 @@ type telegramUnbindResult struct {
 }
 
 type telegramRosterStatsResult struct {
-	Total      int  `json:"total"`
-	Active     int  `json:"active"`
-	Bound      int  `json:"bound"`
-	Unbound    int  `json:"unbound"`
-	KnownOnly  bool `json:"known_only"`
+	Total     int  `json:"total"`
+	Active    int  `json:"active"`
+	Bound     int  `json:"bound"`
+	Unbound   int  `json:"unbound"`
+	KnownOnly bool `json:"known_only"`
 }
 
 func (s *telegramService) status(u store.User) telegramStatusResult {
@@ -60,8 +58,8 @@ func (s *telegramService) status(u store.User) telegramStatusResult {
 				canChange = false
 			}
 		case "approved":
-			rebindApproved = true
-			canUnbind = true
+			rebindApproved = u.TelegramID != 0 && latestReq.OldTelegramID == u.TelegramID
+			canUnbind = admin || rebindApproved
 		}
 	}
 
@@ -82,48 +80,17 @@ func (s *telegramService) status(u store.User) telegramStatusResult {
 }
 
 func (s *telegramService) unbind(ctx context.Context, u store.User) (telegramUnbindResult, error) {
-	var consumeRebindID int64
-	if u.Role != store.RoleAdmin {
-		latestReq, hasReq := s.app.store().UserLatestRebindRequest(u.UID)
-		if !hasReq || latestReq.Status != "approved" {
-			return telegramUnbindResult{}, errors.New("更换 Telegram 需要先提交换绑申请并经管理员批准")
-		}
-		consumeRebindID = latestReq.ID
-	}
-
-	updated, err := s.app.store().UpdateUser(u.UID, func(u *store.User) error {
-		u.TelegramID = 0
-		u.TelegramUsername = ""
-		return nil
-	})
+	updated, err := s.app.store().UnbindUserTelegram(u.UID, u.TelegramID)
 	if err != nil {
 		return telegramUnbindResult{}, err
 	}
-
 	s.app.cleanupUserTelegramResidue(u.UID, u.TelegramID)
-
-	if consumeRebindID > 0 {
-		_ = s.app.store().ConsumeRebindRequest(consumeRebindID)
-	}
-
-	_, _ = s.app.store().UpdateUser(u.UID, func(u2 *store.User) error {
-		if u2.Role != store.RoleAdmin {
-			u2.RebindingInProgress = true
-			u2.RebindingSince = time.Now().Unix()
-		}
-		return nil
-	})
-
 	if updated.EmbyID != "" {
 		sideCtx, sideCancel := schedulerSideEffectContext(ctx)
 		_, _ = s.app.disableRemoteEmbyForWebState(sideCtx, updated)
 		sideCancel()
 	}
-
-	return telegramUnbindResult{
-		User:    &updated,
-		Message: "Telegram unbound. rebinding required",
-	}, nil
+	return telegramUnbindResult{User: &updated, Message: "Telegram unbound. rebinding required"}, nil
 }
 
 func (s *telegramService) rosterStats() (telegramRosterStatsResult, error) {

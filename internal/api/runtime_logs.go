@@ -490,6 +490,8 @@ func zapFieldValueString(field zapcore.Field) string {
 func sensitiveLogKey(key string) bool {
 	normalized := sensitiveLogKeyReplacer.Replace(strings.ToLower(key))
 	return normalized == "key" ||
+		strings.Contains(normalized, "bindcode") ||
+		strings.Contains(normalized, "bindsignature") ||
 		strings.Contains(normalized, "authorization") ||
 		strings.Contains(normalized, "cookie") ||
 		strings.Contains(normalized, "token") ||

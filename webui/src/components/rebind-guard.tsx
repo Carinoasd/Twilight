@@ -20,6 +20,7 @@ export default function RebindGuard() {
   const { user, fetchUser } = useAuthStore();
   const { info: systemInfo } = useSystemStore();
   const [bindCode, setBindCode] = useState<string | null>(null);
+  const [challengeId, setChallengeId] = useState("");
   const [bindCodeExpiry, setBindCodeExpiry] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isBound, setIsBound] = useState(false);
@@ -44,7 +45,7 @@ export default function RebindGuard() {
 
   // 统一的绑定码状态轮询：带超时中断 + 请求中断，绑定成功即收尾换绑。
   useBindCodeStatus({
-    code: bindCode,
+    code: bindCode ? challengeId : null,
     scene: "user",
     expiresIn: bindCodeExpiry,
     enabled: Boolean(bindCode) && !isBound,
@@ -69,6 +70,7 @@ export default function RebindGuard() {
       const res = await api.getBindCode();
       if (res.success && res.data?.bind_code) {
         setBindCode(res.data.bind_code);
+        setChallengeId(res.data.challenge_id);
         setBindCodeExpiry(res.data.expires_in);
         toast({
           title: t("settings.bindCodeGenerated"),
@@ -135,7 +137,7 @@ export default function RebindGuard() {
                   <p className="text-sm text-muted-foreground mb-2">
                     {t("settings.sendBindWithin", { minutes: Math.floor(bindCodeExpiry / 60), bot: botUsername ? `@${botUsername}` : "Telegram Bot" })}
                   </p>
-                  <code className="text-3xl font-mono font-bold tracking-[0.3em] text-primary">
+                  <code className="block min-w-0 max-w-full break-all font-mono text-base font-semibold tracking-wide text-primary">
                     {bindCode}
                   </code>
                 </div>

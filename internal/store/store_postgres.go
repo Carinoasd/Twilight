@@ -583,6 +583,10 @@ CREATE TABLE IF NOT EXISTS twilight_playback_daily (
 			return nil, status, describePostgresConnectionError(target, err)
 		}
 	}
+	if err := prepareTelegramChallengeSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, status, err
+	}
 	status.SchemaReady = true
 	return db, status, nil
 }

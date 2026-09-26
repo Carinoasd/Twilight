@@ -1570,8 +1570,14 @@ export interface TicketAttachment {
 export interface TicketReply {
   uid: number;
   username: string;
+  /**
+   * 服务端角色枚举（RoleAdmin=0 / RoleNormal=1）。它随服务端内部取值变化，
+   * 判断「这条回复是谁发的」请用 is_admin，不要拿这个数字做大小比较。
+   */
   role: number;
-  author?: "admin" | "user";
+  /** 这条回复是否由管理员发出。判定回复作者的唯一权威字段。 */
+  is_admin: boolean;
+  author: "admin" | "user";
   content: string;
   created_at: number;
 }

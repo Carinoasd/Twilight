@@ -371,8 +371,8 @@ func New(cfg config.Config, st *store.Store) (*App, error) {
 
 func (a *App) repairTelegramBindResidue(source string) {
 	now := time.Now().Unix()
-	memoryExpired := a.cleanupExpiredBindCodes(now)
-	memoryOrphaned := a.cleanupOrphanedUserBindCodes()
+	challengeExpired := a.cleanupExpiredBindCodes(now)
+	challengeOrphaned := a.cleanupOrphanedUserBindCodes()
 	persistedLegacy := 0
 	if st := a.store(); st != nil {
 		deleted, err := st.RepairLegacyTelegramBindResidue()
@@ -382,8 +382,8 @@ func (a *App) repairTelegramBindResidue(source string) {
 		}
 		persistedLegacy = deleted
 	}
-	if memoryExpired > 0 || memoryOrphaned > 0 || persistedLegacy > 0 {
-		zap.L().Info("telegram bind residue repaired", zap.String("source", source), zap.Int("memory_expired", memoryExpired), zap.Int("memory_orphaned", memoryOrphaned), zap.Int("persisted_legacy", persistedLegacy))
+	if challengeExpired > 0 || challengeOrphaned > 0 || persistedLegacy > 0 {
+		zap.L().Info("telegram bind residue repaired", zap.String("source", source), zap.Int("challenge_expired", challengeExpired), zap.Int("challenge_orphaned", challengeOrphaned), zap.Int("persisted_legacy", persistedLegacy))
 	}
 }
 
