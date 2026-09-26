@@ -1026,8 +1026,12 @@ func (a *App) handleAdminAddTicketType(w http.ResponseWriter, r *http.Request, _
 	if err := a.store().AddTicketType(name); statusFromError(w, err) {
 		return
 	}
-	a.persistTicketTypesFromStore()
+	persistStatus := a.persistTicketTypesFromStore()
 	a.audit(r, "add_ticket_type", "admin", 0, map[string]any{"name": name})
+	if persistStatus != http.StatusOK {
+		failWithCode(w, persistStatus, ErrConfigSaveFailed, "工单类型已修改，但配置保存失败，请重新加载并检查配置")
+		return
+	}
 	ok(w, "类型已添加", map[string]any{"name": name, "types": a.store().TicketTypes()})
 }
 
@@ -1041,8 +1045,12 @@ func (a *App) handleAdminDeleteTicketType(w http.ResponseWriter, r *http.Request
 	if err := a.store().DeleteTicketType(name); statusFromError(w, err) {
 		return
 	}
-	a.persistTicketTypesFromStore()
+	persistStatus := a.persistTicketTypesFromStore()
 	a.audit(r, "delete_ticket_type", "admin", 0, map[string]any{"name": name})
+	if persistStatus != http.StatusOK {
+		failWithCode(w, persistStatus, ErrConfigSaveFailed, "工单类型已修改，但配置保存失败，请重新加载并检查配置")
+		return
+	}
 	ok(w, "类型已删除", map[string]any{"name": name, "types": a.store().TicketTypes()})
 }
 
@@ -1062,20 +1070,30 @@ func (a *App) handleAdminRenameTicketType(w http.ResponseWriter, r *http.Request
 	if statusFromError(w, err) {
 		return
 	}
-	a.persistTicketTypesFromStore()
+	persistStatus := a.persistTicketTypesFromStore()
 	a.audit(r, "rename_ticket_type", "admin", 0, map[string]any{"old": oldName, "new": newName, "tickets_renamed": count})
+	if persistStatus != http.StatusOK {
+		failWithCode(w, persistStatus, ErrConfigSaveFailed, "工单类型已修改，但配置保存失败，请重新加载并检查配置")
+		return
+	}
 	ok(w, "类型已重命名", map[string]any{"old_name": oldName, "new_name": newName, "types": a.store().TicketTypes()})
 }
 
-func (a *App) persistTicketTypesFromStore() {
-	values := configValues(*a.cfg())
-	if values["Ticket"] == nil {
-		values["Ticket"] = map[string]any{}
+func (a *App) persistTicketTypesFromStore() int {
+	_, status, _ := a.editConfig("", func(snapshot configEditSnapshot) (string, error) {
+		// Read after the shared file lock so a slower editor cannot overwrite a
+		// newer type list; only the primary-file Ticket section is modified.
+		if err := a.store().Refresh(); err != nil {
+			return "", err
+		}
+		values := configValues(snapshot.file)
+		values["Ticket"]["types"] = a.store().TicketTypes()
+		return mergeConfigTOML(snapshot.content, values)
+	})
+	if status != http.StatusOK {
+		zap.L().Warn("failed to persist ticket types to config.toml", zap.Int("status", status))
 	}
-	values["Ticket"]["types"] = a.store().TicketTypes()
-	if _, status, message := a.saveConfigContent(renderConfigTOML(values)); status != http.StatusOK {
-		zap.L().Warn("failed to persist ticket types to config.toml", zap.Int("status", status), zap.String("message", message))
-	}
+	return status
 }
 
 const ticketNotificationTimeout = 12 * time.Second

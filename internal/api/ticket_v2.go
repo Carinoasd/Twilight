@@ -350,8 +350,12 @@ func (a *App) handleV2AdminRenameTicketType(w http.ResponseWriter, r *http.Reque
 	if statusFromError(w, err) {
 		return
 	}
-	a.persistTicketTypesFromStore()
+	persistStatus := a.persistTicketTypesFromStore()
 	a.audit(r, "rename_ticket_type", "admin", 0, map[string]any{"old": oldName, "new": newName, "tickets_renamed": count})
+	if persistStatus != http.StatusOK {
+		failWithCode(w, persistStatus, ErrConfigSaveFailed, "工单类型已修改，但配置保存失败，请重新加载并检查配置")
+		return
+	}
 	ok(w, "类型已重命名", map[string]any{"item": newName, "items": a.store().TicketTypes(), "tickets_renamed": count})
 }
 
@@ -364,7 +368,11 @@ func (a *App) handleV2AdminDeleteTicketType(w http.ResponseWriter, r *http.Reque
 	if err := a.store().DeleteTicketType(name); statusFromError(w, err) {
 		return
 	}
-	a.persistTicketTypesFromStore()
+	persistStatus := a.persistTicketTypesFromStore()
 	a.audit(r, "delete_ticket_type", "admin", 0, map[string]any{"name": name})
+	if persistStatus != http.StatusOK {
+		failWithCode(w, persistStatus, ErrConfigSaveFailed, "工单类型已修改，但配置保存失败，请重新加载并检查配置")
+		return
+	}
 	ok(w, "类型已删除", map[string]any{"items": a.store().TicketTypes()})
 }
