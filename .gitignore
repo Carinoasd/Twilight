@@ -264,3 +264,11 @@ kubeconfig*
 /_*.txt
 /.*.txt
 /artifacts/local/
+
+# Configuration coordination locks (released by the OS; not source files)
+*.toml.write.lock
+docs/代码审查.md
+docs/代码审查.md
+docs/方案设计.md
+docs/需求理解.md
+docs/代码审查.md
