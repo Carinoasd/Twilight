@@ -71,7 +71,7 @@ func runAPI(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.NewReader(configPath).Read()
+	cfg, err := config.NewReader(configPath).ReadLocked()
 	if err != nil {
 		return err
 	}
@@ -158,7 +158,7 @@ func runAll(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.NewReader(configPath).Read()
+	cfg, err := config.NewReader(configPath).ReadLocked()
 	if err != nil {
 		return err
 	}
@@ -295,7 +295,7 @@ func runScheduler(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.NewReader(configPath).Read()
+	cfg, err := config.NewReader(configPath).ReadLocked()
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func runBot(args []string) error {
 		return err
 	}
 	reader := config.NewReader(configPath)
-	cfg, err := reader.Read()
+	cfg, err := reader.ReadLocked()
 	if err != nil {
 		return err
 	}
@@ -341,7 +341,7 @@ func runBot(args []string) error {
 			return nil
 		case <-time.After(3 * time.Second):
 		}
-		next, err := reader.Read()
+		next, err := reader.ReadLocked()
 		if err != nil {
 			zap.L().Warn("Telegram bot config reload failed", zap.Error(err))
 			continue
@@ -399,7 +399,7 @@ func runMigrateJSON(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.NewReader(configPath).Read()
+	cfg, err := config.NewReader(configPath).ReadLocked()
 	if err != nil {
 		return err
 	}

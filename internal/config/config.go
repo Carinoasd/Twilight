@@ -146,9 +146,9 @@ type Config struct {
 	// 写 Domain 反而会扩大暴露面。
 	CookieDomain string
 
-	EmbyURL                        string
-	EmbyToken                      string
-	EmbyStatsEnabled               bool
+	EmbyURL          string
+	EmbyToken        string
+	EmbyStatsEnabled bool
 	// PlayRank* 控制「播放排行榜」：Enabled 是总开关（关掉后管理员后台之外全部拒绝），
 	// UserVisible 决定普通用户能否查看。排行榜只对已登录账号开放，没有任何匿名入口——
 	// 无账号访客不参与 Emby 数据，不能读取榜单。
@@ -158,7 +158,7 @@ type Config struct {
 	// 数据源。插件可用时用它记的 PlayDuration - PauseDuration（净时长，扣掉暂停），
 	// 比活动日志配对出的墙上时钟差准；插件没装或探测失败时自动回退活动日志，
 	// 不需要改这个开关。
-	PlaybackReportingEnabled bool
+	PlaybackReportingEnabled       bool
 	EmbyUsername                   string
 	EmbyPassword                   string
 	EmbyURLList                    []Line
@@ -343,7 +343,13 @@ type Config struct {
 	ConfigFile string
 }
 
-func Load(path string) (Config, error) {
+func Load(path string) (Config, error) { return loadConfig(path, true) }
+
+// LoadFileOnly reads editable defaults plus one TOML file, without copying local
+// or environment overrides into the primary configuration on save.
+func LoadFileOnly(path string) (Config, error) { return loadConfig(path, false) }
+
+func loadConfig(path string, overrides bool) (Config, error) {
 	cfg := defaults()
 	if path == "" {
 		path = defaultConfigPath()
@@ -354,14 +360,16 @@ func Load(path string) (Config, error) {
 	if err := reader.mergeFile(path); err != nil {
 		return cfg, err
 	}
-	local := os.Getenv("TWILIGHT_CONFIG_LOCAL_FILE")
-	if local == "" {
-		local = strings.TrimSuffix(path, filepath.Ext(path)) + ".local" + filepath.Ext(path)
-	}
-	if err := reader.mergeFile(local); err != nil {
-		return cfg, err
-	}
+	if overrides {
+		local := os.Getenv("TWILIGHT_CONFIG_LOCAL_FILE")
+		if local == "" {
+			local = strings.TrimSuffix(path, filepath.Ext(path)) + ".local" + filepath.Ext(path)
+		}
+		if err := reader.mergeFile(local); err != nil {
+			return cfg, err
+		}
 
+	}
 	cfg.AppName = reader.stringValue(cfg.AppName, "Global.server_name", "server_name")
 	cfg.ServerIcon = reader.stringValue(cfg.ServerIcon, "Global.server_icon", "server_icon")
 	cfg.RedisURL = reader.stringValue(cfg.RedisURL, "Global.redis_url", "redis_url")
@@ -586,7 +594,9 @@ func Load(path string) (Config, error) {
 	cfg.AuditLogCleanupCheckTime = reader.stringValue(cfg.AuditLogCleanupCheckTime, "AuditLog.cleanup_check_time", "audit_log_cleanup_check_time")
 	cfg.AuthBackgroundURL = reader.stringValue(cfg.AuthBackgroundURL, "Global.auth_background_url", "auth_background_url")
 
-	applyEnv(&cfg)
+	if overrides {
+		applyEnv(&cfg)
+	}
 	if cfg.StateFile == "" {
 		cfg.StateFile = filepath.Join(cfg.DatabaseDir, "twilight_go_state.json")
 	}
@@ -635,7 +645,7 @@ func defaults() Config {
 		// 没装插件时 Emby 会拒绝那个端点，同步照旧走活动日志，管理员不用为此
 		// 改配置。装了插件又不想用它的净时长口径，才需要显式关掉。
 		PlaybackReportingEnabled: true,
-		SessionCookie:        "twilight_session",
+		SessionCookie:            "twilight_session",
 		// CookieSecure 默认 true：HTTPS 是生产基线，HTTP 调试场景显式
 		// 改 toml 或 env 关掉。旧默认 false 在 HTTP 部署时也不告警，
 		// 一旦运维忘改 production toml 即等于 session 明文走线。

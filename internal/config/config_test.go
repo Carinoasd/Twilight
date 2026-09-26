@@ -263,7 +263,22 @@ func chdir(t *testing.T, dir string) {
 	})
 }
 
+func clearPostgresTestEnvironment(t *testing.T) {
+	t.Helper()
+	// Integration runs set a live DSN for API fixtures. Configuration unit tests
+	// must exercise only their own TOML and explicitly declared overrides.
+	for _, key := range []string{
+		"TWILIGHT_DATABASE_DRIVER", "TWILIGHT_DATABASE_URL", "TWILIGHT_POSTGRES_DSN",
+		"TWILIGHT_POSTGRES_HOST", "TWILIGHT_POSTGRES_PORT", "TWILIGHT_POSTGRES_USER",
+		"TWILIGHT_POSTGRES_PASSWORD", "TWILIGHT_POSTGRES_DATABASE", "TWILIGHT_POSTGRES_SSLMODE",
+		"TWILIGHT_POSTGRES_MAX_OPEN_CONNS", "TWILIGHT_POSTGRES_MAX_IDLE_CONNS",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestPostgresEnvOverridesAndIPv6DSN(t *testing.T) {
+	clearPostgresTestEnvironment(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	content := `[Database]
@@ -301,6 +316,7 @@ postgres_database = "twilight"
 }
 
 func TestDefaultsIncludeUsablePostgresParts(t *testing.T) {
+	clearPostgresTestEnvironment(t)
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.toml"))
 	if err != nil {
 		t.Fatal(err)

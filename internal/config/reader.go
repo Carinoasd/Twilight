@@ -1,6 +1,10 @@
 package config
 
-import "strings"
+import (
+	"context"
+	"strings"
+	"time"
+)
 
 type Reader struct {
 	path string
@@ -19,4 +23,18 @@ func (r Reader) Path() string {
 
 func (r Reader) Read() (Config, error) {
 	return Load(r.Path())
+}
+
+// ReadLocked is for process startup and standalone readers. Callers already
+// holding the configuration write lock use Read to avoid a recursive lock.
+func (r Reader) ReadLocked() (Config, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	var cfg Config
+	err := WithWriteLock(ctx, r.Path(), func() error {
+		var err error
+		cfg, err = r.Read()
+		return err
+	})
+	return cfg, err
 }
