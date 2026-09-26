@@ -197,3 +197,14 @@ WebUI（`webui/`，Next.js App Router）是唯一前端，依赖方向：
 - [ ] 是否新增用户可见文案但没有补 i18n？
 - [ ] 是否新增 API 但没有同步前端客户端和文档？
 - [ ] 是否改变现有路由、错误码或响应结构但没有兼容说明？
+
+### 工单增量边界
+
+`ticket_reply_service.go` 统一 V1/V2 回复传输之外的用例调用；`internal/store/ticket_conversation.go` 承载稳定消息页、版本、幂等回复与保留期摘除，`store_tickets.go` 保留已有元数据和附件原子操作。`ticket_conversation.go`（API）负责有界 DTO/游标/冲突响应；WebUI 使用共享 `TicketMessageHistory` 和 `useTicketReplyKey`，详情读取遵循可中止请求边界。当前工单仍在 JSONB State，尚未切换独立表，导入导出兼容沿用原路径。
+
+
+## Scheduler / 配置的应用边界
+
+调度 HTTP handler 只校验、入队、取消及编辑计划；`scheduler_worker.go` 负责领取、续租、取消观察、运行配置快照与完成记录；`store/scheduler_queue.go` 拥有队列事务、有效租约并发边界、历史查询和恢复规则。业务任务暂时沿用 `scheduler_runner.go` 的 request 适配器，后续再按任务拆类型化用例，不把本次队列抽取描述为全面解耦。
+
+`config_revision.go` 提供主文件编辑快照、revision、局部合并和回滚；`config/write_lock*.go` 协调不同进程文件写入，锁顺序固定为文件锁再 runtimeMu。主配置值与 local/环境有效值分离，secret 掩码不参与覆盖来源比较。正式部署与恢复边界见后端配置文档。

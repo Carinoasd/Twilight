@@ -374,6 +374,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | DELETE | `/api/v1/tickets/{ticket_id}/images/{filename}` | User | 删除工单图片；关闭后普通用户不可删除 |
 | GET | `/api/v2/tickets` | User | V2 当前用户工单摘要分页；返回 `items` 与 `pagination`，不返回正文、回复或附件 URL |
 | POST | `/api/v2/tickets` | User | V2 创建工单，复用服务端类型、配额、通知和审计规则 |
+| GET | `/api/v2/tickets/{ticket_id}/messages` | User | 有界回复页，before 排除游标、limit 最大 100，仅本人 |
 | GET | `/api/v2/tickets/{ticket_id}` | User | V2 读取本人单条工单及完整双方回复、附件；非本人统一返回工单不存在 |
 | POST | `/api/v2/tickets/{ticket_id}/replies` | User | V2 追加工单回复，不覆盖已有对话 |
 | POST | `/api/v2/tickets/{ticket_id}/close` | User | V2 用户关闭自己的工单 |
@@ -520,6 +521,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | PUT | `/api/v1/admin/ticket-types` | Admin | 重命名工单类型，并同步已有工单 |
 | DELETE | `/api/v1/admin/ticket-types` | Admin | 删除工单类型；已有工单保留历史类型 |
 | GET | `/api/v2/admin/tickets` | Admin | V2 工单资源集合；返回 `items` 与 `pagination`，默认仅返回待处理/处理中摘要 |
+| GET | `/api/v2/admin/tickets/{ticket_id}/messages` | Admin | 有界历史回复页，稳定工单内编号 |
 | GET | `/api/v2/admin/tickets/{ticket_id}` | Admin | V2 单工单资源；返回完整回复时间线和附件元数据 |
 | PATCH | `/api/v2/admin/tickets/{ticket_id}` | Admin | V2 局部更新状态、优先级、类型或内部摘要 |
 | POST | `/api/v2/admin/tickets/{ticket_id}/replies` | Admin | V2 追加管理员文字回复，不覆盖已有回复 |

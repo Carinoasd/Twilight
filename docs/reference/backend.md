@@ -96,7 +96,7 @@ API、Scheduler 与 Bot 都会检测配置文件签名并支持热重载；签�
 管理端「系统设置 → 配置」通过 `GET/PUT /api/v2/admin/config/schema` 读写配置。这里有三条容易踩空的约定：
 
 1. **保存是合并，不是重写。** `mergeConfigTOML(source, values)` 以磁盘上的现有文件（或管理员提交的源文本）为底稿，只覆盖 `configSectionDefs()` 纳管的字段，其余内容原样保留——手写的段（如 `Admin`）、尚未纳管的字段、以及 `SetupMode` 这类顶层标量都不会丢。早期实现只写 schema 认识的键，一次可视化保存就会静默删掉这些配置并无法恢复，不要再退回那种写法。
-2. **页面显示的是「生效值」，不等于「文件里写了这一项」。** `configValues()` 对缺失的键用代码默认值兜底。schema 响应里每个字段都带 `present_in_file`：`false` 表示该键不在 `config.toml` 里，页面上会打「未写入文件」标记，保存后才会真正落盘。
+2. **编辑值与生效值分开。** schema 的 `value` 来自主配置及内置默认值；`present_in_file=false` 表示主配置没有该键。`effective_value` 是叠加 local TOML 与环境变量后的生效值，密钥始终遮蔽；`overridden` 标明两者不同。保存以主配置为基础合并，不把环境变量或 local 密钥反写到主配置。源文件编辑使用遮蔽后的 `raw_content`，保留未知字段。
 3. **密钥不回传明文。** 非空 secret 字段一律回传哨兵 `__TWILIGHT_SECRET_UNCHANGED__`；PUT 时哨兵等价于「保持原值」，显式提交空串才算清空。
 
 新增 `config.Config` 字段时，必须同时挂进 `configSectionDefs()` 与 `configValues()`，否则页面读不到也存不住。`TestConfigSchemaSurfacesEveryConfigField` 会反射全字段做 `configValues → renderConfigTOML → config.Load` 往返，漏挂的字段会直接让测试失败（除非写进 `schemaUncoveredConfigFields` 白名单并说明原因）。
@@ -360,3 +360,24 @@ govulncheck ./...
 `twilight_telegram_challenges` 是 API、Bot 共享的短期认证表；版本由 `twilight_telegram_challenge_schema` 管理。状态包含 pending、verified、consumed、cancelled，过期由 expires_at 判断。签发与确认使用主状态行在前、挑战行在后的锁顺序；仅注册/账号绑定修改主 JSONB，普通挑战状态读取不刷新整个 Store。新发码是 128 位随机令牌，表中仅存摘要；注册所有者为 HttpOnly 浏览器证明摘要，账号所有者为 UID。进程内 hub 只用于本地唤醒。
 
 升级 API、Bot、Scheduler 和 WebUI 需协调完成，连接同一个 PostgreSQL。旧内存码不会迁移，新挑战在 TTL 内跨重启有效。旧业务账号不需要重绑。逻辑导出不携带挑战，导入和快照恢复会清空目标现有挑战。用户绑定确认维持现有即时绑定语义；完整设计中的浏览器最终批准与通知 outbox 尚未引入。
+
+
+## 持久调度队列与配置编辑（第四批）
+
+API 的手动触发和自动到期检查统一写入 `twilight_job_runs`；只有 `scheduler` 或 `all` 进程领取执行。关闭 `Scheduler.enabled` 只关闭自动入队，不阻止 worker 处理手动队列。仅运行 API 时任务会保持排队，请在 systemd 中保持 Scheduler 服务运行。
+
+数据库队列使用版本表 `twilight_job_schema`（当前版本 1）、全局领取锁和单任务活动记录唯一索引。全局最多四个有效执行租约；worker 每两秒续期，租约 30 秒。状态包括 queued、running、cancel_requested、success、failed、cancelled、interrupted。排队取消直接完成；执行中取消保留占位，直到实际函数退出。进程退出等待执行函数收尾，再关闭数据库。长任务只要持续心跳，就不会因开始时间超过 30 分钟被误判。
+
+租约过期后由 worker 标记 interrupted，不重放这次命令；之后到达新的正常周期仍可产生新任务。所有者和未过期租约守卫拒绝旧 worker 的晚到心跳或完成写入，但不能撤销已经发出的远程操作，也不保证网络隔离后外部副作用恰好一次。取消是协作式的；部分收尾操作保留已有 15 秒独立预算。
+
+参数在入队时固定，执行使用当时的不可变配置快照，历史记录参数、计划 revision 和配置摘要。配置摘要在调用任务前写入，不含原始配置。队列总容量 4000；按任务保留最新 100 条历史及最近一条自动调度水位，提交时和完成时裁剪终态。旧 JSONB 历史仍可读；有界列表不取日志正文，详情/历史按需取最多 100 条。
+
+快照和迁移归档将新表运行记录合并到旧 `SchedulerRuns` 结构，恢复时拒绝仍持有有效租约的 worker，归档中的活动状态转为 interrupted，永不恢复为可执行队列。升级需先排空或取消旧任务，统一更新 API、Bot、Scheduler；旧 worker 不理解新互斥规则，不能混跑。回退前也必须排空新队列并验证历史兼容。
+
+配置写入、恢复、启动读取和热重载通过主配置旁的 `.write.lock` 协调。锁文件不会删除，崩溃后由操作系统释放；这不是旧 JSON 状态文件锁。所有进程需使用同一配置路径及可访问锁文件的用户/权限；不支持各节点分别保存一份主配置却声称全局文件写互斥。网页 revision 覆盖主/local 文件内容与有效配置；过期保存返回 409。临时文件先同步再替换，热重载准备失败时仅回滚自己的候选内容；外部编辑不参与锁协议，保存前会复核，但不能将不遵守锁的任意外部写入当作严格事务。
+
+本进程有活动任务时不更换数据库/Redis/会话资源；外部配置变更会在任务收尾后重试热重载。周期扫描参数变化在下一轮轮询生效；已入队和执行中的参数保持不变。工单类型回写走主配置局部合并，保存失败会明确报告数据库修改已完成、配置尚未保存；数据库与文件并不是一个分布式事务。
+
+本批尚未将任务注册器完全类型化，任务执行仍复用已有 HTTP request 适配器；并发上限固定为四，尚无按任务超时/重试的完整策略。
+
+迁移导入的配置准备同样以主文件为基础，并在文件锁内重新合并；配置应用、资源暂存、数据库导入及失败回滚共享该边界。数据库导入失败后恢复资源，而不是仅删除资源备份；资源回滚仍依赖文件系统可写，尚未建立跨数据库与文件系统的持久恢复日志。

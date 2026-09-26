@@ -39,8 +39,8 @@
 go test ./...
 go vet ./...
 
-# 格式化（提交前必须执行）
-gofmt -w ./cmd ./internal
+# 格式化（只处理本次修改的 Go 文件）
+gofmt -w path/to/changed.go
 
 # 直接以源码运行 API 服务
 go run ./cmd/twilight api --host 0.0.0.0 --port 5000 --config config.toml --debug
@@ -48,6 +48,24 @@ go run ./cmd/twilight api --host 0.0.0.0 --port 5000 --config config.toml --debu
 # 构建生产二进制
 go build -o bin/twilight ./cmd/twilight
 ```
+
+### PostgreSQL 集成回归
+
+`internal/store` 和 `internal/api` 的数据库用例需要真实 PostgreSQL。必须使用独立、允许清空的测试库：每个用例都会删除或截断业务表，不能指向生产库。未配置 `TWILIGHT_TEST_DSN` 时，Store 包跳过，API 包只运行不依赖数据库的测试；这种绿色结果不能作为数据库验收证据。
+
+在当前终端设置 `TWILIGHT_TEST_DSN` 为测试库连接串，同时把 `TWILIGHT_DATABASE_URL` 指向同一个测试库，供配置保存/热重载用例使用。不要将连接串写入仓库或打印到日志。两个包共享测试库，必须串行运行：
+
+```bash
+go test -p 1 ./... -count=1
+
+# TG 绑定、解绑、换绑及协议边界的聚焦回归
+go test -p 1 ./internal/store ./internal/api -run 'Test(Telegram|BindHub|RegisterBindCodeCreateFailure|ForceBindUnbind|RevokeAllRebind)' -count=1
+
+# 需要平台支持及可用的 C 编译器
+go test -p 1 -race ./internal/store ./internal/api -count=1
+```
+
+CI 的 `postgres-integration` 作业提供独立 PostgreSQL 服务，并执行串行数据库测试及 race 检查。配置默认值测试会自行隔离数据库环境覆盖，避免把集成测试 DSN 误当成默认配置。
 
 ### 启动约定
 
@@ -114,6 +132,9 @@ pnpm dev
 
 # 类型检查
 pnpm typecheck
+
+# TG 绑定码终态、超时与取消回归
+pnpm test:bind-code-status
 
 # Lint
 pnpm lint
@@ -295,7 +316,7 @@ Twilight 不对 Cookie 鉴权的变更类请求做 CSRF 令牌校验，也不做
 - `twilight_telegram_roster` 以 `(chat_id, telegram_id)` 为主键。普通群消息先命中进程内最多 4096 项的热观察缓存，同成员状态未变时五分钟内不访问数据库；冷缓存仍由 SQL 条件阻止近期行产生物理 UPDATE。定时成员检查先在 Go 内合并重复项，再通过一次 JSONB UPSERT 落库。启动会幂等迁移旧 `State.TelegramRoster`，备份/恢复则由 `Snapshot` / `LoadSnapshot` 合并和拆分，运行期不得把全量花名册重新常驻主状态。
 - 新增列表接口应保持统一响应口径：数据数组放在 `items` 或既有兼容字段，增量游标使用 `next_cursor`；变更字段名或排序语义前必须同步后端 API 文档、前端 API 类型和调用方。
 - 新增缓存必须写清作用域（进程 / Redis / 前端内存）、TTL、容量上限、失效条件和降级行为；配置热重载后不能继续读取旧配置或旧 store 句柄。外部服务的 URL 或凭据变化时必须清空以服务器身份为作用域的缓存；当前 Emby 热重载会清理会话、设备审查与管理员判定缓存。
-- 配置文件签名探测由 API、Scheduler 与 Bot 共用 500ms 进程级节流；不得在普通 HTTP 请求路径恢复每请求两次文件系统 `stat`。绑定码 HTTP 长轮询应复用 `bindStatusHub` 状态通知和到期/超时定时器，不得恢复 500ms 周期扫描。
+- 配置文件签名探测由 API、Scheduler 与 Bot 共用 500ms 进程级节流；不得在普通 HTTP 请求路径恢复每请求两次文件系统 `stat`。绑定码 HTTP 长轮询复用本地 hub 通知，单次最多等 2 秒后重新读 PostgreSQL，以覆盖独立 Bot 提交；不得恢复请求内 500ms 周期扫描。
 
 ### 迁移与引导
 
@@ -383,3 +404,20 @@ cd webui && BACKEND_URL=http://127.0.0.1:5000 pnpm dev
 - 配置搜索框的清除图标必须使用 locale 文案并提供 `aria-label`，不能在页面中硬编码无本地化的可访问名称。
 - Firefox 的 `IntersectionObserver.rootMargin` 只接受像素或百分比。配置段滚动定位及后续观察器不得使用 `rem`、`em`、视口单位或 `calc()`，避免构造观察器时直接让页面进入错误边界。
 - 设备/IP 表格、求片处理队列、工单会话与附件条、注册码结果与使用记录、邮箱表格、公告预览和运行日志必须在自身的 Firefox 滚动区域中显示并阻断滚动链。Flex 工单会话正文要保留 `min-h-0`，否则窄屏时 Firefox 可能让内容撑开容器而不是内部滚动；长表格固定表头并在自身处理横向滚动。
+
+### TG 挑战持久化开发约定
+
+`internal/store/telegram_challenge_schema.go` 维护版本 1 专用表，`telegram_challenges.go` 管理签发、验证、取消旧码、过期和容量；`registration.go` 将账号创建、注册码权益、身份历史及挑战消费放在同一事务。锁顺序固定为进程 Store → 主状态行 → 挑战行，外部资格校验必须在进入事务前结束。重试错误只更新观察到的 pending revision。
+
+Bot 和签名 HTTP 适配器共用 `confirmTelegramChallenge`。产品前端统一使用 `useBindCodeStatus` 并把 `challenge_id` 传给状态接口；Bot 码只用于展示/复制，注册浏览器证明只能由 HttpOnly Cookie 携带。新挑战不写 `State.BindCodes`，不进入导出，恢复时必须清空。新增表已加入两套测试库清理列表。
+
+真实 PostgreSQL 回归：`go test -p 1 ./internal/store ./internal/api -run TestTelegramChallenge -count=1`；全仓库使用 `go test -p 1 ./...`。不要把未设置 `TWILIGHT_TEST_DSN` 的跳过当作数据库通过。
+
+
+### Scheduler / 配置回归与发布
+
+在独立测试库环境中执行 `go test -p 1 ./internal/config ./internal/store ./internal/api -run 'Test(Config|Scheduler|TicketType)' -count=1`。新增回归覆盖独立 worker 子进程的取消/崩溃、四个有效租约上限、所有者守卫、取消历史容量、迁移重复恢复、版本冲突，以及操作系统文件锁在子进程崩溃后的释放。配置测试仅操作临时文件，外部服务使用测试 HTTP 服务，不连接真实 Telegram/Emby。
+
+Firefox 页面检查应同时覆盖排队/等待取消、3 秒可见轮询、计划旧版本冲突、TOML 扩展字段保留、冲突草稿保留及 390/768/1440 像素布局。类型检查和生产构建不能替代这些交互。
+
+发布新调度器前先排空或取消旧任务，统一替换 API/Bot/Scheduler；手动任务也依赖 scheduler/all 进程。数据库导入需要停止执行中的 worker；历史归档只恢复记录，不恢复执行命令。配置锁文件属于运行产物，已由 `.gitignore` 忽略，不要删除正在使用的锁文件。

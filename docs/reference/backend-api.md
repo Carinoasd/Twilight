@@ -1425,6 +1425,12 @@ WebUI 管理端使用 `/api/v2/admin/media-requests` 资源集合及其 `/by-key
 
 ### 9.4.1 工单系统
 
+V2 有界会话：详情与写响应可传 `message_limit=50`（最多 100）；返回 `reply_count` 总量、`revision` 及 `message_page`。新增 `GET /api/v2/tickets/{ticket_id}/messages` 和 `GET /api/v2/admin/tickets/{ticket_id}/messages`，使用可选排除游标 `before` 与 `limit`（默认 50、最大 100）；回复 `id` 在同一工单内按原追加顺序稳定。用户消息资源仅限本人，管理员读取他人工单走 admin 资源。未传 `message_limit` 的旧 V2/V1 仍返回完整历史。
+
+回复支持可选 `Idempotency-Key`（16–128 位字母、数字、`_`、`-`），同用户同工单同键同文重放不追加消息/通知/审计，同键异文返回 `TICKET_REPLY_CONFLICT` / 409。响应新增 `message` 与 `replayed`；管理员响应同时保留 `ticket` 与兼容别名 `item`。管理员 PATCH 可带正整数 `expected_revision`，过期返回 `TICKET_REVISION_CONFLICT` / 409。未传版本的兼容调用仍按原单字段 patch 语义处理。
+
+附件提交原子检查归属、当前角色、关闭状态与数量配额，V2 写响应含 `revision` 与 V2 附件 URL。读取附件禁止共享缓存；通知设置仅接受 JSON boolean。普通用户回复已解决工单引起重开时同步复核打开工单限额。详见工单功能文档的兼容和未完成范围。
+
 用户接口：`GET /tickets`、`GET /tickets/{ticket_id}`、`POST /tickets`、`POST /tickets/{ticket_id}/reply`、`POST /tickets/{ticket_id}/close`、`POST /tickets/{ticket_id}/reopen`、`PUT /tickets/{ticket_id}/notify-telegram`、`POST|DELETE /tickets/{ticket_id}/images`。
 
 管理员接口：`GET /admin/tickets`、`GET /admin/tickets/{ticket_id}`、`PUT /admin/tickets/{ticket_id}`、`POST /admin/tickets/{ticket_id}/reply`、`DELETE /admin/tickets/{ticket_id}`、`GET|POST|PUT|DELETE /admin/ticket-types`。
@@ -1558,7 +1564,7 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 
 ### 9.9 定时任务管理
 
-定时任务的计划信息与执行历史持久化在状态存储中（`internal/store`）；每个 `job_id` 默认保留最近若干条执行记录，超出后自动裁剪。进程启动时会把长时间残留在 `running` 状态的记录改判为 `failed`，避免崩溃后前端永远转圈。
+计划覆盖继续保存在状态文档中，新运行命令及历史由 `internal/store/scheduler_queue.go` 持久化到 `twilight_job_runs`。旧 JSONB 历史保留兼容读取。API 只入队，`scheduler` / `all` 领取执行，使用 30 秒租约及两秒心跳；失联记录标记 interrupted，不自动重放旧命令。读接口不修改持久历史；旧版无租约的过期 running 仅在响应中投影为带 interrupted 摘要的 failed。
 
 `GET /admin/scheduler/jobs` 返回的每个 job 含触发器结构化描述：
 
@@ -1578,7 +1584,10 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 | `job_id` | 任务标识（如 `check_expired`、`emby_sync`） |
 | `type` | 执行类型：`auto` / `manual` |
 | `trigger` | 触发来源：`scheduled` / `manual` / `startup` |
-| `status` | `running` / `success` / `failed` |
+| `status` | `queued` / `running` / `cancel_requested` / `success` / `failed` / `cancelled` / `interrupted` |
+| `created_at` / `heartbeat_at` / `lease_until` | 入队、心跳、租约截止时间（秒）；未执行时 started_at 为 0 |
+| `params` | 入队时规范化的任务参数 |
+| `schedule_revision` / `config_revision` | 计划版本与执行配置摘要；不含配置密钥 |
 | `started_at` | 起始时间戳（秒） |
 | `finished_at` | 结束时间戳（秒），运行中为 `null` |
 | `error` | 失败时的异常摘要 |
@@ -1625,7 +1634,7 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 `POST /admin/scheduler/jobs/{job_id}/run`
 
 - 说明：将指定任务排入后台执行；接口立即返回，前端通过轮询 `/admin/scheduler/jobs` 拿到结束状态。
-- 响应：`data.last_run` 是触发时的快照（通常为 `running`）。
+- 响应：`data.last_run` 是入队快照，状态为 `queued`。同一任务仍在排队、运行或等待取消时返回 409；必须运行 `scheduler` 或 `all` 才能执行。
 - `cleanup_emby_devices` 运行参数：
   - `dry_run`：默认 `true`，只统计候选设备并写入运行日志，不删除。
   - `max_workers`：并发删除请求数，范围 `1-10`，默认 `10`。
@@ -1640,7 +1649,7 @@ curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/ru
 
 `POST /admin/scheduler/jobs/{job_id}/terminate`
 
-- 说明：请求终止正在运行的任务。
+- 说明：跨进程提交取消请求。排队任务直接 cancelled，执行中的任务变为 cancel_requested，由 worker 协作停止。响应 `cancel_requested` 表示找到活动任务；`terminated=true` 仅表示排队任务已取消；无活动任务时 `already_stopped=true`。等待取消期间不释放同任务互斥。
 
 #### 获取最近一次完整运行（含日志）
 
@@ -1658,7 +1667,7 @@ curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/ru
 
 `PUT /admin/scheduler/jobs/{job_id}/schedule`
 
-- 说明：把新的触发规则写入状态存储并实时重排；下次进程重启后仍生效。每个 `job_id` 至多一条覆盖。
+- 说明：把新的触发规则写入状态存储，下次到期扫描生效，重启后保留。每个 `job_id` 至多一条覆盖；入队/执行中的任务保留原参数。列表返回 `schedule_revision`，PUT 可带 `expected_revision`（非负安全整数），过期返回 `409 SCHEDULER_REVISION_CONFLICT`。手动专用任务只保存参数，不能变成周期任务。
 - 请求体（二选一）：
 
 ```json
@@ -1689,7 +1698,7 @@ curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/ru
 
 `DELETE /admin/scheduler/jobs/{job_id}/schedule`
 
-- 说明：删除该 job 的覆盖记录，并按 `default_trigger_spec` 重新排程。
+- 说明：清除该 job 的覆盖效果，并按 `default_trigger_spec` 重新排程；内部保留递增版本墓碑。可传查询参数 `expected_revision`，过期返回 `409 SCHEDULER_REVISION_CONFLICT`。未传 revision 的旧客户端保留兼容写入。
 
 ### 9.10 公告管理
 
@@ -1884,6 +1893,10 @@ curl -N "http://localhost:5000/api/v1/system/admin/runtime/logs/stream?limit=100
 ```
 
 ### 10.13 config.toml 读写与备份
+
+WebUI 使用 `/api/v2/admin/config/{schema,toml}` 及 `/api/v2/admin/config/restore`。schema/TOML GET 返回不透明 `revision`；PUT 请求体及恢复确认携带 `expected_revision`，冲突返回 `409 CONFIG_REVISION_CONFLICT`，客户端保留草稿并提示重载。旧调用方可省略 revision，但仍通过跨进程串行保存边界。
+
+schema 的 `value` 是主配置可编辑值，`effective_value` 是遮蔽后的最终生效值，`overridden` 标记不同，`present_in_file` 只描述主文件是否存在该键。TOML 的 `raw_content` 保留扩展字段，`content` 为管理字段规范化视图；编辑器使用前者。保存/恢复遵循文件锁、校验、备份、替换和运行时准备；错误响应不包含底层路径或上游错误。
 
 `GET /system/admin/config/toml` — 读取当前 config.toml（管理员）。
 
@@ -2256,3 +2269,5 @@ V2 签到资源为 `GET /api/v2/signin/summary`、`POST /api/v2/signin`、`POST 
 - 外部系统推荐使用 API Key 访问 `/api/v1/apikey/*`，见 [API Key 外部接入](../reference/api-key.md)。
 - 路由速查见 [API 路由索引](../reference/api-index.md)；安全机制见 [安全加固](../guides/security.md)；后端架构与配置见 [Go 后端架构与配置](../reference/backend.md)。
 - 如果配置与接口行为不一致，以后端实际返回与运行时 API 控制台为准。
+
+配置协调补充：迁移导入携带配置时遵循同一文件写锁，未知主配置字段保留，不把本机环境覆盖值混入导入候选；资源或数据库导入失败时尝试恢复本次配置和资源，回滚不会直接覆盖外部更新的配置。工单类型新增/删除/重命名若数据库修改成功但配置保存失败，返回 CONFIG_SAVE_FAILED，并明确提示部分完成；旧有类型变更审计仍记录。
