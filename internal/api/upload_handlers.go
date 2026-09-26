@@ -388,13 +388,8 @@ func (a *App) handleUploadServerIcon(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, http.StatusInternalServerError, ErrUploadSaveFailed, "保存文件失败")
 		return
 	}
-	values := configValues(*a.cfg())
-	if values["Global"] == nil {
-		values["Global"] = map[string]any{}
-	}
 	serverIcon := filepath.ToSlash(filepath.Join("server-icon", filename))
-	values["Global"]["server_icon"] = serverIcon
-	info, status, message := a.saveConfigContent(renderConfigTOML(values))
+	info, status, message := a.patchConfigSections("", map[string]any{"Global": map[string]any{"server_icon": serverIcon}})
 	if status != http.StatusOK {
 		_ = os.Remove(filePath)
 		failWithCode(w, status, ErrConfigSaveFailed, message)
@@ -519,12 +514,7 @@ func (a *App) handleUploadAuthBackground(w http.ResponseWriter, r *http.Request,
 		oldPath := filepath.Join(dir, "background"+oldExt)
 		_ = os.Remove(oldPath)
 	}
-	values := configValues(*a.cfg())
-	if values["Global"] == nil {
-		values["Global"] = map[string]any{}
-	}
-	values["Global"]["auth_background_url"] = "/system/auth-background"
-	info, status, message := a.saveConfigContent(renderConfigTOML(values))
+	info, status, message := a.patchConfigSections("", map[string]any{"Global": map[string]any{"auth_background_url": "/system/auth-background"}})
 	if status != http.StatusOK {
 		_ = os.Remove(filePath)
 		failWithCode(w, status, ErrConfigSaveFailed, message)

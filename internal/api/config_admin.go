@@ -1,17 +1,19 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
-	"go.uber.org/zap"
 
 	"github.com/prejudice-studio/twilight/internal/config"
 	"github.com/prejudice-studio/twilight/internal/store"
@@ -175,15 +177,12 @@ func tomlScalarIsEmpty(rawVal string) bool {
 
 func (a *App) handleConfigTOMLPutSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
-	// handleConfigTOMLGet 现在向前端回传遮蔽后的密钥哨兵（secretMaskValue）。
-	// 管理员若未改动密钥，提交回来的 content 里这些字段仍是哨兵串；这里在写盘
-	// 之前把哨兵还原为内存中的真实值，避免哨兵被当作真值覆盖 config.toml，
-	// 导致 Emby Token / Bot Token / Postgres 密码 / BotInternalSecret 等被清成
-	// 无效字符串。显式提交的新值（非哨兵）一律视为覆盖。
-	content := restoreTOMLSecrets(stringValue(payload, "content"), configValues(*a.cfg()))
-	info, status, message := a.saveConfigContent(content)
+	content := stringValue(payload, "content")
+	info, status, message := a.editConfig(stringValue(payload, "expected_revision"), func(snapshot configEditSnapshot) (string, error) {
+		return restoreTOMLSecrets(content, configValues(snapshot.file)), nil
+	})
 	if status != http.StatusOK {
-		failWithCode(w, status, ErrConfigBackupInvalid, message)
+		failConfigEdit(w, status, message)
 		return
 	}
 	a.audit(r, "update_config_toml", "admin", 0, map[string]any{"bytes": len(content)})
@@ -235,10 +234,16 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 		return
 	}
 	if err := validateConfigContent(a.configFilePath(), content); err != nil {
-		failWithCode(w, http.StatusBadRequest, ErrConfigBackupVerifyFailed, "配置备份校验失败: "+err.Error())
+		failWithCode(w, http.StatusBadRequest, ErrConfigBackupVerifyFailed, "配置备份校验失败")
+		return
+	}
+	snapshot, snapshotErr := a.configEditSnapshot()
+	if snapshotErr != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
 		return
 	}
 	result := map[string]any{
+		"revision":              snapshot.revision,
 		"operation":             "restore_config",
 		"dry_run":               true,
 		"requires_confirmation": true,
@@ -257,9 +262,9 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 		return
 	}
 
-	info, status, message := a.saveConfigContent(string(content))
+	info, status, message := a.editConfig(stringValue(payload, "expected_revision"), func(configEditSnapshot) (string, error) { return string(content), nil })
 	if status != http.StatusOK {
-		failWithCode(w, status, ErrConfigBackupInvalid, message)
+		failConfigEdit(w, status, message)
 		return
 	}
 	result["dry_run"] = false
@@ -267,6 +272,7 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 	result["pre_restore_backup"] = info["backup"]
 	result["pre_operation_backup"] = info["backup"]
 	result["reload"] = info["reload"]
+	result["revision"] = info["revision"]
 	a.audit(r, "restore_config_backup", "admin", 0, map[string]any{"backup": backup.Name, "bytes": len(content)})
 	ok(w, "配置已恢复并热重载", result)
 }
@@ -321,13 +327,22 @@ func configFilePresentFields(content string) map[string]map[string]bool {
 }
 
 func (a *App) handleConfigSchemaFull(w http.ResponseWriter, r *http.Request, _ Params) {
-	values := configValues(*a.cfg())
-	present := configFilePresentFields(a.existingConfigContent())
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	values := configValues(snapshot.file)
+	effectiveRaw := configValues(snapshot.effective)
+	effective := configValues(snapshot.effective)
+	maskConfigSecrets(effective)
+	present := configFilePresentFields(snapshot.content)
 	sections := make([]map[string]any, 0, len(configSectionDefs()))
 	for _, def := range configSectionDefs() {
 		fields := make([]map[string]any, 0, len(def.Fields))
 		for _, field := range def.Fields {
 			rawValue := values[def.Key][field.Key]
+			overridden := !reflect.DeepEqual(rawValue, effectiveRaw[def.Key][field.Key])
 			// 密钥字段不回传明文：非空 → sentinel；空 → 空串。前端 SecretField
 			// 在用户没有改动时会原样回传 sentinel，handleConfigSchemaUpdateSafe
 			// 会识别并回填真实值。
@@ -345,6 +360,8 @@ func (a *App) handleConfigSchemaFull(w http.ResponseWriter, r *http.Request, _ P
 				"description":     field.Description,
 				"value":           rawValue,
 				"present_in_file": present[def.Key][field.Key],
+				"effective_value": effective[def.Key][field.Key],
+				"overridden":      overridden,
 			}
 			if len(field.Options) > 0 {
 				item["options"] = field.Options
@@ -372,55 +389,16 @@ func (a *App) handleConfigSchemaFull(w http.ResponseWriter, r *http.Request, _ P
 			{"key": "ops", "title": "运维"},
 		},
 		"sections": sections,
+		"revision": snapshot.revision,
 	})
 }
 
 func (a *App) handleConfigSchemaUpdateSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	rawSections, _ := payload["sections"].(map[string]any)
-	values := configValues(*a.cfg())
-	allowed := map[string]map[string]configFieldDef{}
-	for _, section := range configSectionDefs() {
-		allowed[section.Key] = map[string]configFieldDef{}
-		for _, field := range section.Fields {
-			allowed[section.Key][field.Key] = field
-		}
-	}
-	for sectionKey, rawFields := range rawSections {
-		fields, okFields := rawFields.(map[string]any)
-		if !okFields {
-			continue
-		}
-		for fieldKey, value := range fields {
-			field, okField := allowed[sectionKey][fieldKey]
-			if !okField {
-				continue
-			}
-			if values[sectionKey] == nil {
-				values[sectionKey] = map[string]any{}
-			}
-			// secret 字段：管理端没改 → 收到 sentinel → 用现存内存值回填，避免
-			// 写入 sentinel 串污染 TOML。其它写法（空串 / 新值）一律当作显式
-			// 覆盖处理，前端必须主动清空才会写入空。
-			if field.Type == "secret" {
-				if text, ok := value.(string); ok && text == secretMaskValue {
-					value = values[sectionKey][fieldKey]
-				}
-			}
-			values[sectionKey][fieldKey] = normalizeConfigField(field, value)
-		}
-	}
-	ensureTicketDefaults(values)
-	// 以现有文件为底稿合并：schema 之外的键（管理员手写的段、尚未纳管的字段）
-	// 必须保留，否则一次可视化保存就会把 emby_public_url / Admin.uids 之类静默删掉。
-	content, mergeErr := mergeConfigTOML(a.existingConfigContent(), values)
-	if mergeErr != nil {
-		zap.L().Warn("config merge fell back to schema-only render", zap.Error(mergeErr))
-		content = renderConfigTOML(values)
-	}
-	info, status, message := a.saveConfigContent(content)
+	info, status, message := a.patchConfigSections(stringValue(payload, "expected_revision"), rawSections)
 	if status != http.StatusOK {
-		failWithCode(w, status, ErrConfigBackupInvalid, message)
+		failConfigEdit(w, status, message)
 		return
 	}
 	a.audit(r, "update_config_schema", "admin", 0, map[string]any{"sections": sortedKeys(rawSections)})
@@ -442,6 +420,10 @@ func (a *App) existingConfigContent() string {
 }
 
 func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
+	return a.editConfig("", func(configEditSnapshot) (string, error) { return content, nil })
+}
+
+func (a *App) saveConfigContentLocked(content, expectedRevision string) (map[string]any, int, string) {
 	if strings.TrimSpace(content) == "" {
 		return nil, http.StatusBadRequest, "配置内容不能为空"
 	}
@@ -449,13 +431,16 @@ func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
 	if err := os.MkdirAll(filepath.Dir(configFile), 0o700); err != nil {
 		return nil, http.StatusInternalServerError, "创建配置目录失败"
 	}
-	normalizedContent, err := normalizeConfigContent(configFile, content)
-	if err != nil {
-		return nil, http.StatusBadRequest, "配置校验失败: " + err.Error()
-	}
-	content = normalizedContent
 	existing, readErr := os.ReadFile(configFile)
 	hadExisting := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, http.StatusInternalServerError, "读取配置失败"
+	}
+	normalizedContent, err := normalizeConfigContent(configFile, content)
+	if err != nil {
+		return nil, http.StatusBadRequest, "配置校验失败"
+	}
+	content = normalizedContent
 	content = mergeProtectedAdminConfig(content, string(existing))
 	// repo_url 与 admin_uids/admin_usernames 同属"禁止网页改写"字段：git 自动更新
 	// 的来源仓库只能由运维在配置文件侧设定，防止被盗管理员会话改 origin 后触发
@@ -464,7 +449,7 @@ func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
 		content = restoreProtectedRepoURL(content, string(existing))
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
-		return nil, http.StatusBadRequest, "配置校验失败: " + err.Error()
+		return nil, http.StatusBadRequest, "配置校验失败"
 	}
 	var backupInfo *store.BackupInfo
 	if hadExisting {
@@ -476,13 +461,19 @@ func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
 	}
 	stamp := strconv.FormatInt(time.Now().UnixNano(), 10)
 	tmpPath := configFile + "." + stamp + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0o600); err != nil {
+	if err := writeConfigCandidate(tmpPath, []byte(content)); err != nil {
 		return nil, http.StatusInternalServerError, "保存临时配置失败"
 	}
 	// 不要在 Rename 之前 Remove configFile：POSIX rename(2) 已经原子替换目标，
 	// 提前 Remove 反而打开了一个 "configFile 不存在" 的窗口——若此时进程被
 	// SIGKILL 或磁盘忽然写满（Rename 失败 + 下一行 WriteFile rollback 也失败）
 	// 系统下次启动找不到 config.toml 就直接 fail-fast。
+	latest, latestErr := os.ReadFile(configFile)
+	snapshot, snapshotErr := a.configEditSnapshot()
+	if snapshotErr != nil || snapshot.revision != expectedRevision || (latestErr != nil && !os.IsNotExist(latestErr)) || string(latest) != string(existing) {
+		_ = os.Remove(tmpPath)
+		return nil, http.StatusConflict, "配置已被外部修改，请重新加载"
+	}
 	if err := os.Rename(tmpPath, configFile); err != nil {
 		_ = os.Remove(tmpPath)
 		if hadExisting {
@@ -491,20 +482,15 @@ func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
 		}
 		return nil, http.StatusInternalServerError, "替换配置失败"
 	}
-	reloadInfo, err := a.reloadConfig()
+	reloadInfo, err := a.reloadConfigLocked()
 	if err != nil {
-		if hadExisting {
-			// 热重载失败回滚：先把旧内容写到 tmp，再原子 rename 替换；避免
-			// 走 Remove + WriteFile 这条会再次留下"无 config.toml"窗口的旧路径。
-			rollbackTmp := configFile + "." + stamp + ".rollback.tmp"
-			if writeErr := os.WriteFile(rollbackTmp, existing, 0o600); writeErr == nil {
-				if renameErr := os.Rename(rollbackTmp, configFile); renameErr != nil {
-					_ = os.Remove(rollbackTmp)
-				}
-			}
-			_, _ = a.reloadConfig()
+		if rollbackErr := rollbackConfigCandidate(configFile, content, existing, hadExisting); rollbackErr != nil {
+			return nil, http.StatusInternalServerError, "配置热重载及回滚失败，请检查配置文件"
 		}
-		return nil, http.StatusBadRequest, "配置已回滚，热重载失败: " + err.Error()
+		if errors.Is(err, errSchedulerRuntimeBusy) {
+			return nil, http.StatusServiceUnavailable, "任务仍在运行，请等待任务结束后再修改数据库或会话配置"
+		}
+		return nil, http.StatusBadRequest, "配置热重载失败，请重新加载检查当前状态"
 	}
 	info := map[string]any{"path": configFile, "reload": reloadInfo}
 	if backupInfo != nil {
@@ -515,6 +501,23 @@ func (a *App) saveConfigContent(content string) (map[string]any, int, string) {
 }
 
 func (a *App) saveInitialSetupConfigContent(content, adminUsername string) (map[string]any, int, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	var info map[string]any
+	status := http.StatusInternalServerError
+	message := "配置保存失败"
+	err := config.WithWriteLock(ctx, a.configFilePath(), func() error {
+		a.runtimeMu.Lock()
+		defer a.runtimeMu.Unlock()
+		info, status, message = a.saveInitialSetupConfigContentLocked(content, adminUsername)
+		return nil
+	})
+	if err != nil {
+		return nil, http.StatusServiceUnavailable, "配置保存暂不可用"
+	}
+	return info, status, message
+}
+func (a *App) saveInitialSetupConfigContentLocked(content, adminUsername string) (map[string]any, int, string) {
 	if strings.TrimSpace(content) == "" {
 		return nil, http.StatusBadRequest, "配置内容不能为空"
 	}
@@ -528,17 +531,20 @@ func (a *App) saveInitialSetupConfigContent(content, adminUsername string) (map[
 	}
 	normalizedContent, err := normalizeConfigContent(configFile, content)
 	if err != nil {
-		return nil, http.StatusBadRequest, "配置校验失败: " + err.Error()
+		return nil, http.StatusBadRequest, "配置校验失败"
 	}
 	content = strings.TrimRight(stripProtectedAdminConfig(normalizedContent), "\n") +
 		"\n\n[Admin]\nusernames = " + tomlValue([]any{adminUsername}) + "\n"
 	existing, readErr := os.ReadFile(configFile)
 	hadExisting := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, http.StatusInternalServerError, "读取配置失败"
+	}
 	if hadExisting {
 		content = restoreProtectedRepoURL(content, string(existing))
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
-		return nil, http.StatusBadRequest, "配置校验失败: " + err.Error()
+		return nil, http.StatusBadRequest, "配置校验失败"
 	}
 	var backupInfo *store.BackupInfo
 	if hadExisting {
@@ -550,25 +556,24 @@ func (a *App) saveInitialSetupConfigContent(content, adminUsername string) (map[
 	}
 	stamp := strconv.FormatInt(time.Now().UnixNano(), 10)
 	tmpPath := configFile + "." + stamp + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0o600); err != nil {
+	if err := writeConfigCandidate(tmpPath, []byte(content)); err != nil {
 		return nil, http.StatusInternalServerError, "保存临时配置失败"
+	}
+	latest, latestErr := os.ReadFile(configFile)
+	if (latestErr != nil && !os.IsNotExist(latestErr)) || string(latest) != string(existing) {
+		_ = os.Remove(tmpPath)
+		return nil, http.StatusConflict, "配置已被外部修改，请重新加载"
 	}
 	if err := os.Rename(tmpPath, configFile); err != nil {
 		_ = os.Remove(tmpPath)
 		return nil, http.StatusInternalServerError, "替换配置失败"
 	}
-	reloadInfo, err := a.reloadConfig()
+	reloadInfo, err := a.reloadConfigLocked()
 	if err != nil {
-		if hadExisting {
-			rollbackTmp := configFile + "." + stamp + ".rollback.tmp"
-			if writeErr := os.WriteFile(rollbackTmp, existing, 0o600); writeErr == nil {
-				if renameErr := os.Rename(rollbackTmp, configFile); renameErr != nil {
-					_ = os.Remove(rollbackTmp)
-				}
-			}
-			_, _ = a.reloadConfig()
+		if rollbackErr := rollbackConfigCandidate(configFile, content, existing, hadExisting); rollbackErr != nil {
+			return nil, http.StatusInternalServerError, "配置热重载及回滚失败，请检查配置文件"
 		}
-		return nil, http.StatusBadRequest, "配置已回滚，热重载失败: " + err.Error()
+		return nil, http.StatusBadRequest, "配置热重载失败，请重新加载检查当前状态"
 	}
 	info := map[string]any{"path": configFile, "reload": reloadInfo}
 	if backupInfo != nil {
@@ -585,7 +590,7 @@ func normalizeConfigContent(configFile, content string) (string, error) {
 		return "", err
 	}
 	defer os.Remove(tmpPath)
-	cfg, err := config.Load(tmpPath)
+	cfg, err := config.LoadFileOnly(tmpPath)
 	if err != nil {
 		return "", err
 	}

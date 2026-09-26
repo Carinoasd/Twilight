@@ -2166,7 +2166,7 @@ func (a *App) handleAdminConfig(w http.ResponseWriter, r *http.Request, _ Params
 
 func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Params) {
 	path := a.configFilePath()
-	data, err := os.ReadFile(path)
+	_, err := os.Stat(path)
 	if err != nil {
 		failWithCode(w, http.StatusNotFound, ErrConfigFileNotFound, "config file not found")
 		return
@@ -2178,11 +2178,16 @@ func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Para
 	//   - raw_content（磁盘原文）：按 section 上下文做行级 maskTOMLSecrets。
 	// 两侧用同一哨兵，completed 比较仍对非密钥字段有效。PUT 路径
 	// （handleConfigTOMLPutSafe）会把回传的哨兵还原为真实值，避免写盘覆盖。
-	maskedValues := configValues(*a.cfg())
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	maskedValues := configValues(snapshot.file)
 	maskConfigSecrets(maskedValues)
 	normalizedContent := stripProtectedAdminConfig(renderConfigTOML(maskedValues))
-	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(string(data)))
-	ok(w, "OK", map[string]any{"content": normalizedContent, "raw_content": rawContent, "path": path, "completed": normalizedContent != rawContent})
+	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(snapshot.content))
+	ok(w, "OK", map[string]any{"content": normalizedContent, "raw_content": rawContent, "path": path, "revision": snapshot.revision, "completed": normalizedContent != rawContent})
 }
 
 func (a *App) handleConfigTOMLPut(w http.ResponseWriter, r *http.Request, _ Params) {

@@ -26,19 +26,25 @@ func v2ConfigBackupDTO(info store.BackupInfo) map[string]any {
 }
 
 func (a *App) handleV2ConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Params) {
-	data, err := os.ReadFile(a.configFilePath())
+	_, err := os.Stat(a.configFilePath())
 	if err != nil {
 		failWithCode(w, http.StatusNotFound, ErrConfigFileNotFound, "配置文件不存在")
 		return
 	}
-	maskedValues := configValues(*a.cfg())
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	maskedValues := configValues(snapshot.file)
 	maskConfigSecrets(maskedValues)
 	normalizedContent := stripProtectedAdminConfig(renderConfigTOML(maskedValues))
-	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(string(data)))
+	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(snapshot.content))
 	ok(w, "OK", map[string]any{
 		"content":     normalizedContent,
 		"raw_content": rawContent,
 		"completed":   normalizedContent != rawContent,
+		"revision":    snapshot.revision,
 	})
 }
 
