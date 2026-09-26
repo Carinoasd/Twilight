@@ -1822,17 +1822,17 @@ class ApiClient {
   }
 
   async getConfigToml(signal?: AbortSignal) {
-    return this.request<{ content: string; path: string; raw_content?: string; completed?: boolean }>(
+    return this.request<{ content: string; path: string; raw_content?: string; completed?: boolean; revision?: string }>(
       "/admin/config/toml",
       { signal, cache: "no-store" },
       { cacheRead: false, dedupe: false },
     );
   }
 
-  async updateConfigToml(content: string) {
-    const res = await this.request<{ path: string }>("/admin/config/toml", {
+  async updateConfigToml(content: string, expectedRevision?: string) {
+    const res = await this.request<{ path: string; revision?: string }>("/admin/config/toml", {
       method: "PUT",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, expected_revision: expectedRevision }),
     });
     if (res.success) this.invalidateConfigSchemaCache();
     return res;
@@ -1853,7 +1853,7 @@ class ApiClient {
     return this.request<ConfigBackupView>(`/admin/config/backups/${encodeURIComponent(name)}`, { signal, cache: "no-store" }, { cacheRead: false, dedupe: false });
   }
 
-  async restoreConfigBackup(name: string, options?: { dry_run?: boolean; preview?: boolean; confirm?: string }) {
+  async restoreConfigBackup(name: string, options?: { dry_run?: boolean; preview?: boolean; confirm?: string; expected_revision?: string }) {
     const res = await this.request<ConfigRestoreResult>("/admin/config/restore", {
       method: "POST",
       body: JSON.stringify({ name, ...(options || {}) }),
@@ -1904,10 +1904,10 @@ class ApiClient {
     }
   }
 
-  async updateConfigBySchema(sections: Record<string, Record<string, unknown>>) {
+  async updateConfigBySchema(sections: Record<string, Record<string, unknown>>, expectedRevision?: string) {
     const res = await this.request("/admin/config/schema", {
       method: "PUT",
-      body: JSON.stringify({ sections }),
+      body: JSON.stringify({ sections, expected_revision: expectedRevision }),
     });
     if (res.success) this.invalidateConfigSchemaCache();
     return res;
@@ -1940,7 +1940,7 @@ class ApiClient {
 
   async restoreDatabaseBackup(
     name: string,
-    options?: { dry_run?: boolean; preview?: boolean; confirm?: string }
+    options?: { dry_run?: boolean; preview?: boolean; confirm?: string; expected_revision?: string }
   ) {
     return this.request<DatabaseRestoreResult>("/admin/database/restore", {
       method: "POST",
@@ -2065,9 +2065,9 @@ class ApiClient {
     );
   }
 
-  async resetSchedulerJobSchedule(jobId: string) {
+  async resetSchedulerJobSchedule(jobId: string, expectedRevision?: number) {
     return this.request<{ job_id: string; trigger_spec: SchedulerTriggerSpec; runtime_params?: Record<string, unknown> | null; is_custom: boolean }>(
-      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/schedule`,
+      `/admin/scheduler/jobs/${encodeURIComponent(jobId)}/schedule${expectedRevision === undefined ? "" : `?expected_revision=${expectedRevision}`}`,
       { method: "DELETE" },
     );
   }

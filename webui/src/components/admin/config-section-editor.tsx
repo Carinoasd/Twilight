@@ -324,7 +324,7 @@ export function AdminConfigSections({
           );
         }
       }
-      const res = await api.updateConfigBySchema(payload);
+      const res = await api.updateConfigBySchema(payload,schema.revision);
       if (!res.success) throw new Error(res.message || t("adminConfig.sectionEditor.saveFailed"));
       toast({ title: t("adminConfig.sectionEditor.saved"), variant: "success" });
       await reload();
@@ -393,6 +393,7 @@ export function AdminConfigSections({
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="min-w-0">
                       <Label className="font-medium">{field.label}</Label>
+                      {field.overridden && <Badge variant="outline" className="ml-2">{t("adminConfig.overridden")}</Badge>}
                       <p className="mt-1 text-xs text-muted-foreground">{field.description}</p>
                     </div>
                     {changed && <Badge variant="warning">{t("adminConfig.changed")}</Badge>}

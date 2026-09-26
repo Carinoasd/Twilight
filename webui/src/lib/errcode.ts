@@ -19,6 +19,8 @@
  * 与 internal/api/errcode.go 的 const 块严格 1:1。
  */
 export type ErrCode =
+  | "CONFIG_REVISION_CONFLICT"
+  | "SCHEDULER_REVISION_CONFLICT"
   // === 鉴权 / 会话 ===
   | "AUTH_LOGIN_RATE_LIMITED"
   | "AUTH_LOGIN_INVALID"
@@ -34,6 +36,8 @@ export type ErrCode =
   | "AUTH_PASSWORD_HASH_FAILED"
   | "AUTH_FORGOT_PASSWORD_DISABLED"
   // === 工单 ===
+  | "TICKET_REVISION_CONFLICT"
+  | "TICKET_REPLY_CONFLICT"
   | "TICKET_DISABLED"
   | "TICKET_NOT_FOUND"
   | "TICKET_RATE_LIMITED"
@@ -321,6 +325,8 @@ export type ErrCode =
  * 而非裸写字符串，重命名时 TS 会同步报错。
  */
 export const ErrCodes = {
+  ConfigRevisionConflict: "CONFIG_REVISION_CONFLICT",
+  SchedulerRevisionConflict: "SCHEDULER_REVISION_CONFLICT",
   // 鉴权 / 会话
   LoginRateLimited: "AUTH_LOGIN_RATE_LIMITED",
   LoginInvalid: "AUTH_LOGIN_INVALID",
@@ -334,6 +340,8 @@ export const ErrCodes = {
   PasswordOldMismatch: "AUTH_PASSWORD_OLD_MISMATCH",
   PasswordWeak: "AUTH_PASSWORD_WEAK",
   PasswordHashFailed: "AUTH_PASSWORD_HASH_FAILED",
+  TicketRevisionConflict: "TICKET_REVISION_CONFLICT",
+  TicketReplyConflict: "TICKET_REPLY_CONFLICT",
   // 用户 / 注册
   RegisterRateLimited: "USER_REGISTER_RATE_LIMITED",
   RegisterDisabled: "USER_REGISTER_DISABLED",

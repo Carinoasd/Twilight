@@ -650,6 +650,7 @@ function FieldRow({
                 {t("adminConfig.changed")}
               </Badge>
             )}
+            {field.overridden && <Badge variant="outline">{t("adminConfig.overridden")}</Badge>}
             {field.present_in_file === false && (
               <TooltipProvider delayDuration={300}>
                 <Tooltip>
@@ -681,6 +682,11 @@ function FieldRow({
           <p className={showFullDescription ? "text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap break-words" : "text-xs text-muted-foreground line-clamp-1"}>
             {field.description}
           </p>
+          {field.overridden && (
+            <p className="text-xs text-muted-foreground break-all">
+              {t("adminConfig.effectiveValue")}: {typeof field.effective_value === "object" ? JSON.stringify(field.effective_value) : String(field.effective_value ?? "")}
+            </p>
+          )}
         </div>
 
         <div className="flex items-center gap-2 self-start shrink-0">
@@ -1074,6 +1080,7 @@ export default function AdminConfigPage() {
   const [hasChanges, setHasChanges] = useState(false);
 
   // 可视化编辑状态
+  const [tomlRevision,setTomlRevision] = useState<string>();
   const [schema, setSchema] = useState<ConfigSchema | null>(null);
   const [editedValues, setEditedValues] = useState<
     Record<string, Record<string, unknown>>
@@ -1256,9 +1263,11 @@ export default function AdminConfigPage() {
   const loadConfigResource = useCallback(async (signal?: AbortSignal) => {
     const res = await api.getConfigToml(signal);
     if (res.success && res.data) {
-      setConfigContent(res.data.content);
-      setOriginalContent(res.data.content);
+      const source = res.data.raw_content ?? res.data.content;
+      setConfigContent(source);
+      setOriginalContent(source);
       setConfigPath(res.data.path);
+      setTomlRevision(res.data.revision);
     } else {
       throw new Error(res.message || t("adminConfig.loadTomlError"));
     }
@@ -1430,7 +1439,7 @@ export default function AdminConfigPage() {
         }
       }
 
-      const res = await api.updateConfigBySchema(sectionsPayload);
+      const res = await api.updateConfigBySchema(sectionsPayload, schema?.revision);
       if (res.success) {
         setOriginalValues(deepClone(editedValues));
         await loadSchema();
@@ -1479,8 +1488,9 @@ export default function AdminConfigPage() {
 
     setIsSaving(true);
     try {
-      const res = await api.updateConfigToml(configContent);
+      const res = await api.updateConfigToml(configContent,tomlRevision);
       if (res.success) {
+        setTomlRevision(res.data?.revision);
         setOriginalContent(configContent);
         setHasChanges(false);
         await loadSchema();
@@ -1679,6 +1689,7 @@ export default function AdminConfigPage() {
     setIsConfigBackupBusy(true);
     try {
       const res = await api.restoreConfigBackup(configRestorePreview.restored, {
+        expected_revision: configRestorePreview.revision,
         confirm: configRestorePreview.confirm || CONFIG_RESTORE_CONFIRM,
       });
       if (res.success && res.data) {

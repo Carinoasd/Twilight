@@ -152,6 +152,8 @@
     "changeEmbyPassword": "修改 Emby 密码"
   },
   "adminConfig": {
+    "effectiveValue": "实际生效值",
+    "overridden": "由本地配置或环境变量覆盖",
     "fallbackCategoryAll": "全部",
     "addItem": "添加",
     "addCustomCommand": "添加自定义指令",
@@ -264,5 +266,13 @@
     "olderMessages": "较早回复",
     "latestMessages": "最新回复",
     "messageRange": "回复 {first}–{last} / {total}"
+  },
+  "adminScheduler": {
+    "metricRunningHintActive": "每 3 秒更新状态",
+    "triggeredTitle": "已加入队列：{name}",
+    "triggeredDescription": "等待可用的调度进程执行。",
+    "noTimedJobsWarning": "当前没有自动调度。手动任务也需要运行中的 scheduler 或 all 进程。",
+    "editorFootnote": "修改适用于之后入队的任务；已入队和运行中的任务保留原参数。重置会恢复配置文件默认值。",
+    "description": "管理任务调度、执行和历史记录。"
   }
 }

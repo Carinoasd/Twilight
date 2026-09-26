@@ -1010,6 +1010,8 @@ export interface ConfigFieldOption {
 }
 
 export interface ConfigField {
+  effective_value?: unknown;
+  overridden?: boolean;
   key: string;
   label: string;
   type: 'string' | 'textarea' | 'int' | 'float' | 'bool' | 'secret' | 'list' | 'select' | 'command_map';
@@ -1036,6 +1038,7 @@ export interface ConfigCategory {
 }
 
 export interface ConfigSchema {
+  revision?: string;
   sections: ConfigSection[];
   /** 类别声明（顺序即渲染顺序）；后端可缺省，前端会回落为单一类别 */
   categories?: ConfigCategory[];
@@ -1152,6 +1155,7 @@ export interface ConfigBackupView {
 }
 
 export interface ConfigRestoreResult {
+  revision?: string;
   operation: "restore_config" | string;
   dry_run: boolean;
   requires_confirmation?: boolean;
@@ -1234,11 +1238,17 @@ export type DatabaseRestoreResult = DatabaseOperationResult & {
 };
 
 export interface SchedulerJobRun {
+  created_at?: number;
+  heartbeat_at?: number;
+  lease_until?: number;
+  params?: Record<string, unknown>;
+  schedule_revision?: number;
+  config_revision?: string;
   id?: number;
   job_id?: string;
   type?: "auto" | "manual";
   trigger?: string;
-  status: "running" | "success" | "failed";
+  status: "queued" | "running" | "cancel_requested" | "success" | "failed" | "cancelled" | "interrupted";
   started_at: number;
   finished_at: number | null;
   error: string | null;
@@ -1252,10 +1262,12 @@ export type SchedulerTriggerSpec =
   | { type: "manual" };
 
 export type SchedulerSchedulePayload = SchedulerTriggerSpec & {
+  expected_revision?: number;
   runtime_params?: Record<string, unknown> | null;
 };
 
 export interface SchedulerJobItem {
+  schedule_revision?: number;
   id: string;
   name: string;
   description: string;
