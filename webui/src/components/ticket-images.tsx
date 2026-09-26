@@ -5,7 +5,7 @@ import { ImagePlus, Loader2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogOverlay } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { api, type TicketAttachment } from "@/lib/api";
+import { api, type TicketAttachment, type Ticket } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { friendlyError } from "@/lib/validators";
 
@@ -23,7 +23,7 @@ interface TicketImagesProps {
   /** 最大图片数量（来自系统信息 limits.ticket_image_max_count）。 */
   maxCount: number;
   /** 上传/删除成功后回调，用于刷新最新附件列表。 */
-  onChange?: (attachments: TicketAttachment[]) => void;
+  onChange?: (attachments: TicketAttachment[], revision?: number, ticket?: Ticket) => void;
 }
 
 export function TicketImages({
@@ -38,6 +38,9 @@ export function TicketImages({
   const { t } = useI18n();
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
+  const activeTicketRef = useRef<number | null>(ticketId);
+  activeTicketRef.current = ticketId;
+  const mutationRef = useRef(false);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -49,16 +52,18 @@ export function TicketImages({
   const allowDelete = canDelete ?? editable;
 
   useEffect(() => {
+    activeTicketRef.current = ticketId;
     return () => {
+      activeTicketRef.current = null;
       uploadAbortRef.current?.abort();
       uploadAbortRef.current = null;
     };
-  }, []);
+  }, [ticketId]);
 
   const handlePick = () => inputRef.current?.click();
 
   const handleFile = async (file: File | undefined) => {
-    if (!file) return;
+    if (!file || mutationRef.current || !editable) return;
     if (list.length >= maxCount) {
       toast({ title: t("tickets.imageTooMany", { count: maxCount }), variant: "destructive" });
       return;
@@ -71,15 +76,17 @@ export function TicketImages({
       toast({ title: t("tickets.imageTooLarge", { size: sizeMB }), variant: "destructive" });
       return;
     }
+    mutationRef.current = true;
     setUploading(true);
     uploadAbortRef.current?.abort();
     const controller = new AbortController();
     uploadAbortRef.current = controller;
     try {
       const res = await api.uploadTicketImage(ticketId, file, controller.signal);
+      if (activeTicketRef.current !== ticketId) return;
       if (res.success && res.data) {
         toast({ title: t("tickets.imageUploaded") });
-        onChange?.(res.data.attachments);
+        onChange?.(res.data.attachments, res.data.revision, res.data.ticket);
       } else {
         toast({ title: friendlyError(res.error_code, res.message), variant: "destructive" });
       }
@@ -87,6 +94,7 @@ export function TicketImages({
       if (controller.signal.aborted) return;
       toast({ title: friendlyError(err?.errorCode, err?.message), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       if (uploadAbortRef.current === controller) {
         uploadAbortRef.current = null;
         setUploading(false);
@@ -96,18 +104,22 @@ export function TicketImages({
   };
 
   const handleDelete = async (filename: string) => {
+    if (mutationRef.current || !allowDelete) return;
+    mutationRef.current = true;
     setDeleting(filename);
     try {
       const res = await api.deleteTicketImage(ticketId, filename);
+      if (activeTicketRef.current !== ticketId) return;
       if (res.success && res.data) {
         toast({ title: t("tickets.imageDeleted") });
-        onChange?.(res.data.attachments);
+        onChange?.(res.data.attachments, res.data.revision, res.data.ticket);
       } else {
         toast({ title: friendlyError(res.error_code, res.message), variant: "destructive" });
       }
     } catch (err: any) {
       toast({ title: friendlyError(err?.errorCode, err?.message), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setDeleting(null);
     }
   };
@@ -140,9 +152,9 @@ export function TicketImages({
                     event.stopPropagation();
                     void handleDelete(att.filename);
                   }}
-                  disabled={deleting === att.filename}
-                  title={t("tickets.deleteImage")}
-                  className="absolute top-0.5 right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive disabled:opacity-100"
+                  disabled={deleting !== null || uploading}
+                  title={t("tickets.deleteImage")} aria-label={t("tickets.deleteImage")}
+                  className="absolute top-0.5 right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity hover:bg-destructive disabled:opacity-100"
                 >
                   {deleting === att.filename ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
                 </button>
@@ -154,7 +166,7 @@ export function TicketImages({
           <button
             type="button"
             onClick={handlePick}
-            disabled={uploading}
+            disabled={uploading || deleting !== null}
             className="flex h-20 w-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors disabled:opacity-60"
           >
             {uploading ? (

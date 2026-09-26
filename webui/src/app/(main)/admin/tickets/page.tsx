@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   MessageSquareMore, Loader2, Trash2, Edit2, AlertCircle, Clock, User,
   CheckCircle2, Archive, RotateCcw, PlayCircle, Plus, Pencil, Settings2, RefreshCw,
-  ArrowRight, MoreHorizontal, Image as ImageIcon,
+  ArrowRight, MoreHorizontal, ShieldAlert, Image as ImageIcon,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -480,9 +480,15 @@ export default function AdminTicketsPage() {
                   </Select>
                 </div>
               </div>
+              {/* 这块是内部备注，不是回复框。此前挂的是「管理员回复」标签配一个会话图标，
+                  管理员很容易把要发给用户的话写进这个用户永远看不到的字段里。 */}
               <div className="space-y-2">
-                <Label className="flex items-center gap-1"><MessageSquareMore className="h-3.5 w-3.5" />{t("tickets.adminReply")}</Label>
-                <Textarea value={editNote} onChange={(e) => setEditNote(e.target.value)} placeholder={t("adminTickets.adminNotePlaceholder")} rows={4} maxLength={5000} className="resize-y" />
+                <Label className="flex items-center gap-1"><ShieldAlert className="h-3.5 w-3.5" />{t("adminTickets.adminNote")}</Label>
+                <Textarea value={editNote} onChange={(e) => setEditNote(e.target.value)} placeholder={t("adminTickets.adminNotePlaceholder")} rows={4} maxLength={5000} className="resize-y bg-muted/30" />
+                <p className="flex items-start gap-1 text-[11px] text-muted-foreground">
+                  <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {t("adminTickets.adminNoteNotVisible")}
+                </p>
               </div>
             </div>
           )}

@@ -21,7 +21,7 @@
 
 管理员元数据更新与聊天回复是两种独立操作：状态、优先级、类型和 `admin_note` 走元数据更新；聊天文字走 `AddTicketReply` 追加。两条路径都不能重建或替换 `replies`，从根源上避免管理员保存表单时覆盖用户追加回复。
 
-管理端工单处理页支持点击单个工单进入会话式详情页。详情页读取完整对话、追加管理员文字回复、以及图片上传/预览/删除，在 V2（`webui` 默认版本）下分别对应 `/api/v2/admin/tickets/{ticket_id}`、`POST /api/v2/admin/tickets/{ticket_id}/replies`、`/api/v2/tickets/{ticket_id}/attachments`；V1 的同义路径是 `/admin/tickets/{ticket_id}`、`POST /admin/tickets/{ticket_id}/reply`、`/tickets/{ticket_id}/images`。附件受全局工单图片大小和数量限制。V1 支持粘贴图片，WebUI 详情页通过 `apiRequestForm` 提交同源 multipart 请求，后端规则不变。
+管理端工单处理页支持点击单个工单进入会话式详情页。详情页按页读取对话、追加管理员文字回复、以及图片上传/预览/删除，在 V2（`webui` 默认版本）下分别对应 `/api/v2/admin/tickets/{ticket_id}`、`POST /api/v2/admin/tickets/{ticket_id}/replies`、`/api/v2/tickets/{ticket_id}/attachments`；V1 的同义路径是 `/admin/tickets/{ticket_id}`、`POST /admin/tickets/{ticket_id}/reply`、`/tickets/{ticket_id}/images`。附件受全局工单图片大小和数量限制。V1 支持粘贴图片，WebUI 详情页通过 `apiRequestForm` 提交同源 multipart 请求，后端规则不变。
 
 ### 管理端处理页的信息分区
 
@@ -35,7 +35,7 @@
 
 用户创建工单成功后，后端会先完成 store 持久化，再写入 `create_ticket` 审计日志并发送 Telegram 管理员通知；运行日志会记录不含正文的 `ticket_id`、提交人、类型和优先级，便于排查“通知已到但后台未显示”的问题。WebUI 的用户工单列表、管理端工单列表、管理端工单详情和审计日志列表都绕过前端短读缓存，手动刷新应直接读取后端当前状态。
 
-用户 / 管理员工单列表、单个工单详情，以及回复、关闭、重开、附件上传 / 查看 / 删除等需要先读取工单状态的操作，都会先刷新持久化的单一状态文档再判断权限和状态。这样 PostgreSQL state、JSON state 或外部维护进程删除 / 修改工单后，前后端不会继续拿旧缓存判断“工单仍存在”或“状态仍可写”。
+用户 / 管理员工单列表、单个工单详情，以及回复、关闭、重开、附件上传 / 查看 / 删除等需要先读取工单状态的操作，都会先刷新持久化的单一状态文档再判断权限和状态。这样 PostgreSQL 状态或外部维护进程删除 / 修改工单后，前后端不会继续拿旧缓存判断“工单仍存在”或“状态仍可写”。
 
 ## Telegram 通知
 
@@ -59,3 +59,30 @@
 `Ticket.types` 不能为空。管理员新增、删除、重命名类型会写入 store，并同步保存到 `config.toml`，避免热重载或重启后丢失。重命名类型会同步更新已有工单的历史类型字段。
 
 类型名在 store 层强制校验：trim 后不能为空，且最长 50 字节。前端和 handler 可以提前校验以给出更友好的提示，但不能作为唯一防线。
+
+## 有界会话、重试与并发编辑
+
+WebUI 的详情和写入响应显式携带 `message_limit=50`，返回最近一页回复和 `message_page`（`has_more`、`next_before`、`total`）。详情的 `reply_count` 始终是总数。用户、管理员分别通过以下资源读取较早回复，`limit` 默认 50、最大 100：
+
+- `GET /api/v2/tickets/{ticket_id}/messages?before={id}&limit=50`
+- `GET /api/v2/admin/tickets/{ticket_id}/messages?before={id}&limit=50`
+
+`before` 为排除式工单内消息编号，省略时读取最新一页；页内保持原始追加顺序。页面仅挂载一页回复，另保留最初问题正文；“较早回复”和“最新回复”不扩张 DOM。V1 以及未传 `message_limit` 的旧 V2 客户端仍获得完整详情，兼容路径未设置新的服务端全文响应预算，不能将其成本当作分页路径性能。
+
+V2 回复 POST 支持可选 `Idempotency-Key` 请求头（16–128 位 ASCII 字母、数字、下划线或连字符）。键作用域为工单 + 操作用户；仅保存 SHA-256 摘要。同键同正文返回原消息及当前工单，标记 `replayed=true`，不重复审计、推送或追加消息；同键不同正文返回 HTTP 409 / `TICKET_REPLY_CONFLICT`。WebUI 在失败后保留同一次提交的键，成功、修改正文或切换工单后换键。尚不包含跨浏览器重启的待发箱或通知 outbox。
+
+详情带 `revision`；管理员 metadata PATCH 的 `expected_revision` 若落后，返回 HTTP 409 / `TICKET_REVISION_CONFLICT`。旧客户端可省略该字段。状态、优先级、类型即时单字段保存，内部备注仍显式保存；有未保存的备注且其他管理员已修改原备注时，不把旧草稿自动绑定到新版本。刷新保留草稿，“还原”可采纳服务端备注后重新编辑。
+
+普通用户回复 `resolved` 工单会重新进入 `open`，因此同事务复核用户与全局打开工单配额。通知开关只接受 JSON boolean，不接受字符串、数字或 null。
+
+## 附件与保留期安全
+
+附件文件验证后写入，最终在 Store 原子变更中复核当前用户、工单归属、关闭状态与图片数量；并发超限会拒绝提交并清理该次新文件。multipart 请求设有整体大小限制并移除解析临时文件。附件读取统一返回 `Cache-Control: private, no-store` 和 `X-Content-Type-Options: nosniff`，不再标记公开长期缓存。新 V2 上传/删除响应中的附件 URL 也使用受保护的 V2 路径，并返回带 revision、最近 50 条回复的工单快照；前端不能只推进版本而保留旧 metadata。
+
+定时清理先按已检查的 `revision`、`closed` 状态及保留期原子摘除附件元数据，再删除返回清单中的精确文件名；不会先递归删除整个目录。已重开、被回复或新上传图片的工单会跳过本轮。文件删除失败写运行日志，尚没有持久化清理重试队列，需后续运维清理孤立资源。
+
+## 历史数据与本轮范围
+
+本轮继续使用 `twilight_state` 中的工单数据，不执行独立表迁移。旧工单缺失 `revision` 时投影为 1，回复按原数组位置投影稳定的工单内编号；原 ID、正文、回复顺序/时间、内部备注、通知 nil/false/true 和工单级附件关系均保留。旧回复缺失或 null 的 role 按未知作者处理，不默认为 `RoleAdmin=0`。未知作者仍可阅读原用户名及正文，不根据当前账号权限重写历史。
+
+ZIP 导入导出沿用现有 State 格式，自动携带新增 revision 与幂等摘要；重复导入不追加历史回复。独立工单表、消息级附件、通知 outbox、完整响应预算及维护窗口切换仍是后续工作，不能把本批称为完成了整个工单仓储迁移。

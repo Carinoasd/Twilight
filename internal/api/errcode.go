@@ -37,16 +37,18 @@ const (
 	// ErrCSRFTokenInvalid       ErrCode = "AUTH_CSRF_TOKEN_INVALID" // V2 CSRF 已禁用 - V1 兼容性
 
 	// === 工单 ===
-	ErrTicketDisabled      ErrCode = "TICKET_DISABLED"
-	ErrTicketNotFound      ErrCode = "TICKET_NOT_FOUND"
-	ErrTicketRateLimited   ErrCode = "TICKET_RATE_LIMITED"
-	ErrTicketAlreadyClosed ErrCode = "TICKET_ALREADY_CLOSED"
-	ErrTicketNotClosed     ErrCode = "TICKET_NOT_CLOSED"
-	ErrTicketUserLimit     ErrCode = "TICKET_USER_LIMIT_REACHED"
-	ErrTicketGlobalLimit   ErrCode = "TICKET_GLOBAL_LIMIT_REACHED"
-	ErrTicketImageTooLarge ErrCode = "TICKET_IMAGE_TOO_LARGE"
-	ErrTicketImageTooMany  ErrCode = "TICKET_IMAGE_TOO_MANY"
-	ErrTicketImageInvalid  ErrCode = "TICKET_IMAGE_INVALID"
+	ErrTicketRevisionConflict ErrCode = "TICKET_REVISION_CONFLICT"
+	ErrTicketReplyConflict    ErrCode = "TICKET_REPLY_CONFLICT"
+	ErrTicketDisabled         ErrCode = "TICKET_DISABLED"
+	ErrTicketNotFound         ErrCode = "TICKET_NOT_FOUND"
+	ErrTicketRateLimited      ErrCode = "TICKET_RATE_LIMITED"
+	ErrTicketAlreadyClosed    ErrCode = "TICKET_ALREADY_CLOSED"
+	ErrTicketNotClosed        ErrCode = "TICKET_NOT_CLOSED"
+	ErrTicketUserLimit        ErrCode = "TICKET_USER_LIMIT_REACHED"
+	ErrTicketGlobalLimit      ErrCode = "TICKET_GLOBAL_LIMIT_REACHED"
+	ErrTicketImageTooLarge    ErrCode = "TICKET_IMAGE_TOO_LARGE"
+	ErrTicketImageTooMany     ErrCode = "TICKET_IMAGE_TOO_MANY"
+	ErrTicketImageInvalid     ErrCode = "TICKET_IMAGE_INVALID"
 
 	// === 用户 / 注册 ===
 	ErrRegisterRateLimited ErrCode = "USER_REGISTER_RATE_LIMITED"

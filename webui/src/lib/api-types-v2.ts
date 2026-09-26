@@ -452,6 +452,7 @@ export interface V2UserTicketListParams {
  * 折算成管理员，工单会话里出现「显示人物错误」。
  */
 export interface V2TicketReply {
+  id?: number;
   uid: number;
   username: string;
   role: number;
@@ -517,6 +518,9 @@ export interface V2UserTicketDetailResponse {
     updated_at: number;
     resolved_at: number;
     closed_at: number;
+    revision?: number;
+    reply_count?: number;
+    message_page?: { has_more: boolean; next_before: number; total: number };
     replies: V2TicketReply[];
     attachments: V2TicketAttachment[];
   };
@@ -586,6 +590,9 @@ export interface V2AdminTicketDetailResponse {
     updated_at: number;
     resolved_at: number;
     closed_at: number;
+    revision?: number;
+    reply_count?: number;
+    message_page?: { has_more: boolean; next_before: number; total: number };
     replies: V2TicketReply[];
     attachments: V2TicketAttachment[];
   };
@@ -593,10 +600,13 @@ export interface V2AdminTicketDetailResponse {
 }
 
 /**
- * V2 工单回复响应。用户端与管理端都把更新后的整张工单放在 ticket 键下，
- * 不再出现一端 item、另一端 ticket 的两种形状。
+ * V2 工单回复响应。ticket 是主资源键，管理端保留 item 兼容别名。
+ * message_limit 生效时 replies 为一页，reply_count 仍为总数。
  */
 export interface V2TicketReplyResponse {
+  message?: V2TicketReply;
+  replayed?: boolean;
+  item?: V2AdminTicketDetailResponse["item"];
   ticket_id: number;
   ticket: V2AdminTicketDetailResponse["item"] | V2UserTicketDetailResponse["item"];
   replies: V2TicketReply[];

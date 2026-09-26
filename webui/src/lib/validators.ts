@@ -150,6 +150,8 @@ export const ERROR_CODE_FRIENDLY: Partial<Record<ErrCode, string>> = {
   TICKET_NOT_FOUND: "工单不存在",
   TICKET_RATE_LIMITED: "提交过于频繁，请稍后再试",
   TICKET_ALREADY_CLOSED: "工单已关闭",
+  TICKET_REVISION_CONFLICT: "工单已更新，请刷新后重试",
+  TICKET_REPLY_CONFLICT: "此回复请求已用于其他内容",
   TICKET_NOT_CLOSED: "只有已关闭的工单可以重开",
   TICKET_USER_LIMIT_REACHED: "您当前待处理/处理中的工单数量已达上限，请先处理或关闭现有工单",
   TICKET_GLOBAL_LIMIT_REACHED: "工单系统当前较为繁忙，请稍后再试",

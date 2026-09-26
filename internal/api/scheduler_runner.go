@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -816,14 +817,34 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		tickets := a.store().ClosedTicketsWithAttachmentsBefore(cutoff)
 		cleanedTickets := 0
 		removedImages := 0
-		for _, t := range tickets {
-			a.removeTicketAttachmentDir(t.ID)
-			removedImages += len(t.Attachments)
-			if err := a.store().ClearTicketAttachments(t.ID); err != nil {
-				zap.L().Warn("清空工单图片元数据失败", zap.Int64("ticket_id", t.ID), zap.Error(err))
+		for _, ticket := range tickets {
+			removed, err := a.store().DetachExpiredTicketAttachments(ticket.ID, store.TicketRevision(ticket), cutoff)
+			if err != nil {
+				zap.L().Warn("清空工单图片元数据失败", zap.Int64("ticket_id", ticket.ID), zap.Error(err))
+				continue
+			}
+			if len(removed) == 0 {
 				continue
 			}
 			cleanedTickets++
+			removedImages += len(removed)
+			dir, err := a.ticketAttachmentDir(ticket.ID)
+			if err != nil {
+				zap.L().Warn("解析工单图片清理目录失败", zap.Int64("ticket_id", ticket.ID))
+				continue
+			}
+			for _, attachment := range removed {
+				if !ticketImageFilenamePattern.MatchString(attachment.Filename) {
+					continue
+				}
+				target, err := ResolveWithinRoot(dir, attachment.Filename)
+				if err != nil {
+					continue
+				}
+				if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+					zap.L().Warn("清理工单图片文件失败", zap.Int64("ticket_id", ticket.ID), zap.Error(err))
+				}
+			}
 		}
 		if cleanedTickets > 0 || removedImages > 0 {
 			a.auditSystem("scheduler", "cleanup_ticket_images", 0, map[string]any{

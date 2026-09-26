@@ -132,3 +132,58 @@ func TestV2AdminTicketTypeResourceUsesPathIdentity(t *testing.T) {
 		t.Fatalf("expected renamed type, got %q", got)
 	}
 }
+
+// TestV2TicketRepliesCarryAuthorIdentity 锁住「这条回复是谁发的」这一契约。
+// 每条回复必须带 is_admin，并且用户回复与管理员工回复取值相反。此前 DTO 只下发
+// role（服务端枚举里管理员=0），客户端按数字大小理解就会把两种回复判成同一边，
+// 工单会话里出现「显示人物错误」。
+func TestV2TicketRepliesCarryAuthorIdentity(t *testing.T) {
+	app := newTestApp(t)
+	enableTicketSystem(t, app, nil)
+	admin := registerAdmin(t, app, "v2-author-admin", "Admin123456")
+	user := registerAndLogin(t, app, "v2-author-user", "User12345678")
+	id := createTicket(t, app, "author identity", "opening", user)
+
+	userReply := doJSON(app, http.MethodPost, "/api/v2/tickets/"+strconv.FormatInt(id, 10)+"/replies", `{"content":"from user"}`, user)
+	if userReply.Code != http.StatusOK {
+		t.Fatalf("v2 user reply status=%d body=%s", userReply.Code, userReply.Body.String())
+	}
+	adminReply := doJSON(app, http.MethodPost, "/api/v2/admin/tickets/"+strconv.FormatInt(id, 10)+"/replies", `{"content":"from admin"}`, admin)
+	if adminReply.Code != http.StatusOK {
+		t.Fatalf("v2 admin reply status=%d body=%s", adminReply.Code, adminReply.Body.String())
+	}
+
+	detail := doJSON(app, http.MethodGet, "/api/v2/tickets/"+strconv.FormatInt(id, 10), "", user)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("v2 detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Item struct {
+				Replies []struct {
+					Username string `json:"username"`
+					Role     int    `json:"role"`
+					IsAdmin  bool   `json:"is_admin"`
+					Author   string `json:"author"`
+					Content  string `json:"content"`
+				} `json:"replies"`
+			} `json:"item"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode v2 detail: %v body=%s", err, detail.Body.String())
+	}
+	replies := envelope.Data.Item.Replies
+	if len(replies) != 2 {
+		t.Fatalf("expected 2 replies, got %#v", replies)
+	}
+	if replies[0].IsAdmin || replies[0].Author != "user" || replies[0].Role != store.RoleNormal {
+		t.Fatalf("user reply mislabelled: %#v", replies[0])
+	}
+	if !replies[1].IsAdmin || replies[1].Author != "admin" || replies[1].Role != store.RoleAdmin {
+		t.Fatalf("admin reply mislabelled: %#v", replies[1])
+	}
+	if replies[0].Username != "v2-author-user" || replies[1].Username != "v2-author-admin" {
+		t.Fatalf("reply authors lost their usernames: %#v", replies)
+	}
+}

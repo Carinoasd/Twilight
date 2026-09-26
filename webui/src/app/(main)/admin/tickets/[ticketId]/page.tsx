@@ -33,11 +33,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { TicketImages } from "@/components/ticket-images";
+import { TicketMessageHistory, type TicketHistoryPage } from "@/components/ticket-message-history";
+import { useAsyncResource } from "@/hooks/use-async-resource";
+import { useTicketReplyKey } from "@/hooks/use-ticket-reply-key";
 import { useToast } from "@/hooks/use-toast";
 import { api, type Ticket, type TicketAttachment, type TicketReply } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { friendlyError } from "@/lib/validators";
 import { useSystemStore } from "@/store/system";
+import { isTicketReplyFromAdmin, mergeTicketResponse } from "@/lib/tickets";
 
 const DEFAULT_TICKET_IMAGE_MAX_SIZE = 5 * 1024 * 1024;
 const DEFAULT_TICKET_IMAGE_MAX_COUNT = 5;
@@ -70,9 +74,11 @@ type ConversationMessage = {
 };
 
 function messageFromReply(reply: TicketReply, index: number): ConversationMessage {
-  const isAdmin = reply.author === "admin" || reply.role === 0;
+  // 只认 is_admin：role 是服务端角色枚举（管理员=0），拿它和数字比较会把
+  // 普通用户的回复判成管理员，会话左右分边也就跟着全错。
+  const isAdmin = isTicketReplyFromAdmin(reply);
   return {
-    key: `${reply.created_at}-${reply.uid}-${index}`,
+    key: String(reply.id ?? `${reply.created_at}-${reply.uid}-${index}`),
     author: isAdmin ? "admin" : "user",
     username: reply.username,
     content: reply.content,
@@ -96,13 +102,13 @@ export default function AdminTicketDetailPage() {
   const imageMaxCount = Number(systemInfo?.limits?.ticket_image_max_count) || DEFAULT_TICKET_IMAGE_MAX_COUNT;
   const id = Number(ticketId);
   const conversationRef = useRef<HTMLDivElement>(null);
-  const loadAbortRef = useRef<AbortController | null>(null);
-  const loadSequenceRef = useRef(0);
 
+  const { keyFor, retire } = useTicketReplyKey();
+  const activeTicketRef = useRef(id);
+  activeTicketRef.current = id;
+  const mutationRef = useRef(false);
   const [ticket, setTicket] = useState<Ticket | null>(null);
   const [types, setTypes] = useState<string[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
@@ -116,51 +122,43 @@ export default function AdminTicketDetailPage() {
   const [noteDraft, setNoteDraft] = useState("");
   const [patchingField, setPatchingField] = useState<string | null>(null);
 
-  const loadTicket = useCallback(async () => {
-    loadAbortRef.current?.abort();
-    const controller = new AbortController();
-    loadAbortRef.current = controller;
-    const sequence = ++loadSequenceRef.current;
-    if (!Number.isInteger(id) || id <= 0) {
-      setError(t("adminTickets.invalidTicketId"));
-      setLoading(false);
-      loadAbortRef.current = null;
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await api.adminGetTicket(id, controller.signal);
-      if (controller.signal.aborted || sequence !== loadSequenceRef.current) return;
-      if (res.success && res.data) {
-        setTicket(res.data.ticket);
-        setTypes(res.data.ticket_types || []);
-        setReplyAttachments([]);
-      } else {
-        throw new Error(res.message || t("adminTickets.loadFailed"));
-      }
-    } catch (err) {
-      if (controller.signal.aborted || sequence !== loadSequenceRef.current) return;
-      setError(err instanceof Error ? err.message : t("adminTickets.loadFailed"));
-    } finally {
-      if (sequence === loadSequenceRef.current) setLoading(false);
-      if (loadAbortRef.current === controller) loadAbortRef.current = null;
-    }
+  const load = useCallback(async (signal?: AbortSignal) => {
+    if (!Number.isInteger(id) || id <= 0) throw new Error(t("adminTickets.invalidTicketId"));
+    const response = await api.adminGetTicket(id, signal);
+    if (!response.success || !response.data) throw new Error(response.message || t("adminTickets.loadFailed"));
+    return response.data;
   }, [id, t]);
+  const { data: loaded, isLoading: loading, error, execute: loadTicket } = useAsyncResource(load, { throwOnError: false });
+  const noteBaseline = useRef<{ id: number; text: string; revision?: number } | null>(null);
+  const noteDraftRef = useRef(noteDraft);
+  noteDraftRef.current = noteDraft;
+  const [noteRevision, setNoteRevision] = useState<number | undefined>();
 
   useEffect(() => {
-    void loadTicket();
-    return () => loadAbortRef.current?.abort();
-  }, [loadTicket]);
-
-  // 仅在「切换到另一张工单」时用服务端值初始化备注草稿。依赖整个 ticket 对象的
-  // 话，发送回复 / 保存元数据后的 setTicket 都会重跑本 effect，把管理员正在编辑
-  // 但尚未保存的备注冲掉。
+    activeTicketRef.current = id;
+    setTicket(null);
+    setReply("");
+    setReplyAttachments([]);
+    return () => { activeTicketRef.current = 0; };
+  }, [id]);
+  useEffect(() => {
+    if (!loaded || loaded.ticket.id !== id) return;
+    setTicket((current) => current?.id === id ? mergeTicketResponse(current, loaded.ticket) : loaded.ticket);
+    setTypes(loaded.ticket_types || []);
+  }, [loaded, id]);
   useEffect(() => {
     if (!ticket) return;
-    setNoteDraft(ticket.admin_note || "");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ticket?.id]);
+    const previous = noteBaseline.current;
+    const serverText = ticket.admin_note || "";
+    const clean = !previous || previous.id !== ticket.id || noteDraftRef.current.trim() === previous.text;
+    if (clean) setNoteDraft(serverText);
+    // Background changes to other fields can advance the note's base revision;
+    // an externally changed note cannot silently rebase a dirty local draft.
+    if (clean || previous?.text === serverText || noteDraftRef.current.trim() === serverText) {
+      noteBaseline.current = { id: ticket.id, text: serverText, revision: ticket.revision };
+      setNoteRevision(ticket.revision);
+    }
+  }, [ticket]);
 
   const messages = useMemo<ConversationMessage[]>(() => {
     if (!ticket) return [];
@@ -176,52 +174,59 @@ export default function AdminTicketDetailPage() {
     ];
   }, [ticket]);
 
+  const applyHistoryPage = useCallback((page: TicketHistoryPage) => {
+    setTicket((current) => current?.id === id ? { ...current, replies: page.items, reply_count: page.total, message_page: page } : current);
+  }, [id]);
+
   const typeOptions = useMemo(() => {
     const list = types.length > 0 ? [...types] : [];
     if (ticket?.type && !list.includes(ticket.type)) list.push(ticket.type);
     return list;
   }, [ticket?.type, types]);
 
-  const syncTicketAttachments = useCallback((attachments: TicketAttachment[]) => {
-    setTicket((current) => current ? { ...current, attachments } : current);
+  const syncTicketAttachments = useCallback((attachments: TicketAttachment[], revision?: number, snapshot?: Ticket) => {
+    setTicket((current) => snapshot ? mergeTicketResponse(current, snapshot) : current?.id === id && (revision ?? current.revision ?? 0) >= (current.revision ?? 0) ? { ...current, attachments, revision: revision ?? current.revision } : current);
     const existing = new Set(attachments.map((item) => item.filename));
     setReplyAttachments((current) => current.filter((item) => existing.has(item.filename)));
-  }, []);
+  }, [id]);
 
   useEffect(() => {
     const node = conversationRef.current;
     if (!node) return;
     node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-  }, [messages.length, ticket?.id]);
+  }, [ticket?.reply_count, ticket?.id]);
 
   // patchTicket 只提交一个字段。后端按 patch 语义处理，未提供即"不动此字段"，
   // 两个管理员并发各改一处时不会用陈旧快照回退对方的改动。
   const patchTicket = useCallback(async (field: string, payload: { status?: string; priority?: string; type?: string }) => {
-    if (!ticket) return;
+    if (!ticket || mutationRef.current) return;
+    mutationRef.current = true;
     setPatchingField(field);
     try {
-      const res = await api.adminUpdateTicket(ticket.id, payload);
+      const res = await api.adminUpdateTicket(ticket.id, { ...payload, expected_revision: ticket.revision });
       if (res.success && res.data) {
-        setTicket(res.data);
+        if (activeTicketRef.current === ticket.id) setTicket((current) => mergeTicketResponse(current, res.data!));
       } else {
         toast({ title: res.message || t("common.updateFailed"), variant: "destructive" });
       }
     } catch (err: any) {
       toast({ title: friendlyError(err?.errorCode, err?.message), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setPatchingField(null);
     }
   }, [ticket, t, toast]);
 
   const handleSaveNote = async () => {
-    if (!ticket) return;
+    if (!ticket || mutationRef.current) return;
     const note = noteDraft.trim();
     if (note === (ticket.admin_note || "")) return;
+    mutationRef.current = true;
     setSavingNote(true);
     try {
-      const res = await api.adminUpdateTicket(ticket.id, { admin_note: note });
+      const res = await api.adminUpdateTicket(ticket.id, { admin_note: note, expected_revision: noteRevision });
       if (res.success && res.data) {
-        setTicket(res.data);
+        if (activeTicketRef.current === ticket.id) setTicket((current) => mergeTicketResponse(current, res.data!));
         toast({ title: t("adminTickets.updated") });
       } else {
         toast({ title: res.message || t("common.updateFailed"), variant: "destructive" });
@@ -229,25 +234,30 @@ export default function AdminTicketDetailPage() {
     } catch (err: any) {
       toast({ title: friendlyError(err?.errorCode, err?.message), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setSavingNote(false);
     }
   };
 
   const handleSend = async () => {
-    if (!ticket) return;
+    if (!ticket || mutationRef.current) return;
     const content = reply.trim();
     if (!content) {
       toast({ title: t("tickets.replyRequired"), variant: "destructive" });
       return;
     }
+    const requestKey = keyFor(ticket.id, content);
+    mutationRef.current = true;
     setSending(true);
     try {
-      const res = await api.adminReplyTicket(ticket.id, content);
+      const res = await api.adminReplyTicket(ticket.id, content, requestKey);
       if (res.success && res.data?.ticket) {
         // 后端在管理员回复 open 工单时会自动流转 open→in_progress，这里直接采信
         // 服务端返回的整张工单——状态已经没有本地草稿了，不会互相打架。
-        setTicket(res.data.ticket);
-        setReply("");
+        retire(requestKey);
+        if (activeTicketRef.current !== ticket.id) return;
+        setTicket((current) => mergeTicketResponse(current, res.data!.ticket));
+        setReply((draft) => draft.trim() === content ? "" : draft);
         setReplyAttachments([]);
         toast({ title: t("tickets.replySent") });
       } else {
@@ -256,6 +266,7 @@ export default function AdminTicketDetailPage() {
     } catch (err: any) {
       toast({ title: friendlyError(err?.errorCode, err?.message), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setSending(false);
     }
   };
@@ -281,9 +292,10 @@ export default function AdminTicketDetailPage() {
           continue;
         }
         const res = await api.uploadTicketImage(ticket.id, file);
+        if (activeTicketRef.current !== ticket.id) return;
         if (res.success && res.data) {
           uploaded++;
-          syncTicketAttachments(res.data.attachments);
+          syncTicketAttachments(res.data.attachments, res.data.revision, res.data.ticket);
           setReplyAttachments((current) => {
             if (current.some((item) => item.filename === res.data!.attachment.filename)) return current;
             return [...current, res.data!.attachment];
@@ -310,8 +322,9 @@ export default function AdminTicketDetailPage() {
     setDeletingReplyImage(attachment.filename);
     try {
       const res = await api.deleteTicketImage(ticket.id, attachment.filename);
+      if (activeTicketRef.current !== ticket.id) return;
       if (res.success && res.data) {
-        syncTicketAttachments(res.data.attachments);
+        syncTicketAttachments(res.data.attachments, res.data.revision, res.data.ticket);
         if (previewSrc === api.ticketImageSrc(attachment.url)) setPreviewSrc(null);
         toast({ title: t("tickets.imageDeleted") });
       } else {
@@ -441,13 +454,14 @@ export default function AdminTicketDetailPage() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_21rem]">
         {/* 左：会话。回复框明确标注"用户可见"，与右侧的内部备注形成对照。 */}
         <Card className="overflow-hidden">
-          <CardContent className="flex min-h-[65dvh] min-w-0 flex-col p-0">
+          <CardContent className="flex h-[78dvh] min-h-0 min-w-0 flex-col p-0">
             <div className="flex items-center gap-2 border-b px-4 py-3">
               <MessageSquareMore className="h-4 w-4 text-primary" />
               <span className="text-sm font-semibold">{t("tickets.conversation")}</span>
-              <Badge variant="secondary" className="ml-auto text-xs">{messages.length}</Badge>
+              <Badge variant="secondary" className="ml-auto text-xs">{(ticket.reply_count ?? 0) + 1}</Badge>
             </div>
             <div ref={conversationRef} className="custom-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-muted/20 p-4">
+              <TicketMessageHistory key={`${ticket.id}-${ticket.revision}`} ticket={ticket} admin onPage={applyHistoryPage} />
               {messages.map((message) => {
                 const isAdmin = message.author === "admin";
                 return (
@@ -497,7 +511,7 @@ export default function AdminTicketDetailPage() {
                             type="button"
                             onClick={() => void handleDeleteReplyImage(attachment)}
                             disabled={deletingReplyImage === attachment.filename}
-                            title={t("adminTickets.removeReplyImage")}
+                            title={t("adminTickets.removeReplyImage")} aria-label={t("adminTickets.removeReplyImage")}
                             className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-white opacity-100 transition hover:bg-destructive sm:opacity-0 sm:group-hover:opacity-100"
                           >
                             {deletingReplyImage === attachment.filename ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
@@ -519,7 +533,7 @@ export default function AdminTicketDetailPage() {
                   rows={3}
                   className="min-h-[5.5rem] flex-1 resize-y"
                 />
-                <Button onClick={() => void handleSend()} disabled={sending || uploadingPaste || !reply.trim()} className="min-h-10 sm:self-end">
+                <Button onClick={() => void handleSend()} disabled={sending || savingNote || patchingField !== null || uploadingPaste || !reply.trim()} className="min-h-10 sm:self-end">
                   {sending || uploadingPaste ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
                   {uploadingPaste ? t("adminTickets.pasteImageUploading") : t("tickets.replySubmit")}
                 </Button>
@@ -548,7 +562,7 @@ export default function AdminTicketDetailPage() {
                         size="sm"
                         variant={active ? "default" : "outline"}
                         className="justify-start text-xs"
-                        disabled={patchingField !== null}
+                        disabled={patchingField !== null || sending || savingNote}
                         onClick={() => void patchTicket("status", { status: value })}
                       >
                         {patchingField === "status" && active ? (
@@ -568,7 +582,7 @@ export default function AdminTicketDetailPage() {
                   <Label>{t("tickets.priority")}</Label>
                   <Select
                     value={ticket.priority}
-                    disabled={patchingField !== null}
+                    disabled={patchingField !== null || sending || savingNote}
                     onValueChange={(value) => void patchTicket("priority", { priority: value })}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -579,7 +593,7 @@ export default function AdminTicketDetailPage() {
                   <Label>{t("tickets.type")}</Label>
                   <Select
                     value={ticket.type}
-                    disabled={patchingField !== null || typeOptions.length === 0}
+                    disabled={patchingField !== null || sending || savingNote || typeOptions.length === 0}
                     onValueChange={(value) => void patchTicket("type", { type: value })}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -611,7 +625,12 @@ export default function AdminTicketDetailPage() {
                   <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   {t("adminTickets.adminNoteNotVisible")}
                 </p>
-                <Button size="sm" className="w-full" onClick={() => void handleSaveNote()} disabled={savingNote || !noteDirty}>
+                <Button size="sm" variant="outline" className="w-full" disabled={savingNote} onClick={() => {
+                  setNoteDraft(ticket.admin_note || "");
+                  noteBaseline.current = { id: ticket.id, text: ticket.admin_note || "", revision: ticket.revision };
+                  setNoteRevision(ticket.revision);
+                }}>{t("common.reset")}</Button>
+                <Button size="sm" className="w-full" onClick={() => void handleSaveNote()} disabled={savingNote || sending || patchingField !== null || !noteDirty}>
                   {savingNote && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   {t("adminTickets.saveNote")}
                 </Button>
@@ -622,6 +641,7 @@ export default function AdminTicketDetailPage() {
           <Card>
             <CardContent className="space-y-3 p-4">
               <TicketImages
+                key={ticket.id}
                 ticketId={ticket.id}
                 attachments={ticket.attachments || []}
                 editable

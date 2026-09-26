@@ -1568,6 +1568,7 @@ export interface TicketAttachment {
 }
 
 export interface TicketReply {
+  id?: number;
   uid: number;
   username: string;
   /**
@@ -1583,6 +1584,8 @@ export interface TicketReply {
 }
 
 export interface Ticket {
+  revision?: number;
+  message_page?: { has_more: boolean; next_before: number; total: number };
   id: number;
   uid: number;
   username: string;

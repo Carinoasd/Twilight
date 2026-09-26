@@ -570,6 +570,7 @@ type BangumiSubjectCacheEntry struct {
 }
 
 type Ticket struct {
+	Revision       int64              `json:"revision,omitempty"`
 	ID             int64              `json:"id"`
 	UID            int64              `json:"uid"`
 	Username       string             `json:"username"`
@@ -589,11 +590,13 @@ type Ticket struct {
 }
 
 type TicketReply struct {
-	UID       int64  `json:"uid"`
-	Username  string `json:"username"`
-	Role      int    `json:"role"`
-	Content   string `json:"content"`
-	CreatedAt int64  `json:"created_at"`
+	ID             int64  `json:"id,omitempty"`
+	RequestKeyHash string `json:"request_key_hash,omitempty"`
+	UID            int64  `json:"uid"`
+	Username       string `json:"username"`
+	Role           int    `json:"role"`
+	Content        string `json:"content"`
+	CreatedAt      int64  `json:"created_at"`
 }
 
 // TicketAttachment 描述挂在工单上的一张交流图片。文件按工单 ID 存放在
@@ -621,11 +624,13 @@ const (
 )
 
 type TicketUpdate struct {
-	Status    *string
-	Priority  *string
-	Type      *string
-	AdminNote *string
-	Reply     *TicketReply
+	ExpectedRevision *int64
+	OwnerUID         int64
+	Status           *string
+	Priority         *string
+	Type             *string
+	AdminNote        *string
+	Reply            *TicketReply
 }
 
 type RebindRequest struct {

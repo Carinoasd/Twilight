@@ -150,6 +150,7 @@ import type {
   V2UserTicketDetailResponse,
   V2AdminTicketListResponse,
   V2AdminTicketDetailResponse,
+  V2TicketReply,
   V2TicketReplyResponse,
 } from "./api-types-v2";
 import { confirmPhrases } from "./confirm-phrases";
@@ -3535,7 +3536,7 @@ class ApiClient {
 
   async getMyTicketV2(id: number, signal?: AbortSignal) {
     const response = await this.request<V2UserTicketDetailResponse>(
-      `/tickets/${id}`,
+      `/tickets/${id}?message_limit=50`,
       { cache: "no-store", signal },
       { apiVersion: "v2", cacheRead: false, dedupe: false },
     );
@@ -3600,7 +3601,7 @@ class ApiClient {
    */
   private async requestTicket(path: string, init: RequestInit = {}) {
     const response = await this.request<V2TicketPayload>(
-      path,
+      `${path}${path.includes("?") ? "&" : "?"}message_limit=50`,
       init,
       { apiVersion: "v2" },
     );
@@ -3610,14 +3611,15 @@ class ApiClient {
     return { ...response, data: undefined } as ApiResponse<Ticket>;
   }
 
-  async replyTicket(id: number, content: string) {
-    return this.replyTicketV2(id, content);
+  async replyTicket(id: number, content: string, requestKey?: string) {
+    return this.replyTicketV2(id, content, requestKey);
   }
 
-  async replyTicketV2(id: number, content: string) {
-    const response = await this.request<V2TicketReplyResponse>(`/tickets/${id}/replies`, {
+  async replyTicketV2(id: number, content: string, requestKey?: string) {
+    const response = await this.request<V2TicketReplyResponse>(`/tickets/${id}/replies?message_limit=50`, {
       method: "POST",
       body: JSON.stringify({ content }),
+      headers: requestKey ? { "Idempotency-Key": requestKey } : undefined,
     }, { apiVersion: "v2" });
 
     // V2 响应结构转换为 V1 格式
@@ -3636,6 +3638,18 @@ class ApiClient {
     return { success: false, message: response.message, error_code: response.error_code } as ApiResponse<{ ticket_id: number; ticket: Ticket; replies: Ticket["replies"] }>;
   }
 
+  async getTicketMessages(id: number, before: number, admin: boolean, signal?: AbortSignal) {
+    type MessagePage = { items: V2TicketReply[]; has_more: boolean; next_before: number; total: number; revision: number };
+    const query = new URLSearchParams({ limit: "50" });
+    if (before > 0) query.set("before", String(before));
+    const init: RequestInit = { cache: "no-store", signal };
+    const options = { apiVersion: "v2" as const, cacheRead: false };
+    const response = admin
+      ? await this.request<MessagePage>(`/admin/tickets/${id}/messages?${query}`, init, options)
+      : await this.request<MessagePage>(`/tickets/${id}/messages?${query}`, init, options);
+    return { ...response, data: response.data ? { ...response.data, items: normalizeTicketReplies(response.data.items) } : undefined };
+  }
+
   // 工单交流图片
   async uploadTicketImage(ticketId: number, file: File, signal?: AbortSignal) {
     return this.uploadTicketImageV2(ticketId, file, signal);
@@ -3644,12 +3658,13 @@ class ApiClient {
   async uploadTicketImageV2(ticketId: number, file: File, signal?: AbortSignal) {
     const formData = new FormData();
     formData.append("file", file);
-    return this.requestForm<{ ticket_id: number; attachment: TicketAttachment; attachments: TicketAttachment[] }>(
+    const response = await this.requestForm<{ ticket_id: number; revision?: number; ticket?: V2TicketPayload; attachment: TicketAttachment; attachments: TicketAttachment[] }>(
       `/tickets/${ticketId}/attachments`,
       formData,
       "POST",
       { signal, apiVersion: "v2" },
     );
+    return { ...response, data: response.data ? { ...response.data, ticket: response.data.ticket ? normalizeTicket(response.data.ticket) : undefined } : undefined };
   }
 
   async deleteTicketImage(ticketId: number, filename: string) {
@@ -3657,11 +3672,12 @@ class ApiClient {
   }
 
   async deleteTicketImageV2(ticketId: number, filename: string) {
-    return this.request<{ ticket_id: number; attachments: TicketAttachment[] }>(
+    const response = await this.request<{ ticket_id: number; revision?: number; ticket?: V2TicketPayload; attachments: TicketAttachment[] }>(
       `/tickets/${ticketId}/attachments/${encodeURIComponent(filename)}`,
       { method: "DELETE" },
       { apiVersion: "v2" },
     );
+    return { ...response, data: response.data ? { ...response.data, ticket: response.data.ticket ? normalizeTicket(response.data.ticket) : undefined } : undefined };
   }
 
   // 把后端返回的工单附件相对路径解析为可直接用于 <img> 的绝对地址。
@@ -3717,7 +3733,7 @@ class ApiClient {
 
   async adminGetTicketV2(id: number, signal?: AbortSignal) {
     const response = await this.request<V2AdminTicketDetailResponse>(
-      `/admin/tickets/${id}`,
+      `/admin/tickets/${id}?message_limit=50`,
       { cache: "no-store", signal },
       { apiVersion: "v2", cacheRead: false, dedupe: false },
     );
@@ -3737,25 +3753,26 @@ class ApiClient {
     return { success: false, message: response.message, error_code: response.error_code } as ApiResponse<{ ticket: Ticket; ticket_types: string[] }>;
   }
 
-  async adminUpdateTicket(id: number, payload: { status?: string; priority?: string; type?: string; admin_note?: string }) {
+  async adminUpdateTicket(id: number, payload: { status?: string; priority?: string; type?: string; admin_note?: string; expected_revision?: number }) {
     return this.adminUpdateTicketV2(id, payload);
   }
 
-  async adminUpdateTicketV2(id: number, payload: { status?: string; priority?: string; type?: string; admin_note?: string }) {
+  async adminUpdateTicketV2(id: number, payload: { status?: string; priority?: string; type?: string; admin_note?: string; expected_revision?: number }) {
     return this.requestTicket(`/admin/tickets/${id}`, {
-      method: "PUT",
+      method: "PATCH",
       body: JSON.stringify(payload),
     });
   }
 
-  async adminReplyTicket(id: number, content: string) {
-    return this.adminReplyTicketV2(id, content);
+  async adminReplyTicket(id: number, content: string, requestKey?: string) {
+    return this.adminReplyTicketV2(id, content, requestKey);
   }
 
-  async adminReplyTicketV2(id: number, content: string) {
-    const response = await this.request<V2TicketReplyResponse>(`/admin/tickets/${id}/replies`, {
+  async adminReplyTicketV2(id: number, content: string, requestKey?: string) {
+    const response = await this.request<V2TicketReplyResponse>(`/admin/tickets/${id}/replies?message_limit=50`, {
       method: "POST",
       body: JSON.stringify({ content }),
+      headers: requestKey ? { "Idempotency-Key": requestKey } : undefined,
     }, { apiVersion: "v2" });
 
     // V2 响应结构转换为 V1 格式

@@ -46,6 +46,11 @@ import { api, type Ticket, type TicketAttachment, type UserTicketListItem } from
 import { useI18n } from "@/lib/i18n";
 import { useSystemStore } from "@/store/system";
 import { TicketImages } from "@/components/ticket-images";
+import { isTicketReplyFromAdmin, mergeTicketResponse } from "@/lib/tickets";
+
+import { FeatureDisabledNotice, useFeatureEnabled } from "@/components/feature-disabled";
+import { TicketMessageHistory, type TicketHistoryPage } from "@/components/ticket-message-history";
+import { useTicketReplyKey } from "@/hooks/use-ticket-reply-key";
 
 const PAGE_SIZE = 20;
 const DEFAULT_TICKET_IMAGE_MAX_SIZE = 5 * 1024 * 1024;
@@ -75,7 +80,7 @@ export default function UserTicketsPage() {
   const { toast } = useToast();
   const { t } = useI18n();
   const { info: systemInfo } = useSystemStore();
-  const ticketEnabled = Boolean(systemInfo?.features?.ticket_system);
+  const ticketEnabled = useFeatureEnabled("ticket_system");
   const imageMaxSize = Number(systemInfo?.limits?.ticket_image_max_size) || DEFAULT_TICKET_IMAGE_MAX_SIZE;
   const imageMaxCount = Number(systemInfo?.limits?.ticket_image_max_count) || DEFAULT_TICKET_IMAGE_MAX_COUNT;
 
@@ -94,6 +99,9 @@ export default function UserTicketsPage() {
   const [replying, setReplying] = useState(false);
   const [mutatingTicketID, setMutatingTicketID] = useState<number | null>(null);
   const detailAbortRef = useRef<AbortController | null>(null);
+  const selectedIDRef = useRef<number | null>(null);
+  const mutationRef = useRef(false);
+  const { keyFor, retire } = useTicketReplyKey();
 
   const loadTickets = useCallback(async (signal?: AbortSignal) => {
     const res = await api.getMyTickets({ page, per_page: PAGE_SIZE }, signal);
@@ -101,7 +109,7 @@ export default function UserTicketsPage() {
     return res.data;
   }, [page, t]);
 
-  const { data, isLoading, error, execute: reload } = useAsyncResource(loadTickets, { immediate: true });
+  const { data, isLoading, error, execute: reload } = useAsyncResource(loadTickets, { immediate: ticketEnabled && systemInfo !== null });
   const types = Array.isArray(data?.ticket_types) && data.ticket_types.length
     ? data.ticket_types
     : DEFAULT_TYPES.map((item) => item.value);
@@ -119,6 +127,7 @@ export default function UserTicketsPage() {
   const closeTicketDetail = useCallback(() => {
     detailAbortRef.current?.abort();
     detailAbortRef.current = null;
+    selectedIDRef.current = null;
     setSelectedTicketID(null);
     setSelectedTicket(null);
     setDetailLoading(false);
@@ -131,6 +140,7 @@ export default function UserTicketsPage() {
     detailAbortRef.current?.abort();
     const controller = new AbortController();
     detailAbortRef.current = controller;
+    selectedIDRef.current = ticketID;
     setSelectedTicketID(ticketID);
     setSelectedTicket(null);
     setDetailLoading(true);
@@ -140,7 +150,7 @@ export default function UserTicketsPage() {
       if (!response.success || !response.data) throw new Error(response.message || t("common.networkError"));
       if (!controller.signal.aborted) setSelectedTicket(response.data.ticket);
     } catch (error) {
-      if (!isAbortError(error)) {
+      if (!controller.signal.aborted && detailAbortRef.current === controller && !isAbortError(error)) {
         toast({ title: t("common.error"), description: error instanceof Error ? error.message : t("common.networkError"), variant: "destructive" });
         closeTicketDetail();
       }
@@ -153,7 +163,7 @@ export default function UserTicketsPage() {
   };
 
   const replaceSelectedTicket = (ticket: Ticket) => {
-    if (selectedTicketID === ticket.id) setSelectedTicket(ticket);
+    if (selectedIDRef.current === ticket.id) setSelectedTicket((current) => mergeTicketResponse(current, ticket));
     refreshCurrentPage();
   };
 
@@ -194,6 +204,8 @@ export default function UserTicketsPage() {
     operation: () => Promise<{ success: boolean; message?: string; data?: Ticket }>,
     successMessage: string,
   ) => {
+    if (mutationRef.current) return;
+    mutationRef.current = true;
     setMutatingTicketID(ticketID);
     try {
       const response = await operation();
@@ -203,47 +215,50 @@ export default function UserTicketsPage() {
     } catch (error) {
       toast({ title: t("common.error"), description: error instanceof Error ? error.message : t("common.networkError"), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setMutatingTicketID(null);
     }
   };
 
   const handleReply = async () => {
-    if (!selectedTicket) return;
+    if (!selectedTicket || mutationRef.current) return;
     const reply = replyDraft.trim();
     if (!reply) {
       toast({ title: t("tickets.replyRequired"), variant: "destructive" });
       return;
     }
+    const requestKey = keyFor(selectedTicket.id, reply);
+    mutationRef.current = true;
     setReplying(true);
     try {
-      const response = await api.replyTicket(selectedTicket.id, reply);
+      const response = await api.replyTicket(selectedTicket.id, reply, requestKey);
       if (!response.success || !response.data) throw new Error(response.message || t("common.networkError"));
-      setSelectedTicket(response.data.ticket);
-      setReplyDraft("");
+      retire(requestKey);
+      if (selectedIDRef.current === selectedTicket.id) {
+        setSelectedTicket((current) => mergeTicketResponse(current, response.data!.ticket));
+        setReplyDraft((draft) => draft.trim() === reply ? "" : draft);
+      }
       refreshCurrentPage();
       toast({ title: t("tickets.replySent"), variant: "success" });
     } catch (error) {
       toast({ title: t("common.error"), description: error instanceof Error ? error.message : t("common.networkError"), variant: "destructive" });
     } finally {
+      mutationRef.current = false;
       setReplying(false);
     }
   };
 
-  const updateSelectedAttachments = (attachments: TicketAttachment[]) => {
-    setSelectedTicket((current) => current ? { ...current, attachments } : current);
+  const applyHistoryPage = useCallback((page: TicketHistoryPage) => {
+    setSelectedTicket((current) => current && current.id === selectedIDRef.current ? { ...current, replies: page.items, reply_count: page.total, message_page: page } : current);
+  }, []);
+
+  const updateSelectedAttachments = (attachments: TicketAttachment[], revision?: number, snapshot?: Ticket) => {
+    setSelectedTicket((current) => snapshot ? mergeTicketResponse(current, snapshot) : current && (revision ?? current.revision ?? 0) >= (current.revision ?? 0) ? { ...current, attachments, revision: revision ?? current.revision } : current);
     refreshCurrentPage();
   };
 
-  if (!ticketEnabled) {
-    return (
-      <div className="space-y-6">
-        <Card className="border-dashed"><CardContent className="p-8 text-center">
-          <AlertCircle className="mx-auto mb-2 h-10 w-10 text-muted-foreground/40" />
-          <p className="font-medium">{t("tickets.disabled")}</p>
-        </CardContent></Card>
-      </div>
-    );
-  }
+  if (!systemInfo) return <div className="flex min-h-[40dvh] items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
+  if (!ticketEnabled) return <FeatureDisabledNotice />;
 
   return (
     <div className="min-w-0 space-y-5 pb-8 sm:space-y-6">
@@ -301,6 +316,7 @@ export default function UserTicketsPage() {
 
       <TicketDetailDialog
         ticket={selectedTicket}
+        onHistoryPage={applyHistoryPage}
         loading={detailLoading}
         open={selectedTicketID !== null}
         replyDraft={replyDraft}
@@ -397,6 +413,7 @@ function TicketDetailDialog({
   loading,
   open,
   replyDraft,
+  onHistoryPage,
   replying,
   mutating,
   imageMaxSize,
@@ -414,6 +431,7 @@ function TicketDetailDialog({
   loading: boolean;
   open: boolean;
   replyDraft: string;
+  onHistoryPage: (page: TicketHistoryPage) => void;
   replying: boolean;
   mutating: boolean;
   imageMaxSize: number;
@@ -422,7 +440,7 @@ function TicketDetailDialog({
   onClose: () => void;
   onReply: () => void;
   onReplyDraftChange: (value: string) => void;
-  onAttachmentsChange: (attachments: TicketAttachment[]) => void;
+  onAttachmentsChange: (attachments: TicketAttachment[], revision?: number, snapshot?: Ticket) => void;
   onToggleNotify: () => void;
   onCloseTicket: () => void;
   onReopenTicket: () => void;
@@ -450,14 +468,17 @@ function TicketDetailDialog({
             </DialogHeader>
             <div className="custom-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
               <div className="whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/30 p-4 text-sm">{ticket.content}</div>
-              <TicketImages ticketId={ticket.id} attachments={ticket.attachments || []} editable={!closed} maxSize={imageMaxSize} maxCount={imageMaxCount} onChange={onAttachmentsChange} />
+              <TicketImages key={ticket.id} ticketId={ticket.id} attachments={ticket.attachments || []} editable={!closed} maxSize={imageMaxSize} maxCount={imageMaxCount} onChange={onAttachmentsChange} />
+              <TicketMessageHistory key={`${ticket.id}-${ticket.revision}`} ticket={ticket} onPage={onHistoryPage} />
               {ticket.replies?.length ? <section className="space-y-3"><h3 className="flex items-center gap-2 text-sm font-semibold"><MessageSquareMore className="h-4 w-4 text-info" />{t("tickets.conversation")}</h3>{ticket.replies.map((reply, index) => {
-                const adminReply = reply.author === "admin" || reply.role === 0;
-                return <div key={`${reply.created_at}-${reply.uid}-${index}`} className={`rounded-lg border p-3 ${adminReply ? "border-info/20 bg-info/5" : "border-border bg-background"}`}><div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><span className={adminReply ? "font-semibold text-info" : "font-semibold text-foreground"}>{adminReply ? t("tickets.adminReply") : t("tickets.userReply")}</span><span>{reply.username}</span><span className="sm:ml-auto">{new Date(reply.created_at * 1000).toLocaleString()}</span></div><p className="whitespace-pre-wrap break-words text-sm">{reply.content}</p></div>;
+                // 只认 is_admin。此前这里写的是 `author === "admin" || role === 0`，
+                // 而 role 是服务端枚举（管理员=0），任何人发的回复都会被算成管理员。
+                const adminReply = isTicketReplyFromAdmin(reply);
+                return <div key={reply.id ?? `${reply.created_at}-${reply.uid}-${index}`} className={`rounded-lg border p-3 ${adminReply ? "border-info/20 bg-info/5" : "border-border bg-background"}`}><div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><span className={adminReply ? "font-semibold text-info" : "font-semibold text-foreground"}>{adminReply ? t("tickets.adminReply") : t("tickets.userReply")}</span><span>{reply.username}</span><span className="sm:ml-auto">{new Date(reply.created_at * 1000).toLocaleString()}</span></div><p className="whitespace-pre-wrap break-words text-sm">{reply.content}</p></div>;
               })}</section> : null}
             </div>
             <div className="shrink-0 space-y-3 border-t bg-background px-4 py-3 sm:px-6 sm:py-4">
-              {!closed ? <><Textarea value={replyDraft} onChange={(event) => onReplyDraftChange(event.target.value)} placeholder={t("tickets.replyPlaceholder")} rows={3} maxLength={5000} className="resize-y" /><div className="grid grid-cols-1 gap-2 sm:flex sm:justify-between"><div className="grid grid-cols-2 gap-2 sm:flex"><Button variant="outline" size="sm" onClick={onToggleNotify} disabled={mutating}>{ticket.notify_telegram ? <Bell className="mr-1.5 h-3.5 w-3.5" /> : <BellOff className="mr-1.5 h-3.5 w-3.5" />}{ticket.notify_telegram ? t("tickets.notifyOn") : t("tickets.notifyOff")}</Button><Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" onClick={onCloseTicket} disabled={mutating}><Archive className="mr-1.5 h-3.5 w-3.5" />{t("tickets.closeTicket")}</Button></div><Button size="sm" onClick={onReply} disabled={replying}>{replying ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Send className="mr-1.5 h-3.5 w-3.5" />}{t("tickets.replySubmit")}</Button></div></> : <div className="flex justify-end"><Button size="sm" onClick={onReopenTicket} disabled={mutating}><RotateCcw className="mr-1.5 h-3.5 w-3.5" />{t("tickets.reopenTicket")}</Button></div>}
+              {!closed ? <><Textarea value={replyDraft} onChange={(event) => onReplyDraftChange(event.target.value)} placeholder={t("tickets.replyPlaceholder")} rows={3} maxLength={5000} className="resize-y" /><div className="grid grid-cols-1 gap-2 sm:flex sm:justify-between"><div className="grid grid-cols-2 gap-2 sm:flex"><Button variant="outline" size="sm" onClick={onToggleNotify} disabled={mutating || replying}>{ticket.notify_telegram ? <Bell className="mr-1.5 h-3.5 w-3.5" /> : <BellOff className="mr-1.5 h-3.5 w-3.5" />}{ticket.notify_telegram ? t("tickets.notifyOn") : t("tickets.notifyOff")}</Button><Button variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" onClick={onCloseTicket} disabled={mutating || replying}><Archive className="mr-1.5 h-3.5 w-3.5" />{t("tickets.closeTicket")}</Button></div><Button size="sm" onClick={onReply} disabled={replying || mutating}>{replying ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Send className="mr-1.5 h-3.5 w-3.5" />}{t("tickets.replySubmit")}</Button></div></> : <div className="flex justify-end"><Button size="sm" onClick={onReopenTicket} disabled={mutating || replying}><RotateCcw className="mr-1.5 h-3.5 w-3.5" />{t("tickets.reopenTicket")}</Button></div>}
             </div>
           </div>
         )}

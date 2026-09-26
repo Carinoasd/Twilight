@@ -170,6 +170,7 @@ func (s *Store) upsertTicketLocked(t Ticket, now int64) Ticket {
 		applyTicketStatusTimestamps(&t, empty, now)
 	}
 	t.UpdatedAt = now
+	bumpTicketRevision(&t)
 	s.state.Tickets[t.ID] = t
 	return t
 }
@@ -278,6 +279,15 @@ func (s *Store) UpdateTicket(ticketID int64, patch TicketUpdate) (Ticket, error)
 		if !ok {
 			return ErrNotFound
 		}
+		if patch.OwnerUID != 0 && t.UID != patch.OwnerUID {
+			return ErrNotFound
+		}
+		if patch.ExpectedRevision != nil && *patch.ExpectedRevision != TicketRevision(t) {
+			return ErrTicketRevision
+		}
+		if patch.AdminNote != nil && len(strings.TrimSpace(*patch.AdminNote)) > TicketReplyMaxBytes {
+			return ErrInvalid
+		}
 		now := time.Now().Unix()
 		existing := t
 		if patch.Status != nil {
@@ -297,6 +307,7 @@ func (s *Store) UpdateTicket(ticketID int64, patch TicketUpdate) (Ticket, error)
 			applyTicketReplyLocked(&t, *patch.Reply, now)
 		}
 		t.UpdatedAt = now
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -338,6 +349,7 @@ func (s *Store) ReopenTicket(ticketID, uid int64, userOpenLimit, globalOpenLimit
 		t.Status = TicketStatusOpen
 		applyTicketStatusTimestamps(&t, existing, now)
 		t.UpdatedAt = now
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -348,7 +360,7 @@ func (s *Store) ReopenTicket(ticketID, uid int64, userOpenLimit, globalOpenLimit
 	return out, nil
 }
 
-func (s *Store) SetTicketNotify(ticketID int64, enabled bool) (Ticket, error) {
+func (s *Store) SetTicketNotify(ticketID int64, enabled bool, ownerUID ...int64) (Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out Ticket
@@ -357,8 +369,12 @@ func (s *Store) SetTicketNotify(ticketID int64, enabled bool) (Ticket, error) {
 		if !ok {
 			return ErrNotFound
 		}
+		if len(ownerUID) > 0 && t.UID != ownerUID[0] {
+			return ErrNotFound
+		}
 		t.NotifyTelegram = &enabled
 		t.UpdatedAt = time.Now().Unix()
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -371,6 +387,16 @@ func (s *Store) SetTicketNotify(ticketID int64, enabled bool) (Ticket, error) {
 
 // AddTicketAttachment 给工单追加一张图片元数据。返回更新后的工单。
 func (s *Store) AddTicketAttachment(ticketID int64, att TicketAttachment, actorRole int) (Ticket, error) {
+	return s.addTicketAttachment(ticketID, att, actorRole, 0, 0)
+}
+
+// CommitTicketAttachment applies the final owner/status/quota checks after file
+// validation and writing. The caller removes its new file if commit fails.
+func (s *Store) CommitTicketAttachment(ticketID int64, att TicketAttachment, actor User, maxCount int) (Ticket, error) {
+	return s.addTicketAttachment(ticketID, att, actor.Role, actor.UID, maxCount)
+}
+
+func (s *Store) addTicketAttachment(ticketID int64, att TicketAttachment, actorRole int, actorUID int64, maxCount int) (Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out Ticket
@@ -382,11 +408,29 @@ func (s *Store) AddTicketAttachment(ticketID int64, att TicketAttachment, actorR
 		if !TicketStatusAllowsConversation(t.Status) && actorRole != RoleAdmin {
 			return ErrTicketClosed
 		}
+		if actorUID != 0 {
+			user, exists := s.state.Users[actorUID]
+			if !exists || !user.Active || (user.Role != RoleAdmin && t.UID != actorUID) {
+				return ErrNotFound
+			}
+			if user.Role != RoleAdmin && !TicketStatusAllowsConversation(t.Status) {
+				return ErrTicketClosed
+			}
+		}
+		if maxCount > 0 && len(t.Attachments) >= maxCount {
+			return ErrTicketAttachmentLimit
+		}
+		for _, existing := range t.Attachments {
+			if existing.Filename == att.Filename {
+				return ErrConflict
+			}
+		}
 		if att.CreatedAt == 0 {
 			att.CreatedAt = time.Now().Unix()
 		}
 		t.Attachments = append(t.Attachments, att)
 		t.UpdatedAt = time.Now().Unix()
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -413,6 +457,7 @@ func (s *Store) AddTicketReply(ticketID int64, reply TicketReply) (Ticket, error
 		now := time.Now().Unix()
 		applyTicketReplyLocked(&t, reply, now)
 		t.UpdatedAt = now
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -424,6 +469,7 @@ func (s *Store) AddTicketReply(ticketID int64, reply TicketReply) (Ticket, error
 }
 
 func applyTicketReplyLocked(t *Ticket, reply TicketReply, now int64) {
+	reply.ID = int64(len(t.Replies) + 1)
 	if reply.CreatedAt == 0 {
 		reply.CreatedAt = now
 	}
@@ -444,7 +490,7 @@ func applyTicketReplyLocked(t *Ticket, reply TicketReply, now int64) {
 }
 
 // RemoveTicketAttachment 从工单移除指定文件名的图片元数据。返回更新后的工单。
-func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRole int) (Ticket, error) {
+func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRole int, actorUID ...int64) (Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out Ticket
@@ -455,6 +501,15 @@ func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRol
 		}
 		if !TicketStatusAllowsConversation(t.Status) && actorRole != RoleAdmin {
 			return ErrTicketClosed
+		}
+		if len(actorUID) > 0 {
+			user, exists := s.state.Users[actorUID[0]]
+			if !exists || !user.Active || (user.Role != RoleAdmin && t.UID != user.UID) {
+				return ErrNotFound
+			}
+			if user.Role != RoleAdmin && !TicketStatusAllowsConversation(t.Status) {
+				return ErrTicketClosed
+			}
 		}
 		idx := -1
 		for i, att := range t.Attachments {
@@ -468,6 +523,7 @@ func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRol
 		}
 		t.Attachments = append(t.Attachments[:idx], t.Attachments[idx+1:]...)
 		t.UpdatedAt = time.Now().Unix()
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		out = t
 		return nil
@@ -506,6 +562,7 @@ func (s *Store) ClearTicketAttachments(ticketID int64) error {
 		}
 		t.Attachments = nil
 		t.UpdatedAt = time.Now().Unix()
+		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
 		return nil
 	})
@@ -592,6 +649,7 @@ func (s *Store) RenameTicketType(oldName, newName string) (int, error) {
 		return 0, ErrInvalid
 	}
 	err := s.mutateAndSaveLocked(func() error {
+		count = 0
 		for _, t := range s.state.TicketTypes {
 			if strings.EqualFold(t, newName) && !strings.EqualFold(t, oldName) {
 				return ErrConflict
@@ -613,6 +671,7 @@ func (s *Store) RenameTicketType(oldName, newName string) (int, error) {
 			if strings.EqualFold(ticket.Type, oldName) {
 				ticket.Type = newName
 				ticket.UpdatedAt = now
+				bumpTicketRevision(&ticket)
 				s.state.Tickets[id] = ticket
 				count++
 			}

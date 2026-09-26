@@ -52,6 +52,7 @@ func (a *App) registerV2Routes() {
 	a.add(http.MethodGet, "/api/v2/tickets", AuthUser, a.handleV2UserTickets)
 	a.add(http.MethodPost, "/api/v2/tickets", AuthUser, a.handleV2CreateTicket)
 	a.add(http.MethodGet, "/api/v2/tickets/:ticket_id", AuthUser, a.handleV2UserTicket)
+	a.add(http.MethodGet, "/api/v2/tickets/:ticket_id/messages", AuthUser, a.handleV2TicketMessages)
 	a.add(http.MethodPost, "/api/v2/tickets/:ticket_id/close", AuthUser, a.handleV2CloseUserTicket)
 	a.add(http.MethodPost, "/api/v2/tickets/:ticket_id/reopen", AuthUser, a.handleV2ReopenUserTicket)
 	a.add(http.MethodPut, "/api/v2/tickets/:ticket_id/notify-telegram", AuthUser, a.handleV2ToggleUserTicketNotify)
@@ -183,6 +184,7 @@ func (a *App) registerV2Routes() {
 	// cannot accidentally fall back to a legacy browser-side request.
 	a.add(http.MethodGet, "/api/v2/admin/tickets", AuthAdmin, a.handleV2AdminTickets)
 	a.add(http.MethodGet, "/api/v2/admin/tickets/:ticket_id", AuthAdmin, a.handleV2AdminTicket)
+	a.add(http.MethodGet, "/api/v2/admin/tickets/:ticket_id/messages", AuthAdmin, a.handleV2AdminTicketMessages)
 	a.add(http.MethodPatch, "/api/v2/admin/tickets/:ticket_id", AuthAdmin, a.handleAdminUpdateTicket)
 	a.add(http.MethodPost, "/api/v2/admin/tickets/:ticket_id/replies", AuthAdmin, a.handleV2AdminReplyTicket)
 	a.add(http.MethodDelete, "/api/v2/admin/tickets/:ticket_id", AuthAdmin, a.handleAdminDeleteTicket)
@@ -304,7 +306,6 @@ func (a *App) registerV2Routes() {
 	// （handleV2AdminTelegramRosterStats）。这里曾经重复注册一次指向
 	// handleV2TelegramRosterStats，但路由按注册顺序匹配，第二条永远不生效；
 	// 重复注册还会让 scripts/check_docs_drift.go 的端点计数对不上。删掉死注册。
-
 
 	// Export resources: users CSV export
 	a.add(http.MethodGet, "/api/v2/admin/export/users", AuthAdmin, a.handleV2ExportUsers)
@@ -438,7 +439,6 @@ func (a *App) registerV2CompletionRoutes() {
 	// Personalised announcement feed. The public /api/v2/announcements route
 	// is anonymous and cannot carry per-user force-read state.
 	a.add(http.MethodGet, "/api/v2/me/announcements", AuthUser, a.handleV2AnnouncementsMe)
-
 
 	// Invite code listing for the account page.
 	a.add(http.MethodGet, "/api/v2/invite/codes", AuthUser, a.handleInviteCodes)

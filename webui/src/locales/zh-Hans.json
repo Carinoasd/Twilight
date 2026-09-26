@@ -259,5 +259,10 @@
     "saveDialogTitle": "确认保存配置",
     "saveDialogDescription": "以下配置项将被更新，保存前将自动备份原配置文件。",
     "confirmSave": "确认保存"
+  },
+  "tickets": {
+    "olderMessages": "较早回复",
+    "latestMessages": "最新回复",
+    "messageRange": "回复 {first}–{last} / {total}"
   }
 }

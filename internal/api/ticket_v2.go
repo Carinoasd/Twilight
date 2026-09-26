@@ -150,7 +150,7 @@ func (a *App) handleV2UserTicket(w http.ResponseWriter, r *http.Request, params 
 		return
 	}
 	ok(w, "OK", v2UserTicketDetailResponse{
-		Item:        v2UserTicketDTO(ticket),
+		Item:        ticketResponseDTO(r, ticket, false),
 		TicketTypes: a.store().TicketTypes(),
 	})
 }
@@ -179,20 +179,29 @@ func (a *App) handleV2UserTicketReply(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	payload := decodeMap(r)
-	updated, existing, err := a.appendTicketReply(id, actor, stringValue(payload, "content"))
+	result, err := a.appendTicketMessage(id, actor, stringValue(payload, "content"), r.Header.Get("Idempotency-Key"))
+	updated, existing := result.Ticket, result.Previous
 	if writeTicketReplyFailure(w, err) {
 		return
 	}
-	a.audit(r, "reply_ticket", auditCategoryForRole(actor.Role), existing.UID, map[string]any{"ticket_id": id, "reply_len": len(strings.TrimSpace(stringValue(payload, "content")))})
-	if actor.Role == store.RoleAdmin {
-		a.notifyTicketOwner(r.Context(), updated, existing)
-	} else {
-		a.notifyTicketAdmins(r.Context(), "replied", updated, actor)
+	if result.Replayed {
+		markRequestAuditWritten(r)
 	}
+	if !result.Replayed {
+		a.audit(r, "reply_ticket", auditCategoryForRole(actor.Role), existing.UID, map[string]any{"ticket_id": id, "reply_len": len(strings.TrimSpace(stringValue(payload, "content")))})
+		if actor.Role == store.RoleAdmin {
+			a.notifyTicketOwner(r.Context(), updated, existing)
+		} else {
+			a.notifyTicketAdmins(r.Context(), "replied", updated, actor)
+		}
+	}
+	dto := ticketResponseDTO(r, updated, false)
 	ok(w, "回复成功", map[string]any{
 		"ticket_id": id,
-		"ticket":    v2UserTicketDTO(updated),
-		"replies":   ticketReplyDTOs(updated.Replies),
+		"ticket":    dto,
+		"message":   ticketReplyDTO(result.Reply),
+		"replayed":  result.Replayed,
+		"replies":   dto["replies"],
 	})
 }
 
@@ -282,7 +291,7 @@ func (a *App) handleV2AdminTicket(w http.ResponseWriter, r *http.Request, params
 		return
 	}
 	ok(w, "OK", v2AdminTicketDetailResponse{
-		Item:        v2AdminTicketDTO(ticket),
+		Item:        ticketResponseDTO(r, ticket, true),
 		TicketTypes: a.store().TicketTypes(),
 	})
 }
@@ -299,18 +308,29 @@ func (a *App) handleV2AdminReplyTicket(w http.ResponseWriter, r *http.Request, p
 	}
 	payload := decodeMap(r)
 	actor := current(r).User
-	ticket, existing, err := a.appendTicketReply(id, actor, stringValue(payload, "content"))
+	result, err := a.appendTicketMessage(id, actor, stringValue(payload, "content"), r.Header.Get("Idempotency-Key"))
+	ticket, existing := result.Ticket, result.Previous
 	if writeTicketReplyFailure(w, err) {
 		return
 	}
 	content := strings.TrimSpace(stringValue(payload, "content"))
-	a.audit(r, "reply_ticket", "admin", existing.UID, map[string]any{"ticket_id": id, "reply_len": len(content)})
-	a.notifyTicketOwner(r.Context(), ticket, existing)
-	a.notifyTicketAdmins(r.Context(), "admin_replied", ticket, actor)
+	if result.Replayed {
+		markRequestAuditWritten(r)
+	}
+	if !result.Replayed {
+		a.audit(r, "reply_ticket", "admin", existing.UID, map[string]any{"ticket_id": id, "reply_len": len(content)})
+		a.notifyTicketOwner(r.Context(), ticket, existing)
+		a.notifyTicketAdmins(r.Context(), "admin_replied", ticket, actor)
+	}
+	// Keep the historical item alias during the response-key transition.
+	dto := ticketResponseDTO(r, ticket, true)
 	ok(w, "回复成功", map[string]any{
 		"ticket_id": id,
-		"item":      v2AdminTicketDTO(ticket),
-		"replies":   ticketReplyDTOs(ticket.Replies),
+		"ticket":    dto,
+		"item":      dto,
+		"message":   ticketReplyDTO(result.Reply),
+		"replayed":  result.Replayed,
+		"replies":   dto["replies"],
 	})
 }
 

@@ -13,37 +13,26 @@ var (
 	errTicketReplyTooLong   = errors.New("ticket reply too long")
 )
 
-const maxTicketReplyLength = 5000
-
 // appendTicketReply is the application operation shared by legacy and V2
 // transport handlers. It performs the ownership/status check against the
 // latest Store snapshot and appends through the Store's atomic mutation;
 // callers remain responsible for rate limits, audit and notifications.
 func (a *App) appendTicketReply(ticketID int64, actor store.User, content string) (store.Ticket, store.Ticket, error) {
+	result, err := a.appendTicketMessage(ticketID, actor, content, "")
+	return result.Ticket, result.Previous, err
+}
+
+func (a *App) appendTicketMessage(ticketID int64, actor store.User, content, requestKey string) (store.TicketReplyResult, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return store.Ticket{}, store.Ticket{}, errTicketReplyEmpty
+		return store.TicketReplyResult{}, errTicketReplyEmpty
 	}
-	if len(content) > maxTicketReplyLength {
-		return store.Ticket{}, store.Ticket{}, errTicketReplyTooLong
+	if len(content) > store.TicketReplyMaxBytes {
+		return store.TicketReplyResult{}, errTicketReplyTooLong
 	}
-
-	existing, found := a.store().Ticket(ticketID)
-	if !found {
-		return store.Ticket{}, store.Ticket{}, store.ErrNotFound
+	if existing, found := a.store().Ticket(ticketID); found && actor.Role != store.RoleAdmin && existing.UID != actor.UID {
+		return store.TicketReplyResult{}, errTicketReplyForbidden
 	}
-	if actor.Role != store.RoleAdmin && existing.UID != actor.UID {
-		return store.Ticket{}, existing, errTicketReplyForbidden
-	}
-	if actor.Role != store.RoleAdmin && !store.TicketStatusAllowsConversation(existing.Status) {
-		return store.Ticket{}, existing, store.ErrTicketClosed
-	}
-
-	updated, err := a.store().AddTicketReply(ticketID, store.TicketReply{
-		UID: actor.UID, Username: actor.Username, Role: actor.Role, Content: content,
-	})
-	if err != nil {
-		return store.Ticket{}, existing, err
-	}
-	return updated, existing, nil
+	cfg := a.cfg()
+	return a.store().AppendTicketMessage(ticketID, actor, content, requestKey, cfg.TicketUserOpenLimit, cfg.TicketGlobalOpenLimit)
 }
