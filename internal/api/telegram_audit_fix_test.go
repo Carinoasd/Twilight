@@ -556,3 +556,23 @@ func TestTelegramRosterOnlyRecordsConfiguredChats(t *testing.T) {
 		}
 	}
 }
+
+// goja 内存护栏：单次超大 repeat 被拒，循环自拼接被看门狗中断。
+func TestDeveloperJSMemoryGuards(t *testing.T) {
+	app := newTestApp(t)
+	user := mustCreateTGUser(t, app, store.User{Username: "js-mem", Role: store.RoleNormal, Active: true, TelegramID: 5401, PasswordHash: "unused"})
+	run := func(code string) (string, error) {
+		out, _, err := app.telegramRunJSCustomCommand(code, telegramCommandCtx{FromID: user.TelegramID}, true)
+		return out, err
+	}
+	if out, err := run(`reply(String("x".repeat(1 << 28).length));`); err == nil {
+		t.Fatalf("256MB repeat should be refused, got %q", out)
+	}
+	if out, err := run(`reply(String("ab".padEnd(10).length + "x".repeat(1000).length));`); err != nil || strings.TrimSpace(out) != "1010" {
+		t.Fatalf("small repeat/pad must still work: %q %v", out, err)
+	}
+	// 自拼接到 1GB：看门狗应在超过 256MB 增长后中断。
+	if out, err := run(`var s = "0123456789abcdef"; for (var i = 0; i < 26; i++) { s = s + s; } reply(String(s.length));`); err == nil {
+		t.Fatalf("runaway string growth should be interrupted, got %q", out)
+	}
+}

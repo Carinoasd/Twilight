@@ -299,6 +299,12 @@ func (a *App) telegramRunJSCustomCommandWithOptions(code string, c telegramComma
 		return vm.ToValue(value)
 	})
 
+	// 修复：安装 goja 内存护栏（内建函数包装 + 堆增长看门狗），详见 telegram_js_limits.go。
+	if err := developerJSInstallAllocationGuards(vm); err != nil {
+		return "", logs, developerJSSafeError(err)
+	}
+	stopHeapWatchdog := developerJSStartHeapWatchdog(vm)
+	defer stopHeapWatchdog()
 	timer := time.AfterFunc(developerJSExecutionTimeout, func() {
 		vm.Interrupt("execution timeout")
 	})

@@ -15,6 +15,7 @@
 - JS 引擎：Goja（`github.com/dop251/goja`）。
 - 执行方式：同步执行，单次运行 8 秒墙钟超时（须大于沙箱网络预算：fetch 约 1500ms HTTP + 500ms DNS；interactions 会真实发送 Telegram 消息）。
 - 正则：需要回溯特性（反向引用、环视等）的正则走 regexp2 引擎，匹配过程中不会响应 8 秒超时中断，因此每次匹配另有 250ms 上限；超时按“未匹配”处理（`test` 返回 `false`、`exec`/`match` 返回 `null`），不会抛异常。其余正则走线性时间的 RE2 引擎。
+- 内存：`String.prototype.repeat` / `padStart` / `padEnd` 与 `Array.prototype.fill` 单次结果超过 1M 字符或元素会抛 `RangeError`；脚本运行期间进程堆增长超过 256MB 会被中断。这是止损而非隔离：看门狗按整个进程的堆计算，并发大量分配时可能误杀，单条指令内的分配仍会先发生。
 - Bot 端每条 update 的处理最多占用批处理 30 秒；超过后批处理放行（脚本收到取消并被中断），不会拖住其他聊天室的命令。
 - 作用域：脚本会包裹在函数作用域中运行，因此顶层 `return` 可提前结束。
 - 提前退出：`exit(message?)` 可正常停止脚本；传入文本时会先追加回复，不会作为错误记录。
