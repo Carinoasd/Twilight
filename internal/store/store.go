@@ -919,6 +919,7 @@ func (s *State) compactHistory() {
 	s.PlaybackSessions = compactTail(s.PlaybackSessions, maxPlaybackSessions)
 	s.EmbyActivityLogs = compactTail(s.EmbyActivityLogs, maxEmbyActivityLogs)
 	s.BangumiSyncLogs = compactTail(s.BangumiSyncLogs, maxStoredBangumiSyncLogs)
+	s.ViolationLogs = compactTail(s.ViolationLogs, maxStoredViolationLogs)
 	// 仅对真正超限的用户回写：compactTail 在未超限时原样返回同一底层切片，
 	// 旧实现仍对每个用户做一次 map 赋值（value 类型 SigninState 是整值拷贝写回）。
 	// 绝大多数用户签到记录远未及 maxSigninRecords，跳过回写省掉每次落盘对全体
@@ -5472,6 +5473,9 @@ func appendUniqueInt64(values []int64, value int64) []int64 {
 	return append(values, value)
 }
 
+// maxStoredViolationLogs 是 ViolationLogs 在 state 中保留的上限（保留最新的）。
+const maxStoredViolationLogs = 1000
+
 // AddViolationLog records a code violation attempt.
 func (s *Store) AddViolationLog(log ViolationLog) error {
 	s.mu.Lock()
@@ -5483,6 +5487,9 @@ func (s *Store) AddViolationLog(log ViolationLog) error {
 		log.ID = s.state.NextViolationLogID
 		s.state.NextViolationLogID++
 		s.state.ViolationLogs = append(s.state.ViolationLogs, log)
+		// 设上限：违规记录存在整份 JSONB 里，反复提交诱饵码/指名码就能让它无限
+		// 成长、拖慢每次落盘。只保留最新 maxStoredViolationLogs 条。
+		s.state.ViolationLogs = compactTail(s.state.ViolationLogs, maxStoredViolationLogs)
 		return nil
 	})
 }

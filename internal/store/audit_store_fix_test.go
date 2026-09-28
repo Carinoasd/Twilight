@@ -302,3 +302,28 @@ func TestUpsertAnnouncementReplayAllocatesFreshID(t *testing.T) {
 		t.Fatalf("announcements=%+v, want both (mine id=%d)", all, mine.ID)
 	}
 }
+
+// 第 6 条：ViolationLogs 有上限，只保留最新的记录。
+func TestViolationLogsAreCapped(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	st.mu.Lock()
+	for i := 0; i < maxStoredViolationLogs+5; i++ {
+		st.state.ViolationLogs = append(st.state.ViolationLogs, ViolationLog{ID: int64(i + 1), Code: "seed"})
+	}
+	st.state.NextViolationLogID = int64(maxStoredViolationLogs + 6)
+	if err := st.saveLocked(); err != nil {
+		st.mu.Unlock()
+		t.Fatal(err)
+	}
+	st.mu.Unlock()
+	if err := st.AddViolationLog(ViolationLog{Code: "newest"}); err != nil {
+		t.Fatal(err)
+	}
+	logs := st.ListViolationLogs()
+	if len(logs) != maxStoredViolationLogs {
+		t.Fatalf("violation logs=%d, want %d", len(logs), maxStoredViolationLogs)
+	}
+	if logs[0].Code != "newest" {
+		t.Fatalf("newest log dropped: %+v", logs[0])
+	}
+}
