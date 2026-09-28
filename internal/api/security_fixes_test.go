@@ -212,24 +212,23 @@ func TestFirstRegistrantIsNotAutoAdmin(t *testing.T) {
 }
 
 // TestConfiguredUsernameIsPromotedToAdmin 正向：配置了 admin_usernames 时，
-// 用该用户名注册的账户会被提升为管理员（且仅该用户名）。
+// 空库首位用该用户名注册的账户会被提升为管理员。
 func TestConfiguredUsernameIsPromotedToAdmin(t *testing.T) {
 	app := newTestApp(t) // harness 配置 AdminUsernames=["admin"]
-	// 先注册一个非配置用户名 —— 即便是首个用户也不应是 admin。
-	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"plainuser","password":"Plain123456"}`, nil); resp.Code != http.StatusCreated {
-		t.Fatalf("register plainuser status=%d body=%s", resp.Code, resp.Body.String())
-	}
-	plain, _ := app.store().FindUserByUsername("plainuser")
-	if plain.Role == store.RoleAdmin {
-		t.Fatalf("non-configured first user must not be admin: %#v", plain)
-	}
-	// 配置的用户名注册后应成为 admin。
 	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"admin","password":"Admin123456"}`, nil); resp.Code != http.StatusCreated {
 		t.Fatalf("register admin status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	admin, ok := app.store().FindUserByUsername("admin")
 	if !ok || admin.Role != store.RoleAdmin || !admin.Active {
 		t.Fatalf("configured admin username was not promoted: ok=%v user=%#v", ok, admin)
+	}
+	// 之后注册的非配置用户名不是 admin。
+	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"plainuser","password":"Plain123456"}`, nil); resp.Code != http.StatusCreated {
+		t.Fatalf("register plainuser status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	plain, _ := app.store().FindUserByUsername("plainuser")
+	if plain.Role == store.RoleAdmin {
+		t.Fatalf("non-configured user must not be admin: %#v", plain)
 	}
 }
 

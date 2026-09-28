@@ -105,16 +105,43 @@ func registerAndLogin(t *testing.T, app *App, username, password string) []*http
 // 自动成为管理员"通道已移除）。newTestApp 只白名单了 "admin"，所以任何用其它
 // 用户名注册并期望拿到管理员权限的用例，都必须先把该用户名登记进
 // AdminUsernames——否则注册出来的是普通用户，管理端接口一律 403。
+//
+// 配置的管理员用户名只在空库首位注册时可直接注册并提权；系统已有用户后，注册
+// 这些名字会被拒绝（防止抢注顶替）。因此非首位时先按普通用户注册，再模拟运维
+// “把名字写进配置并重载”——追加到 AdminUsernames 后调用 applyConfiguredAdmins。
 func registerAdmin(t *testing.T, app *App, username, password string) []*http.Cookie {
 	t.Helper()
 	cfg := app.cfg()
+	configured := false
 	for _, existing := range cfg.AdminUsernames {
 		if existing == username {
-			return registerAndLogin(t, app, username, password)
+			configured = true
+			break
 		}
 	}
+	if app.store().UserCount() == 0 {
+		if !configured {
+			cfg.AdminUsernames = append(cfg.AdminUsernames, username)
+		}
+		return registerAndLogin(t, app, username, password)
+	}
+	if configured {
+		// 暂时移出名单以便注册，注册后再放回并重载。
+		kept := make([]string, 0, len(cfg.AdminUsernames))
+		for _, existing := range cfg.AdminUsernames {
+			if existing != username {
+				kept = append(kept, existing)
+			}
+		}
+		cfg.AdminUsernames = kept
+	}
+	register := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":%q,"password":%q}`, username, password), nil)
+	if register.Code != http.StatusCreated {
+		t.Fatalf("register %s status = %d body=%s", username, register.Code, register.Body.String())
+	}
 	cfg.AdminUsernames = append(cfg.AdminUsernames, username)
-	return registerAndLogin(t, app, username, password)
+	app.applyConfiguredAdmins()
+	return loginCookies(t, app, username, password)
 }
 
 // loginCookies 从已存在的账户登录，返回 session cookie 切片。
@@ -655,11 +682,11 @@ func TestCheckExpiredKillsInvitedUserSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	invitedToken, _, err := app.sessions().Create(ctx, invited.UID)
+	invitedToken, _, err := app.sessions().Create(ctx, invited.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID)
+	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,8 +1063,10 @@ func TestProtectedAdminConfigHiddenPreservedAndApplied(t *testing.T) {
 		t.Fatalf("existing protected admin config was not preserved: %s", content)
 	}
 
-	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"owner","password":"Owner123456"}`, nil)
+	// 配置的管理员用户名只在空库首位注册时生效（非首位注册同名会被拒绝，防抢注），
+	// 因此 alice 先注册。
 	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"alice","password":"Alice123456"}`, nil)
+	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"owner","password":"Owner123456"}`, nil)
 	alice, ok := app.store().FindUserByUsername("alice")
 	if !ok || alice.Role != store.RoleAdmin || !alice.Active {
 		t.Fatalf("configured admin username was not applied on registration: %#v", alice)
@@ -1361,7 +1390,7 @@ func TestSigninAutoRenewalPreferenceEnforcesBackendGates(t *testing.T) {
 	}
 	foundAudit := false
 	for _, entry := range app.store().ListAuditLogs() {
-		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == 0 {
+		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == user.UID { // target_uid 已改为本人
 			foundAudit = true
 			break
 		}
@@ -3170,15 +3199,17 @@ func TestFallbackAuditCoversSuccessfulMutationsWithoutExplicitAudit(t *testing.T
 		t.Fatal(err)
 	}
 
-	rr := doJSON(app, http.MethodPost, "/api/v1/auth/logout", ``, cookies)
+	// 登出已改为明确审计（logout），这里换一个仍只有 fallback 的用户写入路由。
+	app.cfg().BangumiEnabled = true
+	rr := doJSON(app, http.MethodDelete, "/api/v1/bangumi/sync/history", ``, cookies)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("logout status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("clear bangumi history status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	logs := app.store().ListAuditLogs()
 	if len(logs) != 1 {
 		t.Fatalf("expected one fallback audit log, got %#v", logs)
 	}
-	if logs[0].Action != "post_auth_logout" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
+	if logs[0].Action != "delete_bangumi_sync_history" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
 		t.Fatalf("unexpected fallback audit log: %#v", logs[0])
 	}
 }
@@ -6597,7 +6628,7 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := app.store().CreateUser(store.User{Username: "child", Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
+	child, err := app.store().CreateUser(store.User{Username: "child", Email: "child-private@example.com", TelegramID: 987654321, Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6613,6 +6644,10 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	app.handleDetachExpiredInviteChild(rr, req, Params{"uid": strconv.FormatInt(child.UID, 10)})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("detach status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	// 上级断开下级时，回应不得带出下级的个人信息。
+	if body := rr.Body.String(); strings.Contains(body, "child-private@example.com") || strings.Contains(body, "987654321") || strings.Contains(body, "registration_code") {
+		t.Fatalf("detach response leaks child's private fields: %s", body)
 	}
 	if _, ok := app.store().ParentOf(child.UID); ok {
 		t.Fatal("child still has invite parent")

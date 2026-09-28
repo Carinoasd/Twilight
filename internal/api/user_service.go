@@ -114,6 +114,10 @@ func (s *userService) updateProfile(ctx context.Context, user store.User, payloa
 			if err := validate.ValidateUsername(username); err != nil {
 				return err
 			}
+			// 与 handleUpdateProfile 一致：配置的管理员用户名对普通用户保留。
+			if s.app.usernameReservedForConfiguredAdmin(username, *u) {
+				return errReservedAdminUsername
+			}
 			u.Username = username
 		}
 		if bgmModeSet {
@@ -212,6 +216,10 @@ func (s *userService) updateUsername(ctx context.Context, user store.User, newUs
 	}
 
 	u, err := s.app.store().UpdateUser(user.UID, func(u *store.User) error {
+		// 与 handleUpdateUsername 一致：配置的管理员用户名对普通用户保留。
+		if s.app.usernameReservedForConfiguredAdmin(newUsername, *u) {
+			return errReservedAdminUsername
+		}
 		u.Username = newUsername
 		return nil
 	})

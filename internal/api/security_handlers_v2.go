@@ -25,12 +25,11 @@ func (a *App) handleV2BlockDevice(w http.ResponseWriter, r *http.Request, params
 	if written {
 		return
 	}
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
-	if err := a.security().blockDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().blockDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "block_device", "admin", uid, map[string]any{"device_id": deviceID})
@@ -39,9 +38,8 @@ func (a *App) handleV2BlockDevice(w http.ResponseWriter, r *http.Request, params
 
 func (a *App) handleV2TrustDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	if err := a.security().trustDevice(uid, deviceID); statusFromError(w, err) {
@@ -53,12 +51,11 @@ func (a *App) handleV2TrustDevice(w http.ResponseWriter, r *http.Request, params
 
 func (a *App) handleV2DeleteDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
-	if err := a.security().deleteDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().deleteDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "delete_device", "user", uid, map[string]any{"device_id": deviceID})

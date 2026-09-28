@@ -133,6 +133,7 @@ func (a *App) handleSendEmailCode(w http.ResponseWriter, r *http.Request, _ Para
 		failWithCode(w, status, ec, msg)
 		return
 	}
+	a.audit(r, "send_email_verification", "user", p.User.UID, map[string]any{"purpose": purpose, "email": maskEmail(targetEmail)})
 	ok(w, "验证码已发送", map[string]any{
 		"verification_id": id,
 		"email":           maskEmail(targetEmail),
@@ -168,6 +169,7 @@ func (a *App) handleVerifyEmailCode(w http.ResponseWriter, r *http.Request, _ Pa
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "verify_email", "user", u.UID, map[string]any{"email": auditFromTo(maskEmail(p.User.Email), maskEmail(u.Email))})
 	ok(w, "邮箱验证成功", publicUser(u))
 }
 

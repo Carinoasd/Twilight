@@ -226,7 +226,15 @@ func (a *App) handleAPIKeyEnableKey(w http.ResponseWriter, r *http.Request, _ Pa
 }
 
 func (a *App) handleAPIKeyEmbyKick(w http.ResponseWriter, r *http.Request, params Params) {
-	a.handleKickUser(w, r, Params{"uid": strconv.FormatInt(current(r).User.UID, 10)})
+	// 与原先复用 handleKickUser 的行为一致（按 uid 重读用户后踢 Emby 会话），另记明确审计。
+	p := current(r)
+	u, okUser := a.userFromPath(w, Params{"uid": strconv.FormatInt(p.User.UID, 10)}, "uid")
+	if !okUser {
+		return
+	}
+	kicked := a.kickEmbySessions(r.Context(), u.EmbyID)
+	a.audit(r, "apikey_kick_emby_sessions", "user", u.UID, map[string]any{"key_id": p.APIKey.ID, "emby_id": u.EmbyID, "kicked_count": kicked})
+	ok(w, "会话踢出完成", map[string]any{"kicked_count": kicked})
 }
 
 func publicAPIKey(k store.APIKey, plain string) map[string]any {

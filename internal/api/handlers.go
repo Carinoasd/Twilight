@@ -625,6 +625,10 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 			if err := validate.ValidateUsername(username); err != nil {
 				return err
 			}
+			// 配置文件里的管理员用户名对普通用户保留，防止改名顶替后被提权。
+			if a.usernameReservedForConfiguredAdmin(username, *u) {
+				return errReservedAdminUsername
+			}
 			u.Username = username
 		}
 		if bgmModeSet {
@@ -688,10 +692,12 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 	if bgmTokenChanged {
 		_ = a.store().DeleteBangumiCollectionCache(u.UID, 0)
 	}
+	// target_uid 填本人，按目标用户筛选时才能查到自助操作；detail 记改前改后。
+	changes := selfProfileChanges(p.User, u)
 	if signinAutoRenewalSet {
-		a.audit(r, "update_signin_auto_renewal", "user", 0, map[string]any{"enabled": signinAutoRenewalNext})
+		a.audit(r, "update_signin_auto_renewal", "user", u.UID, map[string]any{"enabled": signinAutoRenewalNext, "changes": changes})
 	} else {
-		a.audit(r, "update_profile", "user", 0, nil)
+		a.audit(r, "update_profile", "user", u.UID, map[string]any{"changes": changes})
 	}
 	ok(w, "更新成功", publicUser(u))
 }
@@ -711,13 +717,23 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusBadRequest, ErrUsernameInvalid, err.Error())
 		return
 	}
+	// 配置文件里的管理员用户名对普通用户保留：否则名字空出后任何人都能改名顶替，
+	// 下次启动/重载配置时被 applyConfiguredAdmins 提权为管理员。
+	if a.usernameReservedForConfiguredAdmin(username, p.User) {
+		failWithCode(w, http.StatusConflict, ErrUsernameTaken, "用户名已被占用，请换一个用户名")
+		return
+	}
 	u, err := a.store().UpdateUser(p.User.UID, func(u *store.User) error {
+		if a.usernameReservedForConfiguredAdmin(username, *u) {
+			return errReservedAdminUsername
+		}
 		u.Username = username
 		return nil
 	})
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "update_username", "user", u.UID, map[string]any{"username": auditFromTo(p.User.Username, u.Username)})
 	ok(w, "用户名已更新", publicUser(u))
 }
 
@@ -727,8 +743,14 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 // 与 handleAdminResetPassword / handleForgotPassword 的「改密即吊销旧会话」口径一致。
 // 失败时已写响应，返回 ok=false，调用方直接 return。
 func (a *App) rotateSessionsAfterPasswordChange(w http.ResponseWriter, r *http.Request, uid int64) (string, bool) {
+	// 新会话沿用当前会话的设备归属。
+	var deviceID string
+	if p := current(r); p.Token != "" {
+		record, _ := a.sessions().GetRecord(r.Context(), p.Token)
+		deviceID = record.DeviceID
+	}
 	a.sessions().DeleteUser(r.Context(), uid)
-	token, expires, err := a.sessions().Create(r.Context(), uid)
+	token, expires, err := a.sessions().Create(r.Context(), uid, deviceID)
 	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 		return "", false
@@ -1314,22 +1336,27 @@ func (a *App) handleBlockDevice(w http.ResponseWriter, r *http.Request, params P
 	if written {
 		return
 	}
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Blocked = true; d.Trusted = false }); statusFromError(w, err) {
 		return
 	}
+	// 封禁要立即生效：吊销该设备上已签发的会话。
+	a.revokeDeviceSessions(r.Context(), uid, deviceID)
 	a.audit(r, "block_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
 	ok(w, "device blocked", nil)
 }
 
 func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Trusted = true; d.Blocked = false }); statusFromError(w, err) {
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
+		return
+	}
+	// 只信任已存在且未被封禁的设备：不新建设备、不解除管理员封禁。
+	if err := a.security().trustDevice(uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "trust_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
@@ -1337,13 +1364,12 @@ func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params P
 }
 
 func (a *App) handleDeleteDevice(w http.ResponseWriter, r *http.Request, params Params) {
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	uid := current(r).User.UID
-	if err := a.store().DeleteDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().deleteDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "delete_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})

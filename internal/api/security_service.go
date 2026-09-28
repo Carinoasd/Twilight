@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
@@ -27,22 +28,32 @@ func (s *securityService) listDevices(uid int64) []map[string]any {
 	return items
 }
 
-func (s *securityService) blockDevice(uid int64, deviceID string) error {
-	return s.app.store().UpdateDevice(uid, deviceID, func(d *store.Device) {
+// blockDevice 由管理员封禁设备，并立即吊销该设备上已签发的会话——只改标记不吊销
+// 会话时，被封设备上的登录态照样有效。
+func (s *securityService) blockDevice(ctx context.Context, uid int64, deviceID string) error {
+	if err := s.app.store().UpdateDevice(uid, deviceID, func(d *store.Device) {
 		d.Blocked = true
 		d.Trusted = false
-	})
+	}); err != nil {
+		return err
+	}
+	s.app.revokeDeviceSessions(ctx, uid, deviceID)
+	return nil
 }
 
+// trustDevice 只作用于已存在且未被封禁的设备（见 store.TrustDevice）。
 func (s *securityService) trustDevice(uid int64, deviceID string) error {
-	return s.app.store().UpdateDevice(uid, deviceID, func(d *store.Device) {
-		d.Trusted = true
-		d.Blocked = false
-	})
+	return s.app.store().TrustDevice(uid, deviceID)
 }
 
-func (s *securityService) deleteDevice(uid int64, deviceID string) error {
-	return s.app.store().DeleteDevice(uid, deviceID)
+// deleteDevice 删除设备记录并吊销其会话：否则“删设备”后旧会话仍在线，且设备数
+// 上限按记录计数，删记录就能绕过上限。已封禁设备不可删（store 返回 ErrDeviceBlocked）。
+func (s *securityService) deleteDevice(ctx context.Context, uid int64, deviceID string) error {
+	if err := s.app.store().DeleteDevice(uid, deviceID); err != nil {
+		return err
+	}
+	s.app.revokeDeviceSessions(ctx, uid, deviceID)
+	return nil
 }
 
 func (s *securityService) loginHistory(uid int64, limit int) []map[string]any {

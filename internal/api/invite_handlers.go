@@ -293,7 +293,9 @@ func (a *App) handleDetachExpiredInviteChild(w http.ResponseWriter, r *http.Requ
 	if !okDelete {
 		return
 	}
-	ok(w, "已断开下级关系", map[string]any{"uid": uid, "detached": true, "deleted_emby": deletedEmby, "user": publicUser(updated)})
+	// 调用方是上级，不是下级本人：只回最少必要字段。publicUser 会带出下级的
+	// email、telegram_id、registration_code、bgm 状态等个人信息。
+	ok(w, "已断开下级关系", map[string]any{"uid": uid, "detached": true, "deleted_emby": deletedEmby, "user": map[string]any{"uid": updated.UID, "username": updated.Username}})
 }
 
 func (a *App) handleDetachMyExpiredInvite(w http.ResponseWriter, r *http.Request, _ Params) {

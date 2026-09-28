@@ -122,8 +122,11 @@ services:
       TWILIGHT_API_HOST: 0.0.0.0
       TWILIGHT_API_PORT: 5000
 
-      # Admin bootstrap (comma-separated usernames)
-      TWILIGHT_ADMIN_USERNAMES: ${ADMIN_USERNAMES:-admin}
+      # Admin bootstrap (comma-separated usernames). No default on purpose: a
+      # default such as "admin" lets whoever registers that name first on a fresh,
+      # publicly reachable deployment become administrator. Set it explicitly
+      # (and register that account first), or use the setup wizard / admin UIDs.
+      TWILIGHT_ADMIN_USERNAMES: ${ADMIN_USERNAMES:-}
 
       # Security (generate a random secret for production)
       TWILIGHT_BOT_INTERNAL_SECRET: ${BOT_INTERNAL_SECRET:-}

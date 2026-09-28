@@ -25,7 +25,7 @@ func TestV2AdminAPIRoutesRequiresAdminAndIncludesAuthMetadata(t *testing.T) {
 		t.Fatalf("normal user route inventory status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	admin := registerAndLogin(t, app, "admin", "DocsAdmin123456")
+	admin := registerAdmin(t, app, "admin", "DocsAdmin123456")
 	response := doJSON(app, http.MethodGet, "/api/v2/admin/docs/routes", "", admin)
 	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store, private" {
 		t.Fatalf("admin route inventory status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())

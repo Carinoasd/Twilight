@@ -104,5 +104,6 @@ func (a *App) handleForgotPasswordResource(w http.ResponseWriter, r *http.Reques
 		statusFromError(w, err)
 		return
 	}
+	a.auditWithUser(r, user.UID, user.Username, "password_reset_emby", "user", user.UID, map[string]any{"ip": ip, "sessions_revoked": true})
 	ok(w, "密码已重置", map[string]any{"username": user.Username, "new_password": newPassword})
 }
