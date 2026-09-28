@@ -752,10 +752,10 @@ func telegramRateLimitPauseContext(ctx context.Context, err error) bool {
 		return true
 	}
 	d := time.Duration(0)
-	if d, ok := telegramRetryAfterFromError(err); ok {
-		if d > 60*time.Second {
-			d = 60 * time.Second
-		}
+	// 修复：原先 `if d, ok := ...` 在 if 作用域内重新声明了 d，外层 d 恒为 0，
+	// 带 retry_after 的 429 完全不退避。这里改用独立变量再赋值给外层 d。
+	if parsed, ok := telegramRetryAfterFromError(err); ok {
+		d = min(parsed, 60*time.Second)
 	} else if strings.Contains(strings.ToLower(err.Error()), "too many requests") {
 		d = 2 * time.Second
 	}

@@ -4160,6 +4160,7 @@ func TestTelegramTouchPanelReusesSingleTimer(t *testing.T) {
 func TestTelegramAnonymousGroupUserRequiresInlineAuth(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
 	if _, err := app.store().CreateUser(user); err != nil {
@@ -4285,6 +4286,7 @@ func TestTelegramDisabledBuiltinDoesNotFallThroughToCustomCommand(t *testing.T) 
 func TestTelegramGroupUserPanelDeletesCommandMessageAfterSend(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
@@ -4332,6 +4334,7 @@ func TestTelegramGroupUserPanelDeletesCommandMessageAfterSend(t *testing.T) {
 func TestTelegramAnonymousGroupUserAuthDeletesCommandMessageAfterPanel(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
@@ -4484,6 +4487,7 @@ func TestTelegramGroupUserPanelCustomTemplatePlaceholders(t *testing.T) {
 func TestTelegramPanelCloseRequiresAdminAndDeletesPanel(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	tgRequests := make(chan map[string]any, 12)

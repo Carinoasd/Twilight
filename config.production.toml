@@ -136,7 +136,7 @@ group_id = []
 channel_id = []
 # 是否强制订阅指定群/频道才能使用（按 Bot 校验）
 force_subscribe = false
-# 是否启用完整内联面板（关闭后仅保留 /help /bind /me）
+# 是否启用 /twguser 群组用户管理面板（关闭后 /twguser 与已发出面板的按钮全部停用；其他命令不受影响）
 enable_tg_panel = false
 # /twguser 群组用户面板模板；留空使用内置默认。完整占位符说明见后台配置页。
 group_user_panel_template = ""

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +21,7 @@ import (
 // 控制，这样可以实现"每端点不同超时"（health 1.5s / userOp 5s / admin 10s）
 // 又复用同一个 Transport。
 var sharedHTTPTransport = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
+	Proxy: guardedEnvironmentProxy,
 	DialContext: (&net.Dialer{
 		Timeout:   5 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -38,6 +39,56 @@ var sharedHTTPTransport = &http.Transport{
 	TLSHandshakeTimeout:    10 * time.Second,
 	ExpectContinueTimeout:  1 * time.Second,
 	MaxResponseHeaderBytes: 1 << 20,
+}
+
+// sharedHTTPProxyFromEnvironment 是代理来源，变量形式便于测试替换
+// （http.ProxyFromEnvironment 只在进程内读一次环境变量）。
+var sharedHTTPProxyFromEnvironment = http.ProxyFromEnvironment
+
+// guardedEnvironmentProxy 修复：设置了 HTTP(S)_PROXY 时，拨号阶段的 Control 只能
+// 看到代理本身的 IP，guardOutboundDialAddress 对真正的目标主机失效。这里在决定
+// 走代理的那一刻改为校验目标主机：字面 IP 直接判，域名先在本机解析再逐个判，
+// 命中链路本地 / 云元数据 / 未指定地址就拒绝发出请求。
+//
+// 本机解析失败时放行（记录由上层错误体现）：纯代理环境里本机可能没有可用 DNS，
+// 此时拒绝会让 Telegram / Emby 全部不可用；剩余风险是代理端解析结果与本机不同
+// （DNS rebinding 经代理），这部分只能靠代理自身的出站策略兜底。
+// 开发者 JS 的 fetch 不经过这里：它使用独立 Transport 且 Proxy=nil，拨号层始终
+// 能看到真实目标 IP。
+func guardedEnvironmentProxy(req *http.Request) (*url.URL, error) {
+	proxyURL, err := sharedHTTPProxyFromEnvironment(req)
+	if err != nil || proxyURL == nil || req == nil || req.URL == nil {
+		return proxyURL, err
+	}
+	if err := guardOutboundProxyTarget(req.Context(), req.URL.Hostname()); err != nil {
+		return nil, err
+	}
+	return proxyURL, nil
+}
+
+func guardOutboundProxyTarget(ctx context.Context, host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("出站请求缺少目标主机")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return refuseUnsafeOutboundIP(ip, "出站代理目标")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return nil
+	}
+	for _, addr := range addrs {
+		if err := refuseUnsafeOutboundIP(addr.IP, "出站代理目标"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sharedHTTPClient 是 transport-only 共享 client，不带 client.Timeout，

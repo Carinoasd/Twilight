@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
@@ -298,6 +299,12 @@ func (a *App) telegramRunJSCustomCommandWithOptions(code string, c telegramComma
 		return vm.ToValue(value)
 	})
 
+	// 修复：安装 goja 内存护栏（内建函数包装 + 堆增长看门狗），详见 telegram_js_limits.go。
+	if err := developerJSInstallAllocationGuards(vm); err != nil {
+		return "", logs, developerJSSafeError(err)
+	}
+	stopHeapWatchdog := developerJSStartHeapWatchdog(vm)
+	defer stopHeapWatchdog()
 	timer := time.AfterFunc(developerJSExecutionTimeout, func() {
 		vm.Interrupt("execution timeout")
 	})
@@ -1211,11 +1218,15 @@ func (a *App) developerJSSetUserActive(vm *goja.Runtime, actor *store.User, opts
 	if logs != nil && len(*logs) < 8 {
 		*logs = append(*logs, "users.setActive updated user")
 	}
-	a.auditEntryIP("telegram", actor.UID, actor.Username, "telegram_js_admin_user_active_update", "admin", updated.UID, map[string]any{
+	detail := map[string]any{
 		"active":       active,
 		"script_api":   "users.setActive",
 		"private_chat": opts.PrivateChat,
-	})
+	}
+	if !active {
+		a.developerJSSyncEmbyDisabled(opts, updated, result, detail)
+	}
+	a.auditEntryIP("telegram", actor.UID, actor.Username, "telegram_js_admin_user_active_update", "admin", updated.UID, detail)
 	return vm.ToValue(result)
 }
 
@@ -1279,10 +1290,7 @@ func (a *App) developerJSSetUserExpiry(vm *goja.Runtime, actor *store.User, opts
 		return vm.ToValue(result)
 	}
 	updated, err := a.store().UpdateUser(uid, func(u *store.User) error {
-		u.ExpiredAt = expiredAt
-		if expiredAt == permanentExpiryUnix || expiredAt > time.Now().Unix() {
-			u.Active = true
-		}
+		developerJSApplyExpiry(u, expiredAt)
 		return nil
 	})
 	if err != nil {
@@ -1300,6 +1308,37 @@ func (a *App) developerJSSetUserExpiry(vm *goja.Runtime, actor *store.User, opts
 		"private_chat": opts.PrivateChat,
 	})
 	return vm.ToValue(result)
+}
+
+// developerJSApplyExpiry 写入新的到期时间。
+// 修复：原先只要新到期在未来就强制 Active=true，会把管理员手动封禁的账号顺手解封。
+// 现在只有「账号本来启用」或「因到期被停用（旧到期已过）」时才随续期恢复启用；
+// 未到期却处于停用状态的账号视为手动封禁，保持停用。
+func developerJSApplyExpiry(u *store.User, expiredAt int64) {
+	manuallyDisabled := !u.Active && !userExpiredOnly(*u)
+	u.ExpiredAt = expiredAt
+	if manuallyDisabled {
+		return
+	}
+	if expiryIsPermanent(expiredAt) || expiredAt > time.Now().Unix() {
+		u.Active = true
+	}
+}
+
+// developerJSSyncEmbyDisabled 修复：JS 停用账号后同步关停远端 Emby，
+// 与 Web 后台、/banweb、群组面板保持一致；失败写进结果和审计 detail。
+func (a *App) developerJSSyncEmbyDisabled(opts developerJSRunOptions, updated store.User, result, detail map[string]any) {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	synced, err := a.disableRemoteEmbyForWebState(ctx, updated)
+	result["emby_synced"] = synced
+	detail["emby_synced"] = synced
+	if err != nil {
+		result["emby_sync_error"] = "emby_sync_failed"
+		detail["emby_error"] = truncateString(redactSensitiveText(err.Error()), 200)
+	}
 }
 
 // developerJSExtendUserExpiry adds the given number of days on top of the user's
@@ -1451,9 +1490,11 @@ func (a *App) developerJSUpdateUser(vm *goja.Runtime, actor *store.User, opts de
 				if expiryIsPermanent(expiredAt) {
 					expiredAt = permanentExpiryUnix
 				}
-				u.ExpiredAt = expiredAt
-				if expiredAt == permanentExpiryUnix || expiredAt > time.Now().Unix() {
-					u.Active = true
+				// hasActive 时 Active 已由上面的 SetUserActiveAtomic 明确设定，不再被续期覆盖。
+				if hasActive {
+					u.ExpiredAt = expiredAt
+				} else {
+					developerJSApplyExpiry(u, expiredAt)
 				}
 			}
 			if hasTelegram {
@@ -1474,11 +1515,15 @@ func (a *App) developerJSUpdateUser(vm *goja.Runtime, actor *store.User, opts de
 	if logs != nil && len(*logs) < 8 {
 		*logs = append(*logs, "users.update updated user")
 	}
-	a.auditEntryIP("telegram", actor.UID, actor.Username, "telegram_js_admin_user_update", "admin", updated.UID, map[string]any{
+	detail := map[string]any{
 		"patch":        allowed,
 		"script_api":   "users.update",
 		"private_chat": opts.PrivateChat,
-	})
+	}
+	if hasActive && !active {
+		a.developerJSSyncEmbyDisabled(opts, updated, result, detail)
+	}
+	a.auditEntryIP("telegram", actor.UID, actor.Username, "telegram_js_admin_user_update", "admin", updated.UID, detail)
 	return vm.ToValue(result)
 }
 
@@ -2123,20 +2168,11 @@ func developerJSPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	// 归一化 IPv4-mapped IPv6（如 ::ffff:127.0.0.1），避免绕过私网判断。
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsInterfaceLocalMulticast() {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return true
 	}
-	// IPv4 广播地址。
-	if ip.Equal(net.IPv4bcast) {
-		return true
-	}
-	return false
+	return developerJSBlockedAddr(addr)
 }
 
 func developerJSAnySlice(input any) []any {

@@ -96,6 +96,7 @@ type App struct {
 	telegramEmbyHealth        telegramEmbyHealthCache
 	telegramPanelMu           sync.Mutex
 	telegramPanels            map[string]telegramPanelContext
+	telegramPanelThrottle     telegramCooldown
 	developerJSMu             sync.Mutex
 	developerJSCallbacks      map[string]developerJSCallbackContext
 	developerJSWaiters        map[string]developerJSMessageWaiter

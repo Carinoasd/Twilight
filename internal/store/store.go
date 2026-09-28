@@ -5607,6 +5607,50 @@ ON CONFLICT (id) DO UPDATE SET
 	return err
 }
 
+// BindTelegramBotOffset 把持久化 offset 绑定到当前 Bot 身份（getMe 返回的数字 id）。
+//
+// 修复：原先只在同一进程内发现 username 变化才 reset；停机换 Token 再重启时
+// 进程内没有旧身份可比，会沿用旧 Bot 的 offset，新 Bot 小于该值的 update 全被
+// Telegram 当成已确认丢弃。现在库里记下 bot_id：与当前 id 不同就把 offset 归零。
+// 历史行 bot_id=0（升级前）视为未知身份，直接认领、保留 offset。
+// 返回当前应使用的 offset，以及是否因为换 Bot 而重置。
+func (s *Store) BindTelegramBotOffset(botID int64) (int64, bool, error) {
+	if botID <= 0 {
+		offset, err := s.TelegramBotOffset()
+		return offset, false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), telegramRuntimeDBTimeout)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO twilight_telegram_runtime (id, update_offset, bot_id, updated_at)
+VALUES (1, 0, $1, now())
+ON CONFLICT (id) DO NOTHING`, botID); err != nil {
+		return 0, false, err
+	}
+	var offset, storedBot int64
+	if err := tx.QueryRowContext(ctx, `SELECT update_offset, bot_id FROM twilight_telegram_runtime WHERE id = 1 FOR UPDATE`).Scan(&offset, &storedBot); err != nil {
+		return 0, false, err
+	}
+	reset := storedBot != 0 && storedBot != botID
+	if reset {
+		offset = 0
+	}
+	if reset || storedBot != botID {
+		if _, err := tx.ExecContext(ctx, `UPDATE twilight_telegram_runtime SET update_offset = $1, bot_id = $2, updated_at = now() WHERE id = 1`, offset, botID); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return offset, reset, nil
+}
+
 // ResetTelegramBotOffset clears the cursor when getMe proves that configuration
 // now points to a different Bot identity.
 func (s *Store) ResetTelegramBotOffset() error {
