@@ -625,6 +625,10 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 			if err := validate.ValidateUsername(username); err != nil {
 				return err
 			}
+			// 配置文件里的管理员用户名对普通用户保留，防止改名顶替后被提权。
+			if a.usernameReservedForConfiguredAdmin(username, *u) {
+				return errReservedAdminUsername
+			}
 			u.Username = username
 		}
 		if bgmModeSet {
@@ -711,7 +715,16 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusBadRequest, ErrUsernameInvalid, err.Error())
 		return
 	}
+	// 配置文件里的管理员用户名对普通用户保留：否则名字空出后任何人都能改名顶替，
+	// 下次启动/重载配置时被 applyConfiguredAdmins 提权为管理员。
+	if a.usernameReservedForConfiguredAdmin(username, p.User) {
+		failWithCode(w, http.StatusConflict, ErrUsernameTaken, "用户名已被占用，请换一个用户名")
+		return
+	}
 	u, err := a.store().UpdateUser(p.User.UID, func(u *store.User) error {
+		if a.usernameReservedForConfiguredAdmin(username, *u) {
+			return errReservedAdminUsername
+		}
 		u.Username = username
 		return nil
 	})

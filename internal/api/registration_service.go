@@ -199,6 +199,12 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 		}
 	}
 	bootstrapMode := currentUsers == 0
+	// 配置文件里的管理员用户名只在空库首位注册时可用（这是“首位注册者成为管理员”
+	// 的既有语义）。系统已有用户后仍允许注册同名账号，等于让任何抢先注册的人被
+	// 立即提权（或在下次重载配置时被提权），因此对非首位注册一律拒绝。
+	if !bootstrapMode && a.usernameReservedForConfiguredAdmin(input.Username, store.User{}) {
+		return registrationResult{}, registrationFail(409, ErrUsernameTaken, "用户名已被占用，请换一个用户名")
+	}
 	var registerReg store.RegCode
 	if a.cfg().RegisterCodeLimit && !bootstrapMode {
 		if input.RegCode == "" {
@@ -290,7 +296,9 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 	}
 
 	firstAdmin := false
-	if a.configuredAdminMatch(user.UID, user.Username) {
+	// 按用户名提权只在空库首位注册时生效；UID 名单不受影响。
+	if configuredAdminMatchSets(a.configuredAdminUIDSet(), nil, user.UID, "") ||
+		(bootstrapMode && configuredAdminMatchSets(nil, a.configuredAdminUsernameSet(), 0, user.Username)) {
 		if promoted, promoteErr := a.store().UpdateUser(user.UID, func(existing *store.User) error {
 			existing.Role = store.RoleAdmin
 			existing.Active = true
