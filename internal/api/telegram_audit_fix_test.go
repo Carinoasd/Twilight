@@ -403,8 +403,8 @@ func TestTelegramOffsetResetsWhenBotIdentityChangesAcrossRestart(t *testing.T) {
 	}
 }
 
-// fakeEmbyPolicyServer 记录对 /Users/{id}/Policy 的写入，GET /Users/{id} 返回一个启用中的用户。
-func fakeEmbyPolicyServer(t *testing.T, app *App) *[]string {
+// fakeEmbyPolicyRecorder 记录对 /Users/{id}/Policy 的写入，GET /Users/{id} 返回一个启用中的用户。
+func fakeEmbyPolicyRecorder(t *testing.T, app *App) *[]string {
 	t.Helper()
 	var mu sync.Mutex
 	posted := []string{}
@@ -434,7 +434,7 @@ func fakeEmbyPolicyServer(t *testing.T, app *App) *[]string {
 func TestDeveloperJSDisableSyncsEmbyAndExpiryKeepsBan(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().AuditLogEnabled = true
-	posted := fakeEmbyPolicyServer(t, app)
+	posted := fakeEmbyPolicyRecorder(t, app)
 	admin := mustCreateTGUser(t, app, store.User{Username: "js-ban-admin", Role: store.RoleAdmin, Active: true, TelegramID: 5301, PasswordHash: "unused"})
 	target := mustCreateTGUser(t, app, store.User{Username: "js-ban-target", Role: store.RoleNormal, Active: true, EmbyID: "emby-js-ban", EmbyUsername: "t", ExpiredAt: time.Now().Add(24 * time.Hour).Unix(), PasswordHash: "unused"})
 
@@ -485,7 +485,7 @@ func TestTelegramBanWebRequiresExactTarget(t *testing.T) {
 	tg := newRecordingTelegramServer(t, app)
 	bobby := mustCreateTGUser(t, app, store.User{Username: "bobby", Role: store.RoleNormal, Active: true})
 	mailer := mustCreateTGUser(t, app, store.User{Username: "carol", Email: "bob@example.com", Role: store.RoleNormal, Active: true, EmbyID: "e-carol"})
-	posted := fakeEmbyPolicyServer(t, app)
+	posted := fakeEmbyPolicyRecorder(t, app)
 	ctx := context.Background()
 	app.telegramHandleBanWeb(ctx, 42, 42, []string{"bobb"})        // 只模糊命中 bobby
 	app.telegramHandleBanWeb(ctx, 42, 42, []string{"bob@example"}) // 只模糊命中 carol 的邮箱
