@@ -1414,6 +1414,13 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_sessions`)
 	}
 	if err == nil {
+		// 播放统计与 Telegram 身份历史存在独立表、不在快照里。恢复点之后注册的用户
+		// 在恢复后已不存在，NextUserID 又回卷到快照值，新注册者会拿到同一 UID 并
+		// 继承这些行。同一事务里删除所有"不属于恢复后用户"的行；恢复后仍存在的
+		// 用户保留自己的历史。
+		err = deleteRowsOfUnknownUIDsTx(ctx, tx, stateUserIDs(state))
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
@@ -1436,6 +1443,33 @@ func (s *Store) LoadSnapshot(data []byte) error {
 	}
 	if err := s.replaceTelegramRosterLocked(telegramRoster); err != nil {
 		return err
+	}
+	return nil
+}
+
+// uidScopedSideTables 是按 uid 归属、但不随状态快照备份/恢复的专表。
+var uidScopedSideTables = []string{
+	"twilight_playback_records",
+	"twilight_playback_events",
+	"twilight_playback_segments",
+	"twilight_playback_daily",
+	"twilight_telegram_identity_history",
+}
+
+func stateUserIDs(state State) []int64 {
+	uids := make([]int64, 0, len(state.Users))
+	for uid := range state.Users {
+		uids = append(uids, uid)
+	}
+	return uids
+}
+
+// deleteRowsOfUnknownUIDsTx 删除 uidScopedSideTables 中 uid 不在 keep 里的行。
+func deleteRowsOfUnknownUIDsTx(ctx context.Context, tx *sql.Tx, keep []int64) error {
+	for _, table := range uidScopedSideTables {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE NOT (uid = ANY($1))`, keep); err != nil {
+			return err
+		}
 	}
 	return nil
 }
