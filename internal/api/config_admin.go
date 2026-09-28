@@ -381,11 +381,11 @@ func (a *App) saveConfigContentLocked(content, expectedRevision string) (map[str
 	}
 	content = normalizedContent
 	content = mergeProtectedAdminConfig(content, string(existing))
-	// repo_url 与 admin_uids/admin_usernames 同属"禁止网页改写"字段：git 自动更新
-	// 的来源仓库只能由运维在配置文件侧设定，防止被盗管理员会话改 origin 后触发
-	// 更新实现 RCE。这里在写盘前把提交内容中的 repo_url 就地还原为磁盘原值。
-	if hadExisting {
-		content = restoreProtectedRepoURL(content, string(existing))
+	// repo_url 与 admin_uids/admin_usernames 同属"禁止网页改写"字段：无论磁盘原文
+	// 是否写了 repo_url 行，写盘前一律强制为磁盘文件本身解析出的值（见
+	// enforceProtectedRepoURL）。
+	if status, message := enforceRepoURLForSave(configFile, &content); status != http.StatusOK {
+		return nil, status, message
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
 		return nil, http.StatusBadRequest, "配置校验失败"
@@ -479,8 +479,8 @@ func (a *App) saveInitialSetupConfigContentLocked(content, adminUsername string)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return nil, http.StatusInternalServerError, "读取配置失败"
 	}
-	if hadExisting {
-		content = restoreProtectedRepoURL(content, string(existing))
+	if status, message := enforceRepoURLForSave(configFile, &content); status != http.StatusOK {
+		return nil, status, message
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
 		return nil, http.StatusBadRequest, "配置校验失败"
@@ -520,6 +520,23 @@ func (a *App) saveInitialSetupConfigContentLocked(content, adminUsername string)
 		info["backup_path"] = backupInfo.Path
 	}
 	return info, http.StatusOK, ""
+}
+
+// enforceRepoURLForSave 是两条写盘路径共用的 repo_url 强制入口。
+func enforceRepoURLForSave(configFile string, content *string) (int, string) {
+	protected, err := protectedRepoURL(configFile)
+	if err != nil {
+		return http.StatusInternalServerError, "读取配置失败"
+	}
+	enforced, err := enforceProtectedRepoURL(configFile, *content, protected)
+	if err != nil {
+		if errors.Is(err, errProtectedRepoURL) {
+			return http.StatusBadRequest, "repo_url 只能在服务器配置文件或环境变量中修改"
+		}
+		return http.StatusBadRequest, "配置校验失败"
+	}
+	*content = enforced
+	return http.StatusOK, ""
 }
 
 func normalizeConfigContent(configFile, content string) (string, error) {
@@ -727,59 +744,64 @@ func protectedAdminConfigLine(trimmed string) bool {
 	}
 }
 
-// restoreProtectedRepoURL 把提交 TOML 里 [SystemUpdate].repo_url 的值就地还原为
-// 磁盘原值（existing），防止经网页配置接口改写 git 自动更新的来源仓库。
+// errProtectedRepoURL 表示提交内容试图（含经别名键）改写 git 自动更新来源。
+var errProtectedRepoURL = errors.New("system update repo_url is not editable from web config")
+
+// protectedRepoURL 返回写盘时 [SystemUpdate].repo_url 必须保持的值：磁盘配置
+// 文件本身（不含 env / .local 覆盖）解析出的值；文件里没有该键时就是代码默认值。
 //
 // 威胁模型：repo_url 决定 git 自动更新 pull 的 origin。若允许网页改写，被盗的
-// 管理员会话可把 origin 指向攻击者 fork，再触发更新即可在服务器上 RCE。该字段
-// 只能由运维在配置文件 / 环境变量侧设定。
-//
-// 为什么用"就地替换值"而非 [Admin] 那种"整段剥离 + 末尾追加"：repo_url 位于
-// [SystemUpdate] 段内，该段还有 branch / restart_services 等普通字段。若整段剥离
-// 再追加一个只含 repo_url 的 [SystemUpdate]，会产生重复 section 头——TOML 规范
-// 不允许同名 table 重复定义，直接解析失败。就地替换与 restoreTOMLSecrets 同构，
-// 不改变文档结构。
-//
-// 行为：仅当提交内容在 [SystemUpdate] 段内出现 repo_url 行时才替换其值为磁盘原值；
-// 提交侧删除该行（清空 repo_url、停用自动更新）属于合法操作，不阻止。
-func restoreProtectedRepoURL(content, existing string) string {
-	if content == "" {
-		return content
+// 管理员会话可把 origin 指向攻击者 fork，再触发更新即可植入恶意代码。该字段
+// 只能由运维在配置文件 / 环境变量侧设定。旧实现只在磁盘原文找得到
+// [SystemUpdate] 下的 repo_url 行时才还原，文件里没有该行（值来自默认）、
+// 用引号键或根层裸键时会直接放行。
+func protectedRepoURL(configFile string) (string, error) {
+	cfg, err := config.LoadFileOnly(configFile)
+	if err != nil {
+		return "", err
 	}
-	diskRepoURL, hasDisk := systemUpdateRepoURL(existing)
-	if !hasDisk {
-		return content
-	}
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || !strings.EqualFold(section, "SystemUpdate") || !strings.EqualFold(key, "repo_url") {
-			continue
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(diskRepoURL)
-	}
-	return strings.Join(lines, "\n")
+	return cfg.SystemUpdateRepoURL, nil
 }
 
-// systemUpdateRepoURL 从 TOML 文本里抽取 [SystemUpdate].repo_url 的字符串值。
-func systemUpdateRepoURL(content string) (string, bool) {
-	section := ""
-	for _, line := range strings.Split(content, "\n") {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || !strings.EqualFold(section, "SystemUpdate") || !strings.EqualFold(key, "repo_url") {
-			continue
-		}
-		_, rawVal, _ := strings.Cut(line, "=")
-		if v, err := strconv.Unquote(strings.TrimSpace(rawVal)); err == nil {
-			return v, true
-		}
-		return strings.Trim(strings.TrimSpace(rawVal), `"`), true
+// loadConfigContentFileOnly 把一段候选配置按"仅文件"口径解析（与 config.Load 同一个
+// 读取器，别名、大小写规则完全一致）。
+func loadConfigContentFileOnly(configFile, content string) (config.Config, error) {
+	dir := filepath.Dir(configFile)
+	tmpPath := filepath.Join(dir, ".twilight_config_probe_"+strconv.FormatInt(time.Now().UnixNano(), 10)+".toml")
+	if err := os.WriteFile(tmpPath, []byte(content), 0o600); err != nil {
+		return config.Config{}, err
 	}
-	return "", false
+	defer os.Remove(tmpPath)
+	return config.LoadFileOnly(tmpPath)
+}
+
+// enforceProtectedRepoURL 在已规范化的候选内容上强制 repo_url = protected：
+//  1. 规范位置 [SystemUpdate].repo_url 直接改写为 protected（静默，兼容"原样回传"的
+//     正常保存与配置还原）；
+//  2. 再用真实读取器解析一次，若经别名（根层 repo_url、大小写不同的表名等）仍解析
+//     出别的值，直接拒绝保存。
+func enforceProtectedRepoURL(configFile, content, protected string) (string, error) {
+	cfg, err := loadConfigContentFileOnly(configFile, content)
+	if err != nil {
+		return "", err
+	}
+	if cfg.SystemUpdateRepoURL != protected {
+		values := configValues(cfg)
+		values["SystemUpdate"]["repo_url"] = protected
+		ensureTicketDefaults(values)
+		content, err = mergeConfigTOML(content, values)
+		if err != nil {
+			return "", err
+		}
+		cfg, err = loadConfigContentFileOnly(configFile, content)
+		if err != nil {
+			return "", err
+		}
+	}
+	if cfg.SystemUpdateRepoURL != protected {
+		return "", errProtectedRepoURL
+	}
+	return content, nil
 }
 
 func writeConfigBackupBytes(configFile, backupDir string, content []byte) (store.BackupInfo, error) {

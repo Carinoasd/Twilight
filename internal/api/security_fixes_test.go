@@ -313,3 +313,41 @@ func TestUIDRouteRejectsMalformedTarget(t *testing.T) {
 		t.Fatalf("malformed uid response should explain the parameter: %s", resp.Body.String())
 	}
 }
+
+// TestRepoURLCannotBeSetWhenMissingOnDisk 防回归：磁盘配置没有 repo_url 行
+// （值来自默认）时，网页提交的 repo_url（规范位置或根层别名）都不得生效。
+func TestRepoURLCannotBeSetWhenMissingOnDisk(t *testing.T) {
+	for name, submittedRepo := range map[string]string{
+		"section": "\n[SystemUpdate]\nrepo_url = \"https://evil.example/fork.git\"\nbranch = \"main\"\n",
+		"root":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := newTestApp(t)
+			app.cfg().ConfigFile = filepath.Join(app.cfg().DatabaseDir, "config.toml")
+			databaseConfig := "[Database]\n" +
+				"driver = \"postgres\"\n" +
+				"backup_dir = " + strconv.Quote(app.cfg().DatabaseBackupDir) + "\n"
+			existing := "[Global]\nserver_name = \"old\"\n\n" + databaseConfig
+			if err := os.WriteFile(app.cfg().ConfigFile, []byte(existing), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			submitted := "[Global]\nserver_name = \"new\"\n\n" + databaseConfig + submittedRepo
+			if name == "root" {
+				submitted = "repo_url = \"https://evil.example/fork.git\"\n" + submitted
+			}
+			_, status, _ := app.saveConfigContent(submitted)
+			data, _ := os.ReadFile(app.cfg().ConfigFile)
+			if status == http.StatusOK {
+				cfg, err := config.LoadFileOnly(app.cfg().ConfigFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(cfg.SystemUpdateRepoURL, "evil.example") || strings.Contains(app.cfg().SystemUpdateRepoURL, "evil.example") {
+					t.Fatalf("SECURITY REGRESSION: repo_url set via web config: file=%q\n%s", cfg.SystemUpdateRepoURL, data)
+				}
+			} else if strings.Contains(string(data), "evil.example") {
+				t.Fatalf("rejected save must not touch disk:\n%s", data)
+			}
+		})
+	}
+}
