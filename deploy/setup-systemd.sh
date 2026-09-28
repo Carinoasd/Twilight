@@ -20,8 +20,14 @@ Environment overrides:
   TWILIGHT_WEBUI_ORIGIN       Web UI public origin, validated only (Next.js itself
                               does not consume ORIGIN). Defaults to http://<host>:<port>.
   TWILIGHT_NODE_BIN           Node executable. Defaults to the first node in PATH.
-  TWILIGHT_SYSTEMD_USER       systemd service user. Defaults to root.
+  TWILIGHT_SYSTEMD_USER       systemd service user. Defaults to twilight (a system
+                              account created automatically when missing).
+                              Running as root is supported but not recommended.
   TWILIGHT_SYSTEMD_GROUP      systemd service group. Defaults to TWILIGHT_SYSTEMD_USER.
+  TWILIGHT_SYSTEMD_READWRITE_PATHS
+                              Extra space-separated writable paths for the
+                              ProtectSystem=strict sandbox (e.g. a backup_dir or
+                              upload_folder outside the project root).
 EOF
 }
 
@@ -81,9 +87,13 @@ WEBUI_HOST="${TWILIGHT_WEBUI_HOST:-127.0.0.1}"
 WEBUI_PORT="${TWILIGHT_WEBUI_PORT:-3001}"
 WEBUI_ORIGIN="${TWILIGHT_WEBUI_ORIGIN:-http://$WEBUI_HOST:$WEBUI_PORT}"
 NODE_BIN="${TWILIGHT_NODE_BIN:-$(command -v node || true)}"
-SERVICE_USER="${TWILIGHT_SYSTEMD_USER:-root}"
+# 默认使用专用低权限账号：自动更新、配置编辑、上传、备份与迁移都会写文件，
+# 以 root 运行时任何路径类瑕疵都会变成 root 写文件。
+SERVICE_USER="${TWILIGHT_SYSTEMD_USER:-twilight}"
 SERVICE_GROUP="${TWILIGHT_SYSTEMD_GROUP:-$SERVICE_USER}"
+EXTRA_RW_PATHS="${TWILIGHT_SYSTEMD_READWRITE_PATHS:-}"
 UNIT_DIR="/etc/systemd/system"
+POLKIT_RULE="/etc/polkit-1/rules.d/50-twilight-restart.rules"
 TMP_CHECK="$(mktemp -t twilight-systemd-check.XXXXXX)"
 cleanup() {
   rm -f "$TMP_CHECK"
@@ -106,6 +116,10 @@ if [[ "$PROJECT_ROOT$BIN_PATH$WEBUI_ROOT$CONFIG_FILE$ENV_FILE" =~ [[:space:]] ]]
 fi
 if [[ "$PROJECT_ROOT$BIN_PATH$WEBUI_ROOT$CONFIG_FILE$ENV_FILE" == *%* ]]; then
   echo "systemd setup does not support '%' in project, binary, config, or env paths because systemd treats it as a specifier." >&2
+  exit 1
+fi
+if [[ "$EXTRA_RW_PATHS" == *%* ]]; then
+  echo "systemd setup does not support '%' in TWILIGHT_SYSTEMD_READWRITE_PATHS." >&2
   exit 1
 fi
 if [[ "$API_HOST$API_PORT$WEBUI_HOST$WEBUI_PORT$WEBUI_ORIGIN$SERVICE_USER$SERVICE_GROUP" =~ [[:space:]] ]]; then
@@ -133,13 +147,28 @@ if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
   exit 1
 fi
 
+USER_WILL_CREATE=0
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
-  echo "Service user does not exist: $SERVICE_USER" >&2
-  exit 1
+  if [[ "$SERVICE_USER" == "twilight" && "$SERVICE_GROUP" == "twilight" ]]; then
+    need_cmd useradd
+    echo "Service user does not exist; will create system account: $SERVICE_USER"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
+      useradd --system --user-group --home-dir "$PROJECT_ROOT" --no-create-home --shell "$NOLOGIN" "$SERVICE_USER"
+    else
+      USER_WILL_CREATE=1
+    fi
+  else
+    echo "Service user does not exist: $SERVICE_USER" >&2
+    exit 1
+  fi
 fi
-if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+if [[ "$USER_WILL_CREATE" -eq 0 ]] && ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
   echo "Service group does not exist: $SERVICE_GROUP" >&2
   exit 1
+fi
+if [[ "$SERVICE_USER" == "root" ]]; then
+  echo "Warning: services will run as root. A dedicated account (default: twilight) is strongly recommended." >&2
 fi
 
 CONFIG_WILL_CREATE=0
@@ -209,11 +238,26 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     "$PROJECT_ROOT/db/backups" \
     "$PROJECT_ROOT/uploads" \
     "$PROJECT_ROOT/config_backups"
+  if [[ "$SERVICE_USER" != "root" ]]; then
+    # 配置编辑会在项目根目录写临时文件再 rename，网页一键更新会 git pull 整个
+    # 工作区，因此项目目录需归服务账号所有；.env 含密钥，只给服务组读。
+    echo "Setting ownership of $PROJECT_ROOT to $SERVICE_USER:$SERVICE_GROUP"
+    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PROJECT_ROOT"
+    if [[ -f "$ENV_FILE" ]]; then
+      chown "root:$SERVICE_GROUP" "$ENV_FILE"
+      chmod 0640 "$ENV_FILE"
+    fi
+  fi
 fi
 
-if [[ "$CONFIG_WILL_CREATE" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
+if [[ "$CONFIG_WILL_CREATE" -eq 0 && "$USER_WILL_CREATE" -eq 0 ]] && command -v runuser >/dev/null 2>&1; then
   if ! runuser -u "$SERVICE_USER" -- test -r "$CONFIG_FILE"; then
     echo "Config is not readable by service user $SERVICE_USER: $CONFIG_FILE" >&2
+    echo "Hint: a project under /root is not reachable by a non-root account; move it (e.g. /opt/twilight)." >&2
+    exit 1
+  fi
+  if [[ "$DRY_RUN" -eq 0 ]] && ! runuser -u "$SERVICE_USER" -- test -w "$PROJECT_ROOT"; then
+    echo "Project root is not writable by service user $SERVICE_USER: $PROJECT_ROOT" >&2
     exit 1
   fi
   if [[ -f "$ENV_FILE" ]] && ! runuser -u "$SERVICE_USER" -- test -r "$ENV_FILE"; then
@@ -274,7 +318,28 @@ Twilight systemd setup
   webui:        $WEBUI_HOST:$WEBUI_PORT
   node:         $NODE_BIN
   user/group:   $SERVICE_USER:$SERVICE_GROUP
+  rw_paths:     $PROJECT_ROOT $EXTRA_RW_PATHS
   unit_dir:     $UNIT_DIR
+EOF
+}
+
+# 沙箱加固：只放行项目目录（及 TWILIGHT_SYSTEMD_READWRITE_PATHS）可写。
+hardening_block() {
+  local rw_paths="$1"
+  cat <<EOF
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$rw_paths
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
 EOF
 }
 
@@ -294,6 +359,7 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$PROJECT_ROOT
 ExecStart=$BIN_PATH api --host $API_HOST --port $API_PORT --config config.toml
 EnvironmentFile=-$ENV_FILE
+$(hardening_block "$PROJECT_ROOT${EXTRA_RW_PATHS:+ $EXTRA_RW_PATHS}")
 
 LimitNOFILE=65535
 LimitNPROC=4096
@@ -338,6 +404,7 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$PROJECT_ROOT
 ExecStart=$BIN_PATH $command --config config.toml
 EnvironmentFile=-$ENV_FILE
+$(hardening_block "$PROJECT_ROOT${EXTRA_RW_PATHS:+ $EXTRA_RW_PATHS}")
 
 LimitNOFILE=65535
 MemoryMax=$memory_max
@@ -391,6 +458,7 @@ Environment=BACKEND_URL=http://$API_HOST:$API_PORT
 # Next.js standalone 读取 HOSTNAME / PORT（注意不是 HOST）。
 Environment=HOSTNAME=$WEBUI_HOST
 Environment=PORT=$WEBUI_PORT
+$(hardening_block "$WEBUI_ROOT/.next")
 
 LimitNOFILE=65535
 MemoryMax=512M
@@ -407,6 +475,25 @@ SyslogIdentifier=twilight-webui
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# 非 root 账号下，网页一键更新需要重启服务：只授权该账号对这四个固定 unit 执行
+# restart，不授权创建临时 unit（systemd-run 的临时 unit 以 root 运行，放行即提权）。
+if [[ "$SERVICE_USER" != "root" && -d "$(dirname "$POLKIT_RULE")" ]]; then
+  cat >"$POLKIT_RULE" <<EOF
+// Generated by Twilight deploy/setup-systemd.sh
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      subject.user == "$SERVICE_USER" &&
+      action.lookup("verb") == "restart" &&
+      ["twilight.service", "twilight-bot.service", "twilight-scheduler.service", "twilight-webui.service"].indexOf(action.lookup("unit")) >= 0) {
+    return polkit.Result.YES;
+  }
+});
+EOF
+  chmod 0644 "$POLKIT_RULE"
+elif [[ "$SERVICE_USER" != "root" ]]; then
+  echo "Warning: polkit rules directory not found; restart services manually after a web-triggered update." >&2
+fi
 
 systemctl daemon-reload
 

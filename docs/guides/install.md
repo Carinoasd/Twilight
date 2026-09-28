@@ -211,10 +211,12 @@ sudo bash deploy/setup-systemd.sh --restart
 
 - 校验运行在 Linux、以 root 权限运行，且系统已安装 `systemctl` / `realpath` / `install` / `mktemp`。
 - 校验项目目录确实是 Twilight Go 后端（存在 `go.mod` 与 `cmd/twilight`）。
-- 校验项目/二进制/配置/`.env` 路径不含空白或 `%`，主机/端口/用户/组合法（端口在 1–65535），且服务用户与组存在。
+- 校验项目/二进制/配置/`.env` 路径不含空白或 `%`，主机/端口/用户/组合法（端口在 1–65535），且服务用户与组存在；默认服务账号 `twilight` 不存在时会自动创建为系统账号（`nologin`）。
 - 缺少 `config.toml` 时，若存在 `config.production.toml` 会自动复制生成（属主设为服务用户，权限 0640）；否则报错退出。
 - 缺少可执行的 `bin/twilight` 时自动 `go build` 构建（`--no-build` 可跳过构建并要求二进制已存在）。
 - 创建运行目录：`db/`、`db/backups/`、`uploads/`、`config_backups/`。
+- 服务账号不是 root 时，把项目目录属主改为服务账号（配置编辑要在项目根写临时文件、网页一键更新要 `git pull` 整个工作区），`.env` 改为 `root:<服务组>`、权限 0640。项目放在 `/root` 下时非 root 账号无法访问，请移到 `/opt/twilight` 之类的位置。
+- 服务账号不是 root 且系统有 polkit 时，写入 `/etc/polkit-1/rules.d/50-twilight-restart.rules`，只允许该账号对四个 Twilight unit 执行 `restart`（供网页一键更新后重启；不放行创建临时 unit）。
 - 扫描 `twilight.service`、`twilight-bot.service`、`twilight-scheduler.service` 是否仍指向旧 Python 入口；检测到旧 Python unit 时会停止、禁用并备份旧 unit，再写入 Go 版 unit。
 - 写入 Go API、Bot、Scheduler 和 V2 Web UI unit 后执行 `systemctl daemon-reload`、`enable`，并 `start`（带 `--restart` 时改为 `restart`），最后打印各服务状态。
 
@@ -241,8 +243,9 @@ sudo TWILIGHT_PROJECT_ROOT=/opt/Twilight \
 | `TWILIGHT_WEBUI_PORT` | `3001` | 前端监听端口。 |
 | `TWILIGHT_WEBUI_ORIGIN` | `http://127.0.0.1:3001` | 仅用于部署期校验，Next.js 本身不消费 `ORIGIN`。 |
 | `TWILIGHT_NODE_BIN` | `PATH` 中的 `node` | Next.js standalone 运行时。 |
-| `TWILIGHT_SYSTEMD_USER` | `root` | systemd 服务用户。 |
+| `TWILIGHT_SYSTEMD_USER` | `twilight` | systemd 服务用户（默认账号缺失时自动创建）。可设为 `root`，但不推荐。 |
 | `TWILIGHT_SYSTEMD_GROUP` | 同 `TWILIGHT_SYSTEMD_USER` | systemd 服务组。 |
+| `TWILIGHT_SYSTEMD_READWRITE_PATHS` | 空 | 追加到 `ReadWritePaths` 的可写目录（空格分隔），例如放在项目目录外的 `backup_dir` / `upload_folder`。 |
 
 生成的四个 unit：
 
@@ -252,6 +255,8 @@ sudo TWILIGHT_PROJECT_ROOT=/opt/Twilight \
 - `twilight-webui.service`：`node <project>/webui/.next/standalone/server.js`，`PartOf=twilight.service`；脚本会在构建后把 `.next/static` 与 `public` 复制进 standalone 目录（缺了会退化成无样式页面）。
 
 > `EnvironmentFile=-$ENV_FILE` 表示项目根目录下的 `.env`（可选，存在才加载）。
+
+所有 unit 都以专用账号运行并启用 systemd 沙箱：`NoNewPrivileges=true`、`ProtectSystem=strict`、`ProtectHome=read-only`、`PrivateTmp=true`、`PrivateDevices=true`、`ProtectKernel*`、`RestrictSUIDSGID=true`、`UMask=0077` 等；Go 服务只有项目目录（加上 `TWILIGHT_SYSTEMD_READWRITE_PATHS`）可写，Web UI 只有 `webui/.next` 可写。把 `backup_dir`、`upload_folder`、`databases_dir` 配到项目目录以外时，必须同时加入 `TWILIGHT_SYSTEMD_READWRITE_PATHS`，否则写入会被沙箱拒绝。`deploy/*.service` 是同样配置的手工范例（以 `/opt/twilight` 为项目根）。
 
 ## 运行数据与备份
 
