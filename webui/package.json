@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test:ticket-conversation": "node --test scripts/test-ticket-conversation.cjs",
     "test:telegram-link-status": "node --test scripts/test-telegram-link-status.cjs",
+    "test:media-poster-url": "node --test scripts/test-media-poster-url.cjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",

@@ -51,7 +51,7 @@ import { ApiError } from "@/lib/api-request";
 import { formatDate } from "@/lib/utils";
 import { mediaRequestExternalUrl } from "@/lib/media-external-url";
 import { useI18n } from "@/lib/i18n";
-import { sanitizeImageUrl } from "@/lib/safe-url";
+import { sanitizeMediaPosterUrl } from "@/lib/media-poster-url";
 
 type AdminRequestStatus = keyof MediaRequestStatusCounts;
 
@@ -95,7 +95,8 @@ function updateStatusCounts(
 }
 
 function mediaRequestPoster(request: MediaRequest): string | null {
-  return sanitizeImageUrl(request.media_info?.poster || request.media_info?.poster_url) || null;
+  // 只加载白名单主机的海报，避免管理员浏览器被引到外站（追踪 IP / UA）。
+  return sanitizeMediaPosterUrl(request.media_info?.poster || request.media_info?.poster_url) || null;
 }
 
 function mediaRequestRating(value: unknown): string | null {
@@ -512,6 +513,7 @@ export default function AdminRequestsPage() {
                           alt={request.media_info?.title || request.title}
                           fill
                           unoptimized
+                          referrerPolicy="no-referrer"
                           sizes="56px"
                           className="h-full w-full object-cover"
                         />

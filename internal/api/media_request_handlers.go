@@ -113,16 +113,14 @@ func (a *App) handleCreateMediaRequest(w http.ResponseWriter, r *http.Request, _
 	}
 
 	payload := decodeMap(r)
-	title := firstNonEmpty(stringValue(payload, "title"), stringValue(payload, "name"), "Unknown")
+	title := truncateString(strings.TrimSpace(firstNonEmpty(stringValue(payload, "title"), stringValue(payload, "name"), "Unknown")), mediaRequestTitleMaxRunes)
 	source := normalizeSource(firstNonEmpty(stringValue(payload, "source"), "tmdb"))
 	mediaID, _ := strconv.ParseInt(firstNonEmpty(stringValue(payload, "media_id"), stringValue(payload, "tmdb_id"), stringValue(payload, "bgm_id"), "0"), 10, 64)
-	mediaType := firstNonEmpty(stringValue(payload, "media_type"), stringValue(payload, "type"), "movie")
+	mediaType := truncateString(firstNonEmpty(stringValue(payload, "media_type"), stringValue(payload, "type"), "movie"), mediaRequestShortFieldRunes)
 	season := intValue(payload, "season", 0)
-	mediaInfo := map[string]any{"title": title, "source": source}
-	for key, value := range payload {
-		mediaInfo[key] = value
-	}
-	note := truncateString(stringValue(payload, "note"), 500)
+	// 只保留白名单字段；inventory_* 等由服务端在下面的库存检查里写入。
+	mediaInfo := a.sanitizeMediaRequestInfo(payload, title, source)
+	note := truncateString(stringValue(payload, "note"), mediaRequestNoteMaxRunes)
 	if !(p.User.Role == store.RoleAdmin && boolValue(payload, "skip_inventory_check", false)) {
 		inventoryPayload := cloneMap(mediaInfo)
 		inventoryPayload["source"] = source
@@ -157,12 +155,12 @@ func (a *App) handleCreateMediaRequest(w http.ResponseWriter, r *http.Request, _
 		TelegramID:    p.User.TelegramID,
 		Username:      p.User.Username,
 		Title:         title,
-		OriginalTitle: stringValue(payload, "original_title"),
+		OriginalTitle: truncateString(stringValue(payload, "original_title"), mediaRequestTitleMaxRunes),
 		Source:        source,
 		MediaID:       mediaID,
 		MediaType:     mediaType,
 		Season:        season,
-		Year:          stringValue(payload, "year"),
+		Year:          truncateString(stringValue(payload, "year"), mediaRequestShortFieldRunes),
 		Note:          note,
 		MediaInfo:     mediaInfo,
 	}, createOpts)
