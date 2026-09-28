@@ -3590,12 +3590,14 @@ func (s *Store) FindAPIKeyByHash(hash string) (APIKey, User, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	hashBytes := []byte(hash)
+	now := time.Now().Unix()
 	// 现代 key：hash → ID 索引命中后回 s.state 复核。命中项仍做常量时间比对以保留
 	// 「hash 比对不泄露时序」的原不变量；Enabled 判定不携带秘密值可普通短路。索引陈旧
 	// 只会让此处 ok=false（假未命中，下轮 refresh 自愈），绝不放行已删/轮换的 key。
 	if s.apiKeyHashMap != nil {
 		if id, ok := s.apiKeyHashMap[hash]; ok {
 			if k, exists := s.state.APIKeys[id]; exists && k.Enabled &&
+				(k.ExpiredAt <= 0 || k.ExpiredAt > now) &&
 				subtle.ConstantTimeCompare([]byte(k.Hash), hashBytes) == 1 {
 				u, uok := s.state.Users[k.UID]
 				return k, u, uok
@@ -3603,7 +3605,7 @@ func (s *Store) FindAPIKeyByHash(hash string) (APIKey, User, bool) {
 		}
 	} else {
 		for _, k := range s.state.APIKeys { // 索引未建（异常兜底）：退回全表扫描保证正确性。
-			if k.Enabled && subtle.ConstantTimeCompare([]byte(k.Hash), hashBytes) == 1 {
+			if k.Enabled && (k.ExpiredAt <= 0 || k.ExpiredAt > now) && subtle.ConstantTimeCompare([]byte(k.Hash), hashBytes) == 1 {
 				u, ok := s.state.Users[k.UID]
 				return k, u, ok
 			}

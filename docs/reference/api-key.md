@@ -62,7 +62,7 @@ GET /api/v1/apikey/status?apikey=key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 `authenticateAPIKey` 命中密钥后依次校验：
 
-1. 用 SHA-256 哈希后在状态存储中查找对应 Key 记录（`FindAPIKeyByHash`）；
+1. 用 SHA-256 哈希后在状态存储中查找对应 Key 记录（`FindAPIKeyByHash`），要求启用且未到期；Key 的 `expired_at > 0` 时必须严格大于当前 Unix 秒，非正值兼容为无到期时间；
 2. 绑定的账号必须 `Active`（被禁用 / 已到期的账号一律拒绝）；
 3. 查询参数方式额外要求 Key 为多键类型且 `allow_query` 为真；
 4. 命中该 Key 的每分钟限速（默认 300 次，可逐 Key 配置）；
@@ -121,6 +121,10 @@ API Key 记录上带有一个 `permissions` 字段（字符串数组），可取
 `/apikey/*` 路由会在认证通过后继续强制检查 `permissions`：账号只读接口要求 `account:read`，账号启停、续期、卡码消费和 Key 轮换要求 `account:write`，Emby 状态要求 `emby:read`，踢出 Emby 会话要求 `emby:write`。缺少权限返回 HTTP 403 + `API_KEY_PERMISSION_DENIED`，且不会执行目标操作。历史 Key 的权限数组为空时按默认全权限兼容，避免升级后把旧 Key 全部锁死。
 
 ### 4.1 API Key 不能自行修改权限
+
+`POST /api/v1/auth/login/apikey` 和 `POST /api/v2/auth/login/apikey` 不再将 Key 兑换为网页会话：有效且所属账号启用的 Key 返回 HTTP 403 + `API_KEY_PERMISSION_DENIED`，不返回 Token 或 Cookie。此规则覆盖管理员 Key、默认全 API 权限 Key 和 legacy Key，避免绕过 API scope、到期和撤销检查。外部集成继续使用 `/apikey/*`，网页登录使用用户名/邮箱和密码。
+
+升级前已通过 Key 签发的会话无法与密码登录会话区分；如曾使用或暴露此入口，应通过已有会话撤销流程使相关账号的全部会话失效，随后重新登录。
 
 `PUT /api/v1/apikey/permissions` 被固定拒绝：对应 handler 直接返回 HTTP 403（`error_code: API_KEY_SELF_PERMISSION_FORBIDDEN`，文案「不允许通过当前 API Key 修改自身权限」）。换言之，**持有 Key 的一方无法用 Key 给自己提权**。权限只能在 Web 端「个人设置」里管理。
 
