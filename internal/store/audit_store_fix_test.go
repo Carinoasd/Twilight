@@ -327,3 +327,28 @@ func TestViolationLogsAreCapped(t *testing.T) {
 		t.Fatalf("newest log dropped: %+v", logs[0])
 	}
 }
+
+// 第 7 条：两个进程同时冷启动，后到者播种时不能覆盖先到者已写入的数据。
+func TestColdStartSeedDoesNotOverwriteConcurrentWriter(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	if _, err := st.db.ExecContext(context.Background(), `DELETE FROM twilight_state`); err != nil {
+		t.Fatal(err)
+	}
+	testHookColdStartBeforeSeed = func() {
+		testHookColdStartBeforeSeed = nil
+		// 另一进程抢先冷启动（播种）并完成第一笔写入。
+		first := reopenTestStore(t)
+		if _, err := first.CreateUser(User{Username: "first-writer", Role: RoleNormal, Active: true}); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { testHookColdStartBeforeSeed = nil })
+	late := reopenTestStore(t)
+	if _, ok := late.FindUserByUsername("first-writer"); !ok {
+		t.Fatalf("late cold start does not see first writer's user")
+	}
+	check := reopenTestStore(t)
+	if _, ok := check.FindUserByUsername("first-writer"); !ok {
+		t.Fatalf("late cold start overwrote the persisted state")
+	}
+}
