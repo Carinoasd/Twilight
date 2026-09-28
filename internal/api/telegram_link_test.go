@@ -297,6 +297,26 @@ func TestTelegramLinkStatusDatabaseFailureIsNotMissing(t *testing.T) {
 	}
 }
 
+// /system/info 刚好撞上一次 getMe 失败会留下 30 秒失败缓存；签发链接必须绕过它，
+// 否则页面会同时出现“Bot 未配置”红字与可用的绑定流程。
+func TestTelegramLinkIssueRetriesBotIdentityAfterCachedFailure(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().TelegramMode = true
+	app.cfg().TelegramBotToken = "123:link-test"
+	app.cfg().TelegramAPIURL = "http://127.0.0.1:1"
+	if info := app.publicTelegramBotInfo(context.Background()); info["ok"] != false {
+		t.Fatalf("expected cached failure, got %+v", info)
+	}
+	newFakeTelegramServer(t, app)
+	link := issueRegisterTelegramLink(t, app)
+	if link.DeepLink != "https://t.me/twilight_test_bot?start="+link.Token {
+		t.Fatalf("deep link should retry bot identity after a cached failure: %+v", link)
+	}
+	if info := app.publicTelegramBotInfo(context.Background()); info["username"] != "twilight_test_bot" {
+		t.Fatalf("successful retry should refresh the shared cache: %+v", info)
+	}
+}
+
 func TestTelegramLinkIssueWithoutBotIdentityFallsBackToManualCommand(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true

@@ -1456,7 +1456,16 @@ func (a *App) handleSystemInfo(w http.ResponseWriter, r *http.Request, _ Params)
 	})
 }
 
+// publicTelegramBotInfo 供 /system/info 等高频只读接口使用：getMe 最多等 1.5 秒，
+// 成功缓存 10 分钟、失败缓存 30 秒，保证页面加载不被 Telegram 网络拖慢。
 func (a *App) publicTelegramBotInfo(ctx context.Context) map[string]any {
+	return a.telegramBotInfo(ctx, 1500*time.Millisecond, false)
+}
+
+// telegramBotInfo 读取 Bot 身份。retryFailed 为 true 时忽略“最近一次失败”的
+// 短缓存重新请求 getMe，供签发绑定链接这类可以多等几秒的写操作使用：
+// 不能因为 /system/info 刚好撞上一次 1.5 秒超时，就让 deep link 退化成手动命令。
+func (a *App) telegramBotInfo(ctx context.Context, timeout time.Duration, retryFailed bool) map[string]any {
 	empty := map[string]any{"username": nil, "url": nil, "enabled": a.cfg().TelegramMode, "configured": strings.TrimSpace(a.cfg().TelegramBotToken) != "", "ok": false, "error": ""}
 	if !a.telegramAvailable() {
 		empty["error"] = "Telegram 未启用或未配置 Bot Token"
@@ -1468,11 +1477,14 @@ func (a *App) publicTelegramBotInfo(ctx context.Context) map[string]any {
 	if a.telegramBotCacheKey == cacheKey && now.Before(a.telegramBotCacheUntil) && a.telegramBotCache != nil {
 		cached := cloneMap(a.telegramBotCache)
 		a.telegramBotMu.Unlock()
-		return cached
+		if ok, _ := cached["ok"].(bool); ok || !retryFailed {
+			return cached
+		}
+	} else {
+		a.telegramBotMu.Unlock()
 	}
-	a.telegramBotMu.Unlock()
 
-	lookupCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	me, err := a.telegramGetMe(lookupCtx)
 	bot := empty

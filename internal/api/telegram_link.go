@@ -33,6 +33,8 @@ const (
 	telegramLinkSecretHeader = "X-Telegram-Link-Secret"
 	telegramLinkTTLSeconds   = int64(store.TelegramLinkTTL / time.Second)
 	telegramLinkPollSeconds  = 3
+	// 签发链接时查询 Bot 身份的上限；比 /system/info 的 1.5 秒宽松。
+	telegramBotIdentityTimeout = 5 * time.Second
 	// 加群/频道校验总预算：给 Bot 留出回复用户的时间。
 	telegramBindMembershipTimeout = 20 * time.Second
 )
@@ -124,10 +126,11 @@ func (a *App) issueTelegramLink(w http.ResponseWriter, r *http.Request, uid int6
 	ok(w, "OK", data)
 }
 
-// telegramDeepLink 用 getMe 缓存的 Bot 用户名拼 t.me 深链接；Bot 身份暂不可用时
-// 返回空串，网页退回“手动发送 /bind <token>”。
+// telegramDeepLink 用 getMe 得到的 Bot 用户名拼 t.me 深链接。签发是一次写操作，
+// 允许多等几秒并忽略 /system/info 留下的失败短缓存；Bot 身份仍不可用时返回
+// 空串，网页退回“手动发送 /bind <token>”。
 func (a *App) telegramDeepLink(ctx context.Context, token string) (string, string) {
-	info := a.publicTelegramBotInfo(ctx)
+	info := a.telegramBotInfo(ctx, telegramBotIdentityTimeout, true)
 	username, _ := info["username"].(string)
 	if username == "" || !telegramPublicUsernamePattern.MatchString(username) {
 		return "", ""

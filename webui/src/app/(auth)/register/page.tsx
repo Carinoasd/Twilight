@@ -87,8 +87,10 @@ export default function RegisterPage() {
   ]
     .map((item) => ({ ...item, url: sanitizeExternalUrl(item.url) }))
     .filter((item): item is { label: string; url: string } => Boolean(item.url));
-  const botUsername = systemInfo?.telegram_bot?.username;
-  const botUrl = telegramBotUrl(systemInfo?.telegram_bot?.username, systemInfo?.telegram_bot?.url);
+  // 系统信息里的 Bot 身份可能因一次 getMe 超时而暂缺；签发链接时后端会重新查询，
+  // 以链接响应里的 bot_username 为准，避免“绑定成功”与“Bot 未配置”同时出现。
+  const botUsername = telegramLink?.bot_username || systemInfo?.telegram_bot?.username;
+  const botUrl = telegramBotUrl(botUsername, telegramLink?.bot_username ? undefined : systemInfo?.telegram_bot?.url);
 
   // Init
   useEffect(() => {
