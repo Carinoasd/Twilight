@@ -48,15 +48,26 @@ func (a *App) handleAdminAnnouncements(w http.ResponseWriter, r *http.Request, _
 	})
 }
 
+// publicAnnouncements 去掉面向用户 / 匿名访客的公告里的 created_by_uid。
+// /api/v{1,2}/announcements 是 AuthPublic，原样返回会让匿名访客得知管理员 UID。
+func publicAnnouncements(anns []store.Announcement) []store.Announcement {
+	out := make([]store.Announcement, len(anns))
+	for i, ann := range anns {
+		ann.CreatedByUID = 0
+		out[i] = ann
+	}
+	return out
+}
+
 func (a *App) handleAnnouncements(w http.ResponseWriter, r *http.Request, _ Params) {
-	anns := a.store().ListAnnouncements(false)
+	anns := publicAnnouncements(a.store().ListAnnouncements(false))
 	ok(w, "OK", map[string]any{"announcements": anns, "total": len(anns)})
 }
 
 func (a *App) handleAnnouncementsMe(w http.ResponseWriter, r *http.Request, _ Params) {
 	u := current(r).User
-	anns := a.store().ListAnnouncements(false)
-	unseen := a.store().UnseenForceReadAnnouncements(u.UID)
+	anns := publicAnnouncements(a.store().ListAnnouncements(false))
+	unseen := publicAnnouncements(a.store().UnseenForceReadAnnouncements(u.UID))
 	unseenIDs := make([]int64, 0, len(unseen))
 	for _, a := range unseen {
 		unseenIDs = append(unseenIDs, a.ID)
@@ -120,16 +131,26 @@ func (a *App) handleUpdateAnnouncement(w http.ResponseWriter, r *http.Request, p
 			break
 		}
 	}
+	// 部分更新：只有请求里显式带了的字段才覆盖。原实现 force_read_seconds 没带就被
+	// 归零，content 用 firstNonEmpty 导致无法清空。
+	content := existing.Content
+	if _, present := payload["content"]; present {
+		content = stringValue(payload, "content")
+	}
+	forceReadSeconds := existing.ForceReadSeconds
+	if _, present := payload["force_read_seconds"]; present {
+		forceReadSeconds = int(numeric(payload["force_read_seconds"]))
+	}
 	ann, err := a.store().UpsertAnnouncement(store.Announcement{
 		ID:               id,
 		Title:            firstNonEmpty(stringValue(payload, "title"), existing.Title, "公告"),
-		Content:          firstNonEmpty(stringValue(payload, "content"), existing.Content),
+		Content:          content,
 		Visible:          boolValue(payload, "visible", existing.Visible),
 		Level:            firstNonEmpty(stringValue(payload, "level"), existing.Level, "info"),
 		RenderMode:       safeAnnouncementRenderMode(firstNonEmpty(stringValue(payload, "render_mode"), existing.RenderMode)),
 		Pinned:           boolValue(payload, "pinned", existing.Pinned),
 		ForceRead:        boolValue(payload, "force_read", existing.ForceRead),
-		ForceReadSeconds: int(numeric(payload["force_read_seconds"])),
+		ForceReadSeconds: forceReadSeconds,
 		CreatedByUID:     existing.CreatedByUID,
 		CreatedAt:        existing.CreatedAt,
 		ExpiredAt:        int64Value(payload, "expires_at", int64Value(payload, "expired_at", existing.ExpiredAt)),
@@ -137,7 +158,13 @@ func (a *App) handleUpdateAnnouncement(w http.ResponseWriter, r *http.Request, p
 	if statusFromError(w, err) {
 		return
 	}
-	a.audit(r, "update_announcement", "admin", 0, map[string]any{"announcement_id": id, "title": ann.Title})
+	a.audit(r, "update_announcement", "admin", 0, map[string]any{
+		"announcement_id": id,
+		"title":           ann.Title,
+		"before":          map[string]any{"visible": existing.Visible, "pinned": existing.Pinned, "force_read": existing.ForceRead, "expired_at": existing.ExpiredAt},
+		"after":           map[string]any{"visible": ann.Visible, "pinned": ann.Pinned, "force_read": ann.ForceRead, "expired_at": ann.ExpiredAt},
+		"content_changed": ann.Content != existing.Content,
+	})
 	ok(w, "announcement updated", ann)
 }
 
