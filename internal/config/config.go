@@ -276,11 +276,13 @@ type Config struct {
 	RateLimitAdminIconPerMinute       int
 	RateLimitAPIKeyDefaultPerMinute   int
 
-	SchedulerEnabled                  bool
-	SchedulerExpiredCheckTime         string
-	SchedulerExpiringCheckTime        string
-	SchedulerDailyStatsTime           string
-	SchedulerSessionCleanupInterval   int
+	SchedulerEnabled                bool
+	SchedulerExpiredCheckTime       string
+	SchedulerExpiringCheckTime      string
+	SchedulerDailyStatsTime         string
+	SchedulerSessionCleanupInterval int
+	// SchedulerEmbyReconcileInterval 是 emby_state_reconcile 的默认执行间隔（小时）。
+	SchedulerEmbyReconcileInterval    int
 	SchedulerCleanupNoEmbyTime        string
 	SchedulerCleanupPendingEmbyTime   string
 	SchedulerCleanupUnusedUploadsTime string
@@ -565,6 +567,7 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.SchedulerExpiringCheckTime = reader.stringValue(cfg.SchedulerExpiringCheckTime, "Scheduler.expiring_check_time", "expiring_check_time")
 	cfg.SchedulerDailyStatsTime = reader.stringValue(cfg.SchedulerDailyStatsTime, "Scheduler.daily_stats_time", "daily_stats_time")
 	cfg.SchedulerSessionCleanupInterval = reader.intValue(cfg.SchedulerSessionCleanupInterval, "Scheduler.session_cleanup_interval", "session_cleanup_interval")
+	cfg.SchedulerEmbyReconcileInterval = reader.intValue(cfg.SchedulerEmbyReconcileInterval, "Scheduler.emby_reconcile_interval", "emby_reconcile_interval")
 	cfg.SchedulerCleanupNoEmbyTime = reader.stringValue(cfg.SchedulerCleanupNoEmbyTime, "Scheduler.cleanup_no_emby_time", "cleanup_no_emby_time")
 	cfg.SchedulerCleanupPendingEmbyTime = reader.stringValue(cfg.SchedulerCleanupPendingEmbyTime, "Scheduler.cleanup_pending_emby_time", "cleanup_pending_emby_time")
 	cfg.SchedulerCleanupUnusedUploadsTime = reader.stringValue(cfg.SchedulerCleanupUnusedUploadsTime, "Scheduler.cleanup_unused_uploads_time", "cleanup_unused_uploads_time")
@@ -705,6 +708,7 @@ func defaults() Config {
 		SchedulerExpiringCheckTime:           "09:00",
 		SchedulerDailyStatsTime:              "00:05",
 		SchedulerSessionCleanupInterval:      6,
+		SchedulerEmbyReconcileInterval:       6,
 		SchedulerCleanupNoEmbyTime:           "03:30",
 		SchedulerCleanupPendingEmbyTime:      "03:45",
 		SchedulerCleanupUnusedUploadsTime:    "02:20",

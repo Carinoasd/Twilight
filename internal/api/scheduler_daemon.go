@@ -410,6 +410,12 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 			hours = 6
 		}
 		return map[string]any{"type": "interval", "seconds": hours * 3600}
+	case "emby_state_reconcile":
+		hours := a.cfg().SchedulerEmbyReconcileInterval
+		if hours <= 0 {
+			hours = 6
+		}
+		return map[string]any{"type": "interval", "seconds": hours * 3600}
 	case "cleanup_no_emby":
 		return dailySpec(a.cfg().SchedulerCleanupNoEmbyTime, 3, 30)
 	case "cleanup_pending_emby_entitlements":

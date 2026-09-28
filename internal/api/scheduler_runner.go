@@ -134,6 +134,35 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		autoRenewalPointsSpent := 0
 		autoRenewalEmbyEnabled := 0
 		autoRenewalEmbyEnableFailed := 0
+		// Emby 停用失败必须计数并记录：本地已停用，下一轮 check_expired 会跳过这个人，
+		// 只能靠 emby_state_reconcile 收敛。uid 清单写进稽核与摘要，方便管理员追查。
+		embyDisableFailed := 0
+		disabledUIDs := []int64{}
+		embyDisableFailedUIDs := []int64{}
+		renewedUIDs := []int64{}
+		expiredLogs := []string{}
+		disableEmbyWithRetry := func(u store.User) {
+			sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
+			defer sideCancel()
+			disabledRemote := false
+			err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+				var err error
+				disabledRemote, err = a.disableRemoteEmbyForWebState(ctx, u)
+				return err
+			})
+			if err != nil {
+				embyDisableFailed++
+				embyDisableFailedUIDs = appendLimitedUID(embyDisableFailedUIDs, u.UID)
+				zap.L().Warn("failed to disable Emby for expired user", zap.Int64("uid", u.UID), zap.Error(err))
+				if len(expiredLogs) < 50 {
+					expiredLogs = append(expiredLogs, fmt.Sprintf("failed to disable Emby uid=%d: %s", u.UID, redactSensitiveText(err.Error())))
+				}
+				return
+			}
+			if disabledRemote {
+				embyDisabled++
+			}
+		}
 		cfg := *a.cfg()
 		autoRenewalActive := signinAutoRenewalEnabled(cfg)
 		users := a.store().ListUsers()
@@ -167,10 +196,13 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					renewed, _, renewErr := a.spendSigninRenewal(u.UID, cfg.SigninRenewalCost, cfg.SigninRenewalDays, time.Unix(now, 0), true)
 					if renewErr == nil {
 						autoRenewed++
+						renewedUIDs = appendLimitedUID(renewedUIDs, renewed.UID)
 						autoRenewalPointsSpent += cfg.SigninRenewalCost
 						if renewed.EmbyDisabled && a.embyConfigured() {
 							sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-							if err := a.embyApplyEnabledState(sideCtx, renewed.UID, renewed.EmbyID, true); err != nil {
+							if err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+								return a.embyApplyEnabledState(ctx, renewed.UID, renewed.EmbyID, true)
+							}); err != nil {
 								autoRenewalEmbyEnableFailed++
 								zap.L().Warn("failed to re-enable Emby after automatic sign-in renewal", zap.Int64("uid", renewed.UID), zap.Error(err))
 							} else {
@@ -202,12 +234,10 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				// but keep the account active so they can still log in and renew
 				isInvited := invitedUIDs[u.UID]
 				if isInvited {
-					sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
 					// Only disable Emby, keep account active so the user
 					// can re-login (or the inviter can renew on their behalf)
-					if disabledRemote, err := a.disableRemoteEmbyForWebState(sideCtx, u); err == nil && disabledRemote {
-						embyDisabled++
-					}
+					disableEmbyWithRetry(u)
+					sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
 					// 即便保留 Active=true 让用户能重新登录续期，已经过期的
 					// 时刻必须立刻让现有会话失效——否则 stale cookie 在
 					// SessionTTL 内仍能访问受保护接口（包括非续期接口），
@@ -216,18 +246,18 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					a.sessions().DeleteUser(sideCtx, u.UID)
 					sideCancel()
 					disabled++
+					disabledUIDs = appendLimitedUID(disabledUIDs, u.UID)
 				} else {
 					// Non-invited users: disable the whole account
 					updated, err := a.store().SetUserActiveAtomic(u.UID, false)
 					if err == nil {
+						disableEmbyWithRetry(updated)
 						sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-						if disabledRemote, err := a.disableRemoteEmbyForWebState(sideCtx, updated); err == nil && disabledRemote {
-							embyDisabled++
-						}
 						// 立即清除该用户的所有会话。否则 stale
 						// token 仍可访问受保护接口直到 SessionTTL 自然到期。
 						a.sessions().DeleteUser(sideCtx, updated.UID)
 						disabled++
+						disabledUIDs = appendLimitedUID(disabledUIDs, updated.UID)
 						sideCancel()
 					}
 				}
@@ -239,17 +269,29 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"auto_renewal_points_spent":       autoRenewalPointsSpent,
 				"auto_renewal_emby_enabled":       autoRenewalEmbyEnabled,
 				"auto_renewal_emby_enable_failed": autoRenewalEmbyEnableFailed,
+				"uids":                            renewedUIDs,
 			})
 		}
-		if disabled > 0 || embyDisabled > 0 {
+		if disabled > 0 || embyDisabled > 0 || embyDisableFailed > 0 {
 			a.auditSystem("scheduler", "disable_expired_users", 0, map[string]any{
-				"disabled":          disabled,
-				"emby_disabled":     embyDisabled,
-				"skipped_protected": skippedProtected,
+				"disabled":                 disabled,
+				"emby_disabled":            embyDisabled,
+				"emby_disable_failed":      embyDisableFailed,
+				"skipped_protected":        skippedProtected,
+				"uids":                     disabledUIDs,
+				"emby_disable_failed_uids": embyDisableFailedUIDs,
 			})
+		}
+		expiredLogs = append(expiredLogs, fmt.Sprintf("auto-renewed %d and disabled %d expired users", autoRenewed, disabled))
+		if embyDisableFailed > 0 {
+			// Emby 停用失败要让本轮显示为失败（并触发失败通知），漏掉的由 emby_state_reconcile 收敛。
+			expiredLogs = append(expiredLogs, fmt.Sprintf("%d Emby accounts could not be disabled; emby_state_reconcile will retry", embyDisableFailed))
 		}
 		return map[string]any{
-			"success":                         true,
+			"success":                         embyDisableFailed == 0,
+			"emby_disable_failed":             embyDisableFailed,
+			"emby_disable_failed_uids":        embyDisableFailedUIDs,
+			"disabled_uids":                   disabledUIDs,
 			"disabled":                        disabled,
 			"emby_disabled":                   embyDisabled,
 			"skipped_protected":               skippedProtected,
@@ -260,7 +302,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			"auto_renewal_points_spent":       autoRenewalPointsSpent,
 			"auto_renewal_emby_enabled":       autoRenewalEmbyEnabled,
 			"auto_renewal_emby_enable_failed": autoRenewalEmbyEnableFailed,
-		}, []string{fmt.Sprintf("auto-renewed %d and disabled %d expired users", autoRenewed, disabled)}, nil
+		}, expiredLogs, nil
 	case "check_expiring", "expiry_reminders":
 		defaultDays := a.cfg().NotificationExpiryRemindDays
 		if defaultDays <= 0 {
@@ -494,6 +536,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			})
 		}
 		return map[string]any{"success": true, "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
+	case "emby_state_reconcile":
+		return a.runEmbyStateReconcile(r.Context(), jobParamBool(params, "dry_run", false), max(jobParamInt(params, "max_changes", embyReconcileDefaultMaxChanges), 0))
 	case "cleanup_no_emby":
 		ignoreEnabled := jobParamBool(params, "ignore_enabled_flag", false)
 		enabled := jobParamBool(params, "enabled", jobParamBool(params, "auto_enabled", a.cfg().AutoCleanupNoEmby))
@@ -1004,6 +1048,14 @@ func schedulerManualRun(r *http.Request) bool {
 
 func schedulerSideEffectContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+}
+
+// appendLimitedUID 往稽核用的 uid 清单追加，最多 auditUIDListLimit 个。
+func appendLimitedUID(list []int64, uid int64) []int64 {
+	if len(list) >= auditUIDListLimit {
+		return list
+	}
+	return append(list, uid)
 }
 
 func jobParamInt(params map[string]any, key string, fallback int) int {

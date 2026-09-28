@@ -173,6 +173,8 @@ expired_check_time = "03:00"
 expiring_check_time = "09:00"
 daily_stats_time = "00:05"
 session_cleanup_interval = 6
+# Emby 状态对账间隔（小时）
+emby_reconcile_interval = 6
 cleanup_no_emby_time = "03:30"
 cleanup_pending_emby_time = "03:45"
 cleanup_unused_uploads_time = "02:20"

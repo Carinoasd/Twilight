@@ -376,8 +376,9 @@ expiring_check_time = "09:00"
 daily_stats_time = "00:05"
 # 会话清理间隔（小时，默认值）
 session_cleanup_interval = 6
-# Emby 用户同步间隔（小时，默认值）
-emby_sync_interval = 6
+# Emby 状态对账间隔（小时）：emby_state_reconcile 自动把「应停用却仍启用」与
+# 「本系统自动停用、Web 已恢复」的 Emby 账号收敛回来；不做名称认领（emby_sync 仍只能手动执行）
+emby_reconcile_interval = 6
 # 清理无 Emby 账号（每日 HH:MM）
 cleanup_no_emby_time = "03:30"
 # 清理未使用 Emby 开通资格（每日 HH:MM）
