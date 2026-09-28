@@ -107,7 +107,7 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 - 非管理员或匿名身份发起的越权指令，连同提示消息会在 30 秒后自动删除。
 - 删除 Emby 账号类操作会尊重用户记录上的 `emby_grant_locked`。通过注册码、白名单码、邀请码、后台授予、Telegram 授予或自助创建获得过 Emby 注册资格的账号，不能通过面板删除 Emby 后再次自助注册。
 
-面板文本可通过 `[Telegram].group_user_panel_template` 自定义，也可在 Web 后台配置页的 Telegram 分组中编辑。留空使用内置模板；未知占位符会原样保留，便于发现拼写错误。模板不提供邮箱、Emby ID、密码、Token 或服务器线路占位符；如确需展示 Telegram ID，可显式使用 `{telegram_userid}`。
+面板文本可通过 `[Telegram].group_user_panel_template` 自定义，也可在 Web 后台配置页的 Telegram 分组中编辑。留空使用内置模板；未知占位符会原样保留，便于发现拼写错误。面板发在群里、所有群成员可见，因此模板不提供完整邮箱、Emby ID、密码、Token 或服务器线路占位符：`{email}` 只输出遮罩后的邮箱（如 `ab***@example.com`），`{registration_code}` 只输出卡码前 4 位（如 `ABCD***`）；如确需展示 Telegram ID，可显式使用 `{telegram_userid}`。
 
 模板渲染采用单次扫描，仅替换当前文本实际出现的已知占位符；重复占位符保持一致，未知或未闭合占位符原样保留。刷新面板不会为全部占位符重新编译一次性替换器。
 
@@ -127,7 +127,7 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 | `{emby_bound_status}` / `{emby_bound}` | 本地 Emby 绑定状态 / 是否已绑定。 |
 | `{emby_unbind_allowed}` | 是否允许用户自助解绑 Emby。 |
 | `{pending_emby}` / `{pending_emby_days}` | 是否待补建 Emby / 待补建授权天数。 |
-| `{registration_source}` / `{registration_code}` | Emby 注册资格来源 / 对应卡码。 |
+| `{registration_source}` / `{registration_code}` | Emby 注册资格来源 / 对应卡码（仅前 4 位）。 |
 | `{emby_remote_block}` | 完整 Emby 远端信息块，包含远端用户名、启用状态、权限、隐藏状态与最近活动。 |
 | `{emby_remote_status}` / `{emby_remote_username}` | 远端查询状态 / 远端用户名。 |
 | `{emby_remote_enabled}` / `{emby_remote_role}` / `{emby_remote_hidden}` | 远端启用状态 / 远端权限 / 是否隐藏。 |

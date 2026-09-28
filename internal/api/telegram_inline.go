@@ -869,7 +869,9 @@ func (a *App) telegramGroupUserPanelPlaceholders(ctx context.Context, chatID int
 	} else if u.BGMMode {
 		bgmSyncStatus = "可同步"
 	}
-	email := strings.TrimSpace(u.Email)
+	// 修复：面板发在群里，所有群成员可见；{email} 只给遮罩后的邮箱，
+	// {registration_code} 只给卡码前缀（多次使用码可能仍有效，不能完整外泄）。
+	email := maskEmail(strings.TrimSpace(u.Email))
 	if email == "" {
 		email = "-"
 	}
@@ -902,7 +904,7 @@ func (a *App) telegramGroupUserPanelPlaceholders(ctx context.Context, chatID int
 		"emby_username":        embyUsername,
 		"emby_unbind_allowed":  telegramYesNoLabel(a.userCanSelfUnbindEmby(u)),
 		"registration_source":  registrationSourceLabel(u.RegistrationSource),
-		"registration_code":    firstNonEmpty(u.RegistrationCode, "-"),
+		"registration_code":    telegramMaskedRegistrationCode(u.RegistrationCode),
 		"pending_emby":         telegramYesNoLabel(u.PendingEmby),
 		"pending_emby_days":    telegramPendingEmbyDaysLabel(u.PendingEmbyDays),
 		"emby_remote_block":    remote.Block,
@@ -1395,4 +1397,17 @@ func telegramRandomToken() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
+}
+
+// telegramMaskedRegistrationCode 只保留卡码前 4 个字符，其余用 *** 代替。
+func telegramMaskedRegistrationCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "-"
+	}
+	runes := []rune(code)
+	if len(runes) <= 4 {
+		return "***"
+	}
+	return string(runes[:4]) + "***"
 }

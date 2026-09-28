@@ -959,7 +959,7 @@ func regcodeDecoyActionOptions() []map[string]any {
 	}
 }
 
-const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用户面板文本，支持换行；留空使用内置模板。安全限制：不会提供邮箱、Emby ID、密码、Token 或服务器线路占位符。\n\n" +
+const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用户面板文本，支持换行；留空使用内置模板。安全限制：面板发在群里所有人可见，不提供完整邮箱、Emby ID、密码、Token 或服务器线路占位符；{email} 只输出遮罩邮箱，{registration_code} 只输出卡码前 4 位。\n\n" +
 	"== 用户信息 ==\n" +
 	"{server_name}=站点名称；{username}=Web 用户名；{uid}=用户 UID；{role}=角色名称；{role_id}=角色数字；{is_admin}=是否管理员；{is_protected}=是否受保护\n" +
 	"== Web 账号 ==\n" +
@@ -969,7 +969,7 @@ const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用�
 	"== Emby 绑定 ==\n" +
 	"{emby_status}=绑定摘要（含用户名）；{emby_bound_status}=绑定状态（不含用户名）；{emby_bound}=是否已绑定；{emby_enabled_status}=本地 Emby 启用/禁用状态；{emby_username}=用户名；{emby_unbind_allowed}=是否允许自助解绑\n" +
 	"== 注册 ==\n" +
-	"{registration_source}=注册/授权来源；{registration_code}=注册/授权卡码；{pending_emby}=是否待补建；{pending_emby_days}=待补建授权天数\n" +
+	"{registration_source}=注册/授权来源；{registration_code}=注册/授权卡码（仅前 4 位）；{pending_emby}=是否待补建；{pending_emby_days}=待补建授权天数\n" +
 	"== Emby 远端 ==\n" +
 	"{emby_remote_block}=完整远端信息块；{emby_remote_status}=远端查询状态；{emby_remote_username}=远端用户名；{emby_remote_enabled}=远端启用/禁用；{emby_remote_role}=远端权限；{emby_remote_hidden}=远端隐藏；{emby_last_activity}=最近活动\n" +
 	"== Bangumi ==\n" +

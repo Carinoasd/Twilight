@@ -465,3 +465,16 @@ func TestDeveloperJSDisableSyncsEmbyAndExpiryKeepsBan(t *testing.T) {
 		t.Fatal("renewing an expiry-disabled account should re-enable it")
 	}
 }
+
+// 群组面板模板的 {email} / {registration_code} 只能输出遮罩值。
+func TestTelegramPanelTemplateMasksEmailAndRegistrationCode(t *testing.T) {
+	app := newTestApp(t)
+	u := store.User{UID: 9, Username: "panel-mask", Email: "alice.secret@example.com", RegistrationCode: "ABCD-EFGH-1234-5678"}
+	vars := app.telegramGroupUserPanelPlaceholders(context.Background(), 0, u, "{email} {registration_code}")
+	if strings.Contains(vars["email"], "alice.secret") || !strings.HasSuffix(vars["email"], "@example.com") {
+		t.Fatalf("email placeholder not masked: %q", vars["email"])
+	}
+	if strings.Contains(vars["registration_code"], "EFGH") || !strings.HasPrefix(vars["registration_code"], "ABCD") {
+		t.Fatalf("registration_code placeholder not masked: %q", vars["registration_code"])
+	}
+}
