@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -350,5 +351,48 @@ func TestColdStartSeedDoesNotOverwriteConcurrentWriter(t *testing.T) {
 	check := reopenTestStore(t)
 	if _, ok := check.FindUserByUsername("first-writer"); !ok {
 		t.Fatalf("late cold start overwrote the persisted state")
+	}
+}
+
+// 范围外线索：孤儿 Telegram 链接清理改为一次取出 uid 集合后以数组参数删除，
+// 语义必须与旧 SQL 一致：存在的账号保留、匿名（uid=0）链接保留、没有 state 列时不删。
+func TestCleanupOrphanedTelegramLinksUsesUIDSet(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	ctx := context.Background()
+	var live []int64
+	for _, name := range []string{"link-a", "link-b"} {
+		u, err := st.CreateUser(User{Username: name, Role: RoleNormal, Active: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		live = append(live, u.UID)
+		newLinkForTest(t, st, "user", u.UID)
+	}
+	gone, err := st.CreateUser(User{Username: "link-gone", Role: RoleNormal, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan, _, _ := newLinkForTest(t, st, "user", gone.UID)
+	if _, err := st.db.ExecContext(ctx, `UPDATE twilight_state SET state = state #- ARRAY['users', $1::text], version = version + 1 WHERE id=1`, strconv.FormatInt(gone.UID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	anon, _, _ := newLinkForTest(t, st, "register", 0)
+	if n, err := st.CleanupOrphanedTelegramLinks(ctx); err != nil || n != 1 {
+		t.Fatalf("cleanup: %d %v", n, err)
+	}
+	if _, err := st.TelegramLink(ctx, orphan.ID); err == nil {
+		t.Fatal("orphan survived")
+	}
+	if _, err := st.TelegramLink(ctx, anon.ID); err != nil {
+		t.Fatalf("anonymous link removed: %v", err)
+	}
+	if count, _ := st.TelegramLinkCount(ctx); count != 3 {
+		t.Fatalf("links left=%d, want 3", count)
+	}
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM twilight_state`); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.CleanupOrphanedTelegramLinks(ctx); err != nil || n != 0 {
+		t.Fatalf("without state row: %d %v", n, err)
 	}
 }
