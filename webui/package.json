@@ -16,6 +16,7 @@
     "test:csp": "node --test scripts/test-csp.cjs",
     "test:session-routing": "node --test scripts/test-session-routing.cjs",
     "test:locale-consistency": "node --test scripts/test-locale-consistency.cjs",
+    "test:no-queue-polling": "node --test scripts/test-no-queue-polling.cjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",

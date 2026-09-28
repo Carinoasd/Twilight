@@ -789,7 +789,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | GET | `/api/v2/me/telegram/link/{id}/status` | User | 查自己签发的绑定链接状态。带 UID 校验，只能查自己的；没有长轮询，前端按 `poll_interval` 轮询 |
 | POST | `/api/v2/me/telegram/rebind-complete` | User | 结束自己的 Telegram 换绑流程：校验新账号已加入要求的群组/频道，未加入返回 403 `TG_BIND_GROUP_CHECK_FAILED` 并保持换绑中 |
 | POST | `/api/v2/me/use-code` | User | 使用注册码/续期码/邀请码：`code`（或 `reg_code`）必填，`check_only` 为 true 时只预览不消费，`emby_username` 可选。要求邮箱已验证，限流 10 次/分钟 |
-| GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}` <!-- 待确认 --> |
+| GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}`；后端不签发 `status_token`，WebUI 已不再轮询，仅为旧客户端兼容保留 |
 | POST | `/api/v2/me/renew` | User | 用续期码自助续期：`reg_code` 必填；拒绝"绑了 Emby 管理员账号的非系统管理员"（403），限流 10 次/分钟；只接受 `type == 2` 的续期码 |
 | PUT | `/api/v2/settings/username` | User | 修改自己的用户名：`new_username` 必填并通过 `validate.ValidateUsername`；Emby 管理员账号的非系统管理员被 403 拦截 |
 | PUT | `/api/v2/settings/password/generate` | User | 生成并强制重置随机密码（`Twilight-` + 32 位 hex），限流 5 次/分钟；重置后**先吊销该用户全部会话再为当前调用方签发新会话**（会踢掉其他设备） |
@@ -803,7 +803,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | ---- | ---- | ---- | ---- |
-| GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列 <!-- 待确认 --> |
+| GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列；后端不签发 `status_token`，WebUI 已不再轮询，仅为旧客户端兼容保留 |
 | GET | `/api/v2/registration/regcode/check` | Public | 注册前校验注册码，按 IP 限流 10 次/分钟。**诱饵码与定向码（指名用户名/Telegram/TargetUID）一律按 404 处理**，避免枚举；命中返回 `type`、`type_name`、`days`、`valid` |
 | GET | `/api/v2/registration/telegram/link/{id}/status` | Public | 注册场景查绑定链接状态：必须携带签发时返回的 `X-Telegram-Link-Secret` 头，否则一律 `not_found`。503 不作为过期处理 |
 | GET | `/api/v2/signin/config` | Public | 签到公开规则：`enabled`、`currency_name`、`daily_min`、`daily_max`、`streak_bonus_enabled`、`bonus_table`、`reset_after_miss`、`renewal`。与 `/system/config` 的 `signin` 字段同源 |

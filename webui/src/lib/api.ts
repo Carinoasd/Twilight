@@ -46,7 +46,6 @@ import type {
   PlayRankRange,
   PlayRankResponse,
   PlayRankSortBy,
-  EmbyRegisterStatus,
   EmbySession,
   LoginDevice,
   EmbyStatus,
@@ -662,14 +661,6 @@ class ApiClient {
     return this.request<RegisterAvailability>("/registration/availability", { signal, credentials: "omit" });
   }
 
-  async getEmbyRegisterStatus(requestId: string, statusToken: string) {
-    const query = new URLSearchParams({
-      request_id: requestId,
-      status_token: statusToken,
-    });
-    return this.request<EmbyRegisterStatus>(`/registration/emby/queue-status?${query.toString()}`);
-  }
-
   async requestTelegramRebind(reason?: string) {
     return this.request("/telegram/rebind-request", {
       method: "POST",
@@ -698,7 +689,7 @@ class ApiClient {
   async completeEmbyRegistration(embyUsername: string, embyPassword: string) {
     // 自由注册的开通天数由管理员在配置里固定（[SAR].emby_direct_register_days），
     // 客户端不再上传 days；老调用方传值也由后端静默丢弃。
-    return this.request<{ user?: UserInfo; pending?: boolean; request_id?: string; status_token?: string; status?: string; queue_position?: number }>("/settings/emby/register", {
+    return this.request<{ user?: UserInfo; pending?: boolean; request_id?: string }>("/settings/emby/register", {
       method: "POST",
       body: JSON.stringify({
         emby_username: embyUsername,
@@ -976,28 +967,6 @@ class ApiClient {
     });
   }
 
-  async getUseCodeStatus(requestId: string, statusToken: string) {
-    const query = new URLSearchParams({ request_id: requestId, status_token: statusToken });
-    return this.request<{
-      request_id: string;
-      uid: number;
-      status: "queued" | "processing" | "success" | "failed";
-      message?: string;
-      queue_position?: number | null;
-      created_at?: number;
-      updated_at?: number;
-      finished_at?: number;
-      data?: {
-        emby_password?: string;
-        expire_status: string;
-        expired_at: string | number;
-        role: number;
-        role_name: string;
-      };
-    }>(`/me/use-code/status?${query.toString()}`);
-  }
-
-  // Media
   async searchMedia(query: string, source = "all", signal?: AbortSignal) {
     type MediaSearchPayload = { results: MediaItem[]; total?: number; warnings?: Record<string, string> };
     const res = await this.request<{ items?: MediaItem[]; total?: number; warnings?: Record<string, string> }>(

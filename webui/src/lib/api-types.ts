@@ -326,7 +326,6 @@ export interface CodeUsePreview {
 export interface CodeUseResponse extends Partial<CodeUsePreview> {
   pending?: boolean;
   request_id?: string;
-  status_token?: string;
   status?: "queued" | "processing" | "success" | "failed";
   queue_position?: number;
   reused?: boolean;
@@ -829,7 +828,6 @@ export interface RegisterResponse {
   password?: string;
   user?: UserInfo;
   request_id?: string;
-  status_token?: string;
   status?: "queued" | "processing" | "success" | "failed";
   queue_position?: number;
   reused?: boolean;
@@ -852,21 +850,6 @@ export interface RegisterAvailability {
   emby_direct_register_days: number;
   emby_user_limit?: number;
   emby_bound_users?: number;
-}
-
-export interface EmbyRegisterStatus {
-  request_id: string;
-  status: "queued" | "processing" | "success" | "failed" | "rejected";
-  queue_position?: number;
-  message?: string;
-  created_at?: number;
-  updated_at?: number;
-  finished_at?: number;
-  data?: {
-    uid?: number;
-    username?: string;
-    emby_password?: string;
-  };
 }
 
 export interface AdminUserListParams {
