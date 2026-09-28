@@ -35,14 +35,14 @@ func (a *App) handleSetupComplete(w http.ResponseWriter, r *http.Request, _ Para
 		return
 	}
 
-	token, expires, err := a.sessions().Create(r.Context(), result.User.UID)
+	deviceID := loginDeviceID(r.Header.Get("X-Twilight-Device"), r.UserAgent(), a.clientIP(r))
+	token, expires, err := a.sessions().Create(r.Context(), result.User.UID, deviceID)
 	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "初始化已完成，但自动登录会话创建失败，请返回登录页手动登录")
 		return
 	}
 	a.issueSessionCookies(w, token, expires)
 	now := time.Now().Unix()
-	deviceID := firstNonEmpty(r.Header.Get("X-Twilight-Device"), r.UserAgent(), a.clientIP(r))
 	ua := firstNonEmpty(r.UserAgent(), "unknown")
 	ip := a.clientIP(r)
 	_ = a.store().UpdateDevice(result.User.UID, deviceID, func(d *store.Device) {

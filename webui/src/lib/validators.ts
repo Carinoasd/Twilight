@@ -305,6 +305,8 @@ export const ERROR_CODE_FRIENDLY: Partial<Record<ErrCode, string>> = {
   TG_ID_INVALID: "Telegram ID 无效",
   TG_ID_TAKEN: "该 Telegram ID 已绑定其它账号",
   DEVICE_ID_REQUIRED: "请填写设备 ID",
+  DEVICE_ID_INVALID: "设备 ID 格式无效",
+  DEVICE_BLOCKED: "该设备已被管理员封禁",
   IP_REQUIRED: "请填写 IP",
   UPLOAD_RATE_LIMITED: "上传过于频繁，请稍后再试",
   UPLOAD_INVALID_PAYLOAD: "上传内容无效",

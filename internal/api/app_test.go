@@ -682,11 +682,11 @@ func TestCheckExpiredKillsInvitedUserSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	invitedToken, _, err := app.sessions().Create(ctx, invited.UID)
+	invitedToken, _, err := app.sessions().Create(ctx, invited.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID)
+	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

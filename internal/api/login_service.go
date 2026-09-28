@@ -99,13 +99,20 @@ func (a *App) authenticateLogin(ctx context.Context, input loginInput) (store.Us
 }
 
 func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) (loginResult, error) {
-	token, expiry, err := a.sessions().Create(r.Context(), user.UID)
+	deviceID := loginDeviceID(input.DeviceID, input.UserAgent, input.IP)
+	// 管理员封禁的设备不能再登录：先于签发会话拦截，并顺手吊销该设备上残留的会话
+	// （封禁发生在本修复之前、当时没有吊销的旧会话）。
+	if device, found := a.store().Device(user.UID, deviceID); found && device.Blocked {
+		a.revokeDeviceSessions(r.Context(), user.UID, deviceID)
+		a.auditWithUser(r, user.UID, user.Username, "login_blocked_device", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
+		return loginResult{}, loginFail(http.StatusForbidden, ErrDeviceBlocked, "该设备已被管理员封禁，无法登录")
+	}
+	token, expiry, err := a.sessions().Create(r.Context(), user.UID, deviceID)
 	if err != nil {
 		return loginResult{}, loginFail(http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 	}
 
 	now := time.Now().Unix()
-	deviceID := firstNonEmpty(input.DeviceID, input.UserAgent, input.IP)
 	userAgent := firstNonEmpty(input.UserAgent, "unknown")
 	_ = a.store().UpdateDevice(user.UID, deviceID, func(device *store.Device) {
 		device.DeviceName = userAgent
@@ -145,7 +152,11 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 			RenderTemplate(bodyTemplate, templateParams))
 	}
 	if cfg := a.cfg(); cfg.DeviceLimitEnabled && cfg.MaxDevices > 0 {
-		_ = a.store().EnforceDeviceLimit(user.UID, cfg.MaxDevices)
+		// 被淘汰的设备要一并吊销会话，否则只是删了记录，旧设备照样在线，上限不生效。
+		if evicted, err := a.store().EnforceDeviceLimit(user.UID, cfg.MaxDevices, deviceID); err == nil && len(evicted) > 0 {
+			a.revokeDeviceSessions(r.Context(), user.UID, evicted...)
+			a.auditWithUser(r, user.UID, user.Username, "device_limit_evicted", "user", user.UID, map[string]any{"evicted_devices": evicted, "max_devices": cfg.MaxDevices})
+		}
 	}
 	return loginResult{User: user, Token: token, Expiry: expiry}, nil
 }

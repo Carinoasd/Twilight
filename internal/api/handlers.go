@@ -740,8 +740,14 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 // 与 handleAdminResetPassword / handleForgotPassword 的「改密即吊销旧会话」口径一致。
 // 失败时已写响应，返回 ok=false，调用方直接 return。
 func (a *App) rotateSessionsAfterPasswordChange(w http.ResponseWriter, r *http.Request, uid int64) (string, bool) {
+	// 新会话沿用当前会话的设备归属。
+	var deviceID string
+	if p := current(r); p.Token != "" {
+		record, _ := a.sessions().GetRecord(r.Context(), p.Token)
+		deviceID = record.DeviceID
+	}
 	a.sessions().DeleteUser(r.Context(), uid)
-	token, expires, err := a.sessions().Create(r.Context(), uid)
+	token, expires, err := a.sessions().Create(r.Context(), uid, deviceID)
 	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 		return "", false
@@ -1327,22 +1333,27 @@ func (a *App) handleBlockDevice(w http.ResponseWriter, r *http.Request, params P
 	if written {
 		return
 	}
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Blocked = true; d.Trusted = false }); statusFromError(w, err) {
 		return
 	}
+	// 封禁要立即生效：吊销该设备上已签发的会话。
+	a.revokeDeviceSessions(r.Context(), uid, deviceID)
 	a.audit(r, "block_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
 	ok(w, "device blocked", nil)
 }
 
 func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Trusted = true; d.Blocked = false }); statusFromError(w, err) {
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
+		return
+	}
+	// 只信任已存在且未被封禁的设备：不新建设备、不解除管理员封禁。
+	if err := a.security().trustDevice(uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "trust_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
@@ -1350,13 +1361,12 @@ func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params P
 }
 
 func (a *App) handleDeleteDevice(w http.ResponseWriter, r *http.Request, params Params) {
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	uid := current(r).User.UID
-	if err := a.store().DeleteDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().deleteDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "delete_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})

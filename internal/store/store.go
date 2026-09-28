@@ -5530,6 +5530,8 @@ var (
 	ErrExpired          = errors.New("expired")
 	ErrLastAdmin        = errors.New("last admin")
 	ErrGrantLocked      = errors.New("emby grant locked")
+	// ErrDeviceBlocked 表示设备已被管理员封禁：用户不能自助信任（解封）或删除它。
+	ErrDeviceBlocked = errors.New("device blocked")
 	// ErrRegCodeAlreadyUsedByUser 表示同一身份（UID 或 TelegramID）重复消费同一张
 	// 多次数/无限次注册码。语义为「N 次 = N 个人各一次」：UseCount 是可服务人数上限，
 	// 不是单人可叠加的次数。缺此守卫时，用户可对同一张 use_count_limit>1（或 -1）的码

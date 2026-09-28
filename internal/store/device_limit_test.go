@@ -12,8 +12,12 @@ func TestEnforceDeviceLimitEvictsOldestUntrusted(t *testing.T) {
 	// 别的用户不受影响。
 	mustDevice(t, st, Device{UID: 2, DeviceID: "x1", LastSeen: 10})
 
-	if err := st.EnforceDeviceLimit(1, 2); err != nil {
+	evicted, err := st.EnforceDeviceLimit(1, 2, "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(evicted) != 1 || evicted[0] != "d1" {
+		t.Fatalf("evicted = %v, want [d1]", evicted)
 	}
 	ids := deviceIDSet(st.ListDevices(1))
 	// 保留：最近 2 台 d3/d2 + 受信任 d4；淘汰：最旧未受信任 d1。
@@ -34,7 +38,7 @@ func TestEnforceDeviceLimitEvictsOldestUntrusted(t *testing.T) {
 func TestEnforceDeviceLimitNoopWhenUnderLimit(t *testing.T) {
 	st := newJSONStoreForTest(t)
 	mustDevice(t, st, Device{UID: 1, DeviceID: "d1", LastSeen: 100})
-	if err := st.EnforceDeviceLimit(1, 5); err != nil {
+	if _, err := st.EnforceDeviceLimit(1, 5, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(st.ListDevices(1)) != 1 {
@@ -42,7 +46,7 @@ func TestEnforceDeviceLimitNoopWhenUnderLimit(t *testing.T) {
 	}
 	// max<=0 表示不限制。
 	mustDevice(t, st, Device{UID: 1, DeviceID: "d2", LastSeen: 200})
-	if err := st.EnforceDeviceLimit(1, 0); err != nil {
+	if _, err := st.EnforceDeviceLimit(1, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(st.ListDevices(1)) != 2 {
@@ -92,4 +96,33 @@ func deviceIDSet(devices []Device) map[string]bool {
 		out[d.DeviceID] = true
 	}
 	return out
+}
+
+// TestTrustDeviceRequiresExistingUnblockedDevice 防回归：用户自助信任不能新建设备，
+// 也不能解除管理员的封禁；已封禁设备不能被用户删除（删除等于解封）。
+func TestTrustDeviceRequiresExistingUnblockedDevice(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	if err := st.TrustDevice(1, "ghost"); err != ErrNotFound {
+		t.Fatalf("trust missing device err=%v, want ErrNotFound", err)
+	}
+	if _, ok := st.Device(1, "ghost"); ok {
+		t.Fatal("trust must not create a device")
+	}
+	mustDevice(t, st, Device{UID: 1, DeviceID: "bad", LastSeen: 10, Blocked: true})
+	if err := st.TrustDevice(1, "bad"); err != ErrDeviceBlocked {
+		t.Fatalf("trust blocked device err=%v, want ErrDeviceBlocked", err)
+	}
+	if err := st.DeleteDevice(1, "bad"); err != ErrDeviceBlocked {
+		t.Fatalf("delete blocked device err=%v, want ErrDeviceBlocked", err)
+	}
+	if d, ok := st.Device(1, "bad"); !ok || !d.Blocked || d.Trusted {
+		t.Fatalf("blocked device must stay blocked: ok=%v %+v", ok, d)
+	}
+	mustDevice(t, st, Device{UID: 1, DeviceID: "good", LastSeen: 20})
+	if err := st.TrustDevice(1, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := st.Device(1, "good"); !d.Trusted {
+		t.Fatalf("existing device should be trusted: %+v", d)
+	}
 }

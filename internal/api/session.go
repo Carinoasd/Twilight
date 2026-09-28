@@ -35,6 +35,9 @@ type sessionStore struct {
 type sessionRecord struct {
 	UID       int64 `json:"uid"`
 	ExpiresAt int64 `json:"expires_at"`
+	// DeviceID 是签发会话时的设备（与 store.Device.DeviceID 一致）。管理员封禁设备、
+	// 设备数上限淘汰、用户删除设备时，按 (uid, device_id) 吊销对应会话。
+	DeviceID string `json:"device_id,omitempty"`
 }
 
 func newSessionStore(ttl time.Duration, redisClient *redis.Client) *sessionStore {
@@ -63,7 +66,7 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	// Purge expired sessions
 	_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE expires_at <= $1`, now)
 
-	rows, err := db.QueryContext(ctx, `SELECT token, uid, expires_at FROM twilight_sessions WHERE expires_at > $1`, now)
+	rows, err := db.QueryContext(ctx, `SELECT token, uid, expires_at, device_id FROM twilight_sessions WHERE expires_at > $1`, now)
 	if err != nil {
 		zap.L().Warn("failed to load sessions from PostgreSQL", zap.Error(err))
 		return
@@ -75,7 +78,7 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	for rows.Next() {
 		var token string
 		var record sessionRecord
-		if err := rows.Scan(&token, &record.UID, &record.ExpiresAt); err != nil {
+		if err := rows.Scan(&token, &record.UID, &record.ExpiresAt, &record.DeviceID); err != nil {
 			continue
 		}
 		restored++
@@ -111,14 +114,14 @@ func (s *sessionStore) pgDB() *sql.DB {
 	return s.st.DB()
 }
 
-func (s *sessionStore) Create(ctx context.Context, uid int64) (string, time.Time, error) {
+func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (string, time.Time, error) {
 	for attempt := 0; attempt < maxSessionTokenCreateAttempts; attempt++ {
 		token, err := security.RandomHex(32)
 		if err != nil {
 			return "", time.Time{}, err
 		}
 		expires := time.Now().Add(s.ttl)
-		record := sessionRecord{UID: uid, ExpiresAt: expires.Unix()}
+		record := sessionRecord{UID: uid, ExpiresAt: expires.Unix(), DeviceID: deviceID}
 
 		if !s.persistToPostgres(ctx, token, record) {
 			zap.L().Warn("session token collision in PostgreSQL; retrying")
@@ -166,9 +169,9 @@ func (s *sessionStore) persistToPostgres(ctx context.Context, token string, reco
 		return true
 	}
 	result, err := db.ExecContext(ctx,
-		`INSERT INTO twilight_sessions (token, uid, expires_at) VALUES ($1, $2, $3)
+		`INSERT INTO twilight_sessions (token, uid, expires_at, device_id) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (token) DO NOTHING`,
-		token, record.UID, record.ExpiresAt)
+		token, record.UID, record.ExpiresAt, record.DeviceID)
 	if err != nil {
 		zap.L().Warn("failed to persist session to PostgreSQL", zap.Error(err))
 		return true
@@ -186,8 +189,15 @@ func (s *sessionStore) deletePostgresToken(ctx context.Context, token string) {
 }
 
 func (s *sessionStore) Get(ctx context.Context, token string) (int64, bool) {
+	record, ok := s.GetRecord(ctx, token)
+	return record.UID, ok
+}
+
+// GetRecord 与 Get 相同，但返回完整会话记录（含 DeviceID），供续期 / 轮换会话时
+// 沿用原设备。
+func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionRecord, bool) {
 	if token == "" {
-		return 0, false
+		return sessionRecord{}, false
 	}
 
 	// 1. Try Redis (fastest path)
@@ -196,10 +206,10 @@ func (s *sessionStore) Get(ctx context.Context, token string) (int64, bool) {
 		if err == nil && ok {
 			var record sessionRecord
 			if json.Unmarshal([]byte(payload), &record) == nil && record.ExpiresAt >= time.Now().Unix() {
-				return record.UID, true
+				return record, true
 			}
 			// Expired in Redis - clean up
-			return 0, false
+			return sessionRecord{}, false
 		}
 		if err != nil {
 			s.fallbackCount.Add(1)
@@ -214,21 +224,21 @@ func (s *sessionStore) Get(ctx context.Context, token string) (int64, bool) {
 	s.mu.RUnlock()
 	if ok {
 		if record.ExpiresAt >= time.Now().Unix() {
-			return record.UID, true
+			return record, true
 		}
 		// Expired in memory - clean up lazily
 		s.mu.Lock()
 		delete(s.items, token)
 		s.mu.Unlock()
-		return 0, false
+		return sessionRecord{}, false
 	}
 
 	// 3. Try PostgreSQL (handles Redis restart scenario)
 	if db := s.pgDB(); db != nil {
 		var rec sessionRecord
 		err := db.QueryRowContext(ctx,
-			`SELECT uid, expires_at FROM twilight_sessions WHERE token = $1 AND expires_at > $2`,
-			token, time.Now().Unix()).Scan(&rec.UID, &rec.ExpiresAt)
+			`SELECT uid, expires_at, device_id FROM twilight_sessions WHERE token = $1 AND expires_at > $2`,
+			token, time.Now().Unix()).Scan(&rec.UID, &rec.ExpiresAt, &rec.DeviceID)
 		if err == nil {
 			// Found in PG - re-populate Redis for future fast lookups
 			if s.redis != nil {
@@ -238,11 +248,11 @@ func (s *sessionStore) Get(ctx context.Context, token string) (int64, bool) {
 					_ = s.redis.SetEX(ctx, s.prefix+token, int(remainTTL), string(payload))
 				}
 			}
-			return rec.UID, true
+			return rec, true
 		}
 	}
 
-	return 0, false
+	return sessionRecord{}, false
 }
 
 func (s *sessionStore) Delete(ctx context.Context, token string) {
@@ -293,6 +303,43 @@ func (s *sessionStore) DeleteUser(ctx context.Context, uid int64) {
 			rows.Close()
 		}
 	}
+}
+
+// DeleteDevice 吊销某用户在某台设备上签发的全部会话（内存、Redis、PostgreSQL）。
+// deviceID 为空时不做任何事：旧会话没有设备归属，不能被误当成“空设备”一并吊销。
+func (s *sessionStore) DeleteDevice(ctx context.Context, uid int64, deviceID string) int {
+	if deviceID == "" {
+		return 0
+	}
+	removed := 0
+	s.mu.Lock()
+	for token, record := range s.items {
+		if record.UID == uid && record.DeviceID == deviceID {
+			delete(s.items, token)
+			if s.redis != nil {
+				_ = s.redis.Del(ctx, s.prefix+token)
+			}
+			removed++
+		}
+	}
+	s.mu.Unlock()
+	if db := s.pgDB(); db != nil {
+		rows, err := db.QueryContext(ctx,
+			`DELETE FROM twilight_sessions WHERE uid = $1 AND device_id = $2 RETURNING token`, uid, deviceID)
+		if err == nil {
+			for rows.Next() {
+				var token string
+				if rows.Scan(&token) == nil {
+					removed++
+					if s.redis != nil {
+						_ = s.redis.Del(ctx, s.prefix+token)
+					}
+				}
+			}
+			rows.Close()
+		}
+	}
+	return removed
 }
 
 // CleanupExpired removes expired sessions from all layers.

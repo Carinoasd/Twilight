@@ -378,6 +378,13 @@ CREATE TABLE IF NOT EXISTS twilight_sessions (
 		_ = db.Close()
 		return nil, status, describePostgresConnectionError(target, err)
 	}
+	// device_id：会话签发时的设备，封禁 / 淘汰 / 删除设备时据此吊销该设备上的会话。
+	// 旧库补列，旧会话默认空串（不属于任何设备，只能由改密 / 登出全部等整体吊销）。
+	if _, err := db.ExecContext(ctx, `
+ALTER TABLE twilight_sessions ADD COLUMN IF NOT EXISTS device_id text NOT NULL DEFAULT ''`); err != nil {
+		_ = db.Close()
+		return nil, status, describePostgresConnectionError(target, err)
+	}
 	if _, err := db.ExecContext(ctx, `
 CREATE INDEX IF NOT EXISTS twilight_sessions_uid_idx ON twilight_sessions (uid)`); err != nil {
 		_ = db.Close()
