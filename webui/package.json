@@ -14,6 +14,7 @@
     "test:telegram-link-status": "node --test scripts/test-telegram-link-status.cjs",
     "test:media-poster-url": "node --test scripts/test-media-poster-url.cjs",
     "test:csp": "node --test scripts/test-csp.cjs",
+    "test:session-routing": "node --test scripts/test-session-routing.cjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",

@@ -18,6 +18,7 @@ import { useRegionRefresh } from "@/hooks/use-region-refresh";
 import { normalizeBackgroundImageValue } from "@/lib/safe-url";
 import { useI18n } from "@/lib/i18n";
 import { useSystemStore } from "@/store/system";
+import { buildLoginRedirect } from "@/lib/auth-routes";
 
 interface BackgroundConfig {
   lightBg?: string;
@@ -202,9 +203,10 @@ export default function MainLayout({
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
-      router.push("/login");
+      // 带上当前地址作为 next，登录后回到原页面。
+      router.push(buildLoginRedirect(pathname, typeof window !== "undefined" ? window.location.search : ""));
     }
-  }, [isAuthenticated, isLoading, router]);
+  }, [isAuthenticated, isLoading, pathname, router]);
 
   useEffect(() => {
     if (!isLoading && isAuthenticated && pathname.startsWith('/admin') && !isAdmin) {

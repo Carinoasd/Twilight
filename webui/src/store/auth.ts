@@ -2,6 +2,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { api, type UserInfo } from "@/lib/api";
 import { ApiError, clearApiRequestCaches } from "@/lib/api-request";
+import {
+  AUTH_CHANNEL_NAME,
+  decideCrossTabAction,
+  isAuthChannelMessage,
+  onSessionExpired,
+  type AuthChannelMessage,
+} from "@/lib/session-events";
 
 /**
  * login() 后端响应轻量校验。
@@ -131,6 +138,39 @@ export function resetAuthInFlight(): void {
   inFlight.generation = 0;
 }
 
+// 跨分页同步登录身份：一个分页登录成另一个账号或登出后，其它分页会收到广播，
+// 避免旧分页继续操作却作用在新账号上。BroadcastChannel 不可用时静默降级。
+let authChannel: BroadcastChannel | null = null;
+
+function getAuthChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined" || typeof BroadcastChannel === "undefined") return null;
+  if (!authChannel) {
+    try {
+      authChannel = new BroadcastChannel(AUTH_CHANNEL_NAME);
+    } catch {
+      authChannel = null;
+    }
+  }
+  return authChannel;
+}
+
+function broadcastAuth(message: AuthChannelMessage): void {
+  try {
+    getAuthChannel()?.postMessage(message);
+  } catch {
+    // 忽略：广播失败只影响其它分页的及时性
+  }
+}
+
+// 本分页最近一次广播的 uid，用于只在身份变化时广播。
+let lastBroadcastUid: number | null = null;
+
+function announceIdentity(uid: number | null | undefined): void {
+  if (!uid || uid === lastBroadcastUid) return;
+  lastBroadcastUid = uid;
+  broadcastAuth({ type: "identity", uid });
+}
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
@@ -208,6 +248,7 @@ export const useAuthStore = create<AuthState>()(
             };
 
             set({ user: quickUser, isAuthenticated: true, isLoading: false });
+            announceIdentity(quickUser.uid);
             void get().fetchUser({ silent: true });
             return { ok: true };
           }
@@ -235,6 +276,8 @@ export const useAuthStore = create<AuthState>()(
           await api.logout();
         } finally {
           set({ user: null, isAuthenticated: false, isLoading: false });
+          lastBroadcastUid = null;
+          broadcastAuth({ type: "logout" });
           // 清掉持久化快照，防止下一个用本机的人看到上一个账户的状态。
           try {
             useAuthStore.persist.clearStorage();
@@ -265,6 +308,7 @@ export const useAuthStore = create<AuthState>()(
             }
             if (userRes.success && userRes.data) {
               set({ user: userRes.data, isAuthenticated: true, isLoading: false });
+              announceIdentity(userRes.data.uid);
               return { success: true };
             }
             // 后端 200 但 envelope.success=false 的极少数路径：保守按未鉴权处理。
@@ -345,3 +389,34 @@ export const useAuthStore = create<AuthState>()(
   )
 );
 
+
+// 本地清空登录态（会话已在服务端失效，无需再调 /auth/logout）。
+function clearLocalSession(): void {
+  bumpAuthGeneration();
+  lastBroadcastUid = null;
+  useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
+  try {
+    useAuthStore.persist.clearStorage();
+  } catch {
+    // 浏览器禁用 localStorage 时静默失败
+  }
+}
+
+if (typeof window !== "undefined") {
+  // 任意业务接口返回会话失效的 401：统一登出，受保护 layout 随后带 next 跳到 /login。
+  onSessionExpired(() => {
+    if (useAuthStore.getState().isAuthenticated) {
+      clearLocalSession();
+    }
+  });
+  getAuthChannel()?.addEventListener("message", (event: MessageEvent) => {
+    if (!isAuthChannelMessage(event.data)) return;
+    const current = useAuthStore.getState();
+    const action = decideCrossTabAction(current.isAuthenticated ? current.user?.uid : null, event.data);
+    if (action === "logout") {
+      clearLocalSession();
+    } else if (action === "reload") {
+      window.location.reload();
+    }
+  });
+}
