@@ -248,7 +248,14 @@ func (a *App) handleDatabaseMigrate(w http.ResponseWriter, r *http.Request, _ Pa
 	switch targetDriver {
 	case store.BackendPostgres, "postgresql":
 		targetDriver = store.BackendPostgres
-		dsn := firstNonEmpty(stringValue(payload, "database_url"), stringValue(payload, "postgres_dsn"), a.cfg().PostgresDSN())
+		// 目标 DSN 只能来自配置（含 env 覆盖）。旧实现接受请求体里的 database_url /
+		// postgres_dsn，被盗管理员会话可借此外连任意主机（SSRF、CREATE DATABASE），
+		// 并把整库快照写到攻击者的 PostgreSQL。
+		if strings.TrimSpace(firstNonEmpty(stringValue(payload, "database_url"), stringValue(payload, "postgres_dsn"))) != "" {
+			failWithCode(w, http.StatusBadRequest, ErrInvalidPayload, "迁移目标只能使用配置文件中的 PostgreSQL 连接，不接受请求指定的连接串")
+			return
+		}
+		dsn := a.cfg().PostgresDSN()
 		if dsn == "" {
 			failWithCode(w, http.StatusBadRequest, ErrDBPostgresMissing, "未配置 PostgreSQL 连接信息")
 			return

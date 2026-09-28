@@ -1908,8 +1908,6 @@ class ApiClient {
     dry_run?: boolean;
     preview?: boolean;
     confirm?: string;
-    database_url?: string;
-    postgres_dsn?: string;
     state_file?: string;
   }) {
     return this.request<DatabaseMigrationResult>("/admin/database/migrate", {
