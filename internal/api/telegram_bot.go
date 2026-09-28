@@ -505,6 +505,7 @@ func (a *App) telegramConsumeDelAccountPending(ctx context.Context, chatID, from
 			return true
 		}
 		if !verifyPasswordThrottled(text, u.PasswordHash) {
+			a.auditSelfDeleteVerifyFailed(u.UID, u.Username, "web_password", fromID)
 			_ = a.telegramSendMessage(ctx, chatID, "Web 密码错误，请重试。发送 /cancel 取消操作。")
 			return true
 		}
@@ -528,6 +529,7 @@ func (a *App) telegramConsumeDelAccountPending(ctx context.Context, chatID, from
 	if _, authOK, err := a.embyAuthenticateByName(ctx, u.EmbyUsername, text); err != nil {
 		_ = a.telegramSendMessage(ctx, chatID, "Emby 验证服务异常，请稍后重试。")
 	} else if !authOK {
+		a.auditSelfDeleteVerifyFailed(u.UID, u.Username, "emby_password", fromID)
 		_ = a.telegramSendMessage(ctx, chatID, "Emby 密码验证失败。请重新发送 /delAccount emby 开始。")
 	} else {
 		a.telegramExecuteDelAccount(ctx, chatID, u, state.Reason)
@@ -638,6 +640,7 @@ func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID i
 				a.telegramExecuteDelAccount(ctx, chatID, u, pendingReason)
 				return
 			}
+			a.auditSelfDeleteVerifyFailed(u.UID, u.Username, "email_code", telegramID)
 			_ = a.telegramSendMessage(ctx, chatID, "验证码无效或已过期，请重新发送 /delAccount email 获取新验证码。")
 			return
 		}
@@ -774,11 +777,13 @@ func (a *App) telegramExecuteDelAccount(ctx context.Context, chatID int64, u sto
 	if u.EmbyID != "" && a.embyConfigured() {
 		if err := a.embyDelete(ctx, "/Users/"+urlPathEscape(u.EmbyID)); err != nil && !strings.Contains(err.Error(), "remote status 404") {
 			zap.L().Warn("telegram delAccount: emby delete failed", zap.Int64("uid", u.UID), zap.Error(err))
+			a.auditEntryIP("telegram", u.UID, u.Username, "self_delete_via_telegram_failed", "user", u.UID, map[string]any{"source": "telegram", "stage": "emby_delete", "error": telegramAuditError(err)})
 			_ = a.telegramSendMessage(ctx, chatID, "删除 Emby 账号失败，请稍后重试或联系管理员。你的本地账号尚未删除。")
 			return
 		}
 	}
 	if err := a.deleteLocalUser(ctx, u); err != nil {
+		a.auditEntryIP("telegram", u.UID, u.Username, "self_delete_via_telegram_failed", "user", u.UID, map[string]any{"source": "telegram", "stage": "local_delete", "error": telegramAuditError(err)})
 		_ = a.telegramSendMessage(ctx, chatID, "删除账号失败："+err.Error())
 		return
 	}
@@ -859,18 +864,23 @@ func (a *App) telegramHandleBanWeb(ctx context.Context, chatID, telegramID int64
 	}
 	updated, err := a.store().SetUserActiveAtomic(target.UID, false)
 	if err != nil {
+		a.auditTelegramFailure(telegramID, "banweb_via_telegram", target.UID, err, map[string]any{"reason": reason})
 		_ = a.telegramSendMessage(ctx, chatID, "禁用 Web 账号失败: "+err.Error())
 		return
 	}
 	a.sessions().DeleteUser(ctx, updated.UID)
-	if _, syncErr := a.disableRemoteEmbyForWebState(ctx, updated); syncErr != nil {
+	embySynced, syncErr := a.disableRemoteEmbyForWebState(ctx, updated)
+	if syncErr != nil {
 		_ = a.telegramSendMessage(ctx, chatID, "Web 账号已禁用，但 Emby 远端关停失败: "+syncErr.Error())
 	} else {
 		_ = a.telegramSendMessage(ctx, chatID, "已禁用 Web 账号（Emby 已同步关停）。")
 	}
-	// 审计日志
+	// 审计日志（修复：带上 Emby 同步结果，失败时记录错误）
 	opUID, opName := a.telegramAdminIdentity(telegramID)
-	detail := map[string]any{"source": "telegram"}
+	detail := map[string]any{"source": "telegram", "emby_synced": embySynced}
+	if syncErr != nil {
+		detail["emby_error"] = telegramAuditError(syncErr)
+	}
 	if reason != "" {
 		detail["reason"] = reason
 	}
@@ -909,6 +919,7 @@ func (a *App) telegramHandleBanEmby(ctx context.Context, chatID, telegramID int6
 		return
 	}
 	if err := a.embyApplyEnabledState(ctx, target.UID, target.EmbyID, false); err != nil {
+		a.auditTelegramFailure(telegramID, "banemby_via_telegram", target.UID, err, map[string]any{"reason": reason})
 		_ = a.telegramSendMessage(ctx, chatID, "禁用 Emby 账号失败: "+telegramPanelSafeError(err))
 		return
 	}

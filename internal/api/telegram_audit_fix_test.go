@@ -576,3 +576,47 @@ func TestDeveloperJSMemoryGuards(t *testing.T) {
 		t.Fatalf("runaway string growth should be interrupted, got %q", out)
 	}
 }
+
+// 操作日志缺口：/delAccount 密码验证失败、/banweb 的 Emby 同步失败、面板操作失败都要留痕。
+func TestTelegramAuditRecordsFailures(t *testing.T) {
+	app := newTestApp(t)
+	newRecordingTelegramServer(t, app)
+	app.cfg().TelegramAdminIDs = []int64{42}
+	app.cfg().TelegramEnablePanel = true
+	ctx := context.Background()
+
+	u := mustCreateTGUser(t, app, store.User{Username: "audit-del", PasswordHash: mustHashPassword(t, "Password123456"), Role: store.RoleNormal, Active: true, TelegramID: 5501})
+	app.telegramHandleDelAccount(ctx, 5501, 5501, []string{"confirm"})
+	app.telegramConsumeDelAccountPending(ctx, 5501, 5501, "wrong")
+	logs := auditLogsByAction(app, "self_delete_verify_failed")
+	if len(logs) != 1 || logs[0].Detail["stage"] != "web_password" || logs[0].TargetUID != u.UID {
+		t.Fatalf("missing verify-failed audit: %#v", logs)
+	}
+
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer emby.Close()
+	app.cfg().EmbyURL = emby.URL
+	app.cfg().EmbyToken = "token"
+	target := mustCreateTGUser(t, app, store.User{Username: "audit-ban", Role: store.RoleNormal, Active: true, EmbyID: "e-audit-ban", EmbyUsername: "x"})
+	app.telegramHandleBanWeb(ctx, 42, 42, []string{"audit-ban"})
+	bans := auditLogsByAction(app, "banweb_via_telegram")
+	if len(bans) != 1 || bans[0].Detail["emby_synced"] != false || bans[0].Detail["emby_error"] == nil {
+		t.Fatalf("banweb audit missing Emby sync failure: %#v", bans)
+	}
+
+	// 面板失败：Emby 启停失败要记 *_failed。
+	panel := app.telegramCreatePanel(-100, 10, target)
+	panel.MessageID = 777
+	app.telegramSavePanel(panel)
+	app.handleTelegramUpdate(ctx, &telegramUpdate{CallbackQuery: &telegramCallbackQuery{
+		ID:      "cb-fail",
+		From:    telegramUser{ID: 42},
+		Message: &telegramMessage{MessageID: 777, Chat: telegramChat{ID: -100, Type: "supergroup"}},
+		Data:    "gadm:act:emby_disable:" + panel.Token,
+	}})
+	if failed := auditLogsByAction(app, "telegram_panel_emby_disable_failed"); len(failed) != 1 || failed[0].Detail["error"] == nil {
+		t.Fatalf("panel failure not audited: %#v", failed)
+	}
+}
