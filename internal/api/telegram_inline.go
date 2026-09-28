@@ -395,6 +395,11 @@ func (a *App) telegramHandleCallback(ctx context.Context, callback *telegramCall
 		return
 	}
 	callbackID := callback.ID
+	// 修复：enable_tg_panel=false 时，已发出的旧面板按钮也不能再执行任何操作。
+	if !a.cfg().TelegramEnablePanel {
+		_ = a.telegramAnswerCallbackQuery(ctx, callbackID, "群组用户管理面板未启用。", true)
+		return
+	}
 	actorID := callback.From.ID
 	message := callback.Message
 	var chatID, messageID int64

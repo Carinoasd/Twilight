@@ -1072,7 +1072,7 @@ func configSectionDefs() []configSectionDef {
 			{Key: "force_bind_group", Label: "强制群组绑定检查", Type: "bool", Description: "用户在 Bot 中确认绑定码时，必须已加入配置的群组"},
 			{Key: "channel_id", Label: "频道 ID", Type: "list", Description: "Bot 推送和强制绑定检查的频道"},
 			{Key: "force_bind_channel", Label: "强制频道绑定检查", Type: "bool", Description: "用户在 Bot 中确认绑定码时，必须已加入配置的频道"},
-			{Key: "enable_tg_panel", Label: "启用 Bot 面板", Type: "bool", Description: "启用更多 Bot 查询命令和管理查询入口"},
+			{Key: "enable_tg_panel", Label: "启用 Bot 面板", Type: "bool", Description: "启用 /twguser 群组用户管理面板；关闭后 /twguser 与面板按钮全部停用"},
 			{Key: "group_user_panel_template", Label: "/twguser 面板模板", Type: "textarea", Description: telegramGroupUserPanelTemplateDescription, PlaceholderHints: placeholderHintsGroupPanel},
 			{Key: "require_group_membership", Label: "强制群成员", Type: "bool", Description: "巡检发现退群时禁用本地或 Emby"},
 			{Key: "ban_on_leave", Label: "退群封禁", Type: "bool", Description: "退群后在群组永久封禁"},

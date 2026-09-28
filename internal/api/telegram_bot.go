@@ -311,6 +311,14 @@ func (a *App) handleTelegramUpdate(ctx context.Context, update *telegramUpdate) 
 	case "/twguser":
 		// 群组管理命令：群内匿名管理员要走 inline 按钮二次鉴权，
 		// 私聊也允许，gating 逻辑和注册表的"private + admin"模式不一样。
+		// 修复：enable_tg_panel=false 时面板（含删除/封禁等写操作）整体停用。
+		// 群聊里静默忽略，避免任何人借此刷屏；私聊给一句提示。
+		if !a.cfg().TelegramEnablePanel {
+			if privateChat {
+				_ = a.telegramSendMessage(ctx, chatID, "群组用户管理面板未启用（enable_tg_panel = false）。")
+			}
+			return
+		}
 		a.telegramHandleGroupUser(ctx, chatID, fromID, args, message)
 	default:
 		if a.telegramHandleCustomCommand(ctx, command, cmdCtx, privateChat) {
