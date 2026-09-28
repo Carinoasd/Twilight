@@ -115,9 +115,9 @@ func TestMyTicketListPaginatesAndDetailEnforcesOwnership(t *testing.T) {
 	var listPayload struct {
 		Data struct {
 			Tickets []map[string]json.RawMessage `json:"tickets"`
-			Total   int                       `json:"total"`
-			Page    int                       `json:"page"`
-			PerPage int                       `json:"per_page"`
+			Total   int                          `json:"total"`
+			Page    int                          `json:"page"`
+			PerPage int                          `json:"per_page"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(list.Body.Bytes(), &listPayload); err != nil {

@@ -6,6 +6,7 @@ import (
 )
 
 const signinDateLayout = "2006-01-02"
+
 // maxSigninRecords bounds the per-user sign-in history kept inside the single
 // twilight_state JSONB document. Every record is marshalled on each write, so
 // the old 730-entry window was the largest single contributor to state size
