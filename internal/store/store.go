@@ -4239,6 +4239,12 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 				changed = true
 			}
 			if grant, ok := grants[uid]; ok {
+				// 只有用户侧"授权锁本身丢失"才算真正的残留（旧流程码侧已记账、用户侧
+				// 更新丢失）。授权锁完好却无 Emby、无 PendingEmby，说明资格已被正常
+				// 消费后又被收回：管理员解绑 / 删除 Emby、清注册队列、排程收回待开通
+				// 资格等。旧逻辑对这类用户也重发 PendingEmby，重启或保存设置即让被
+				// 移除的用户重新拿到完整天数，故这里记下修复前的锁状态作为闸门。
+				lostGrantLock := !u.EmbyGrantLocked
 				if !u.EmbyGrantLocked || strings.TrimSpace(u.RegistrationSource) == "" || strings.TrimSpace(u.RegistrationCode) == "" {
 					u.EmbyGrantLocked = true
 					if strings.TrimSpace(u.RegistrationSource) == "" {
@@ -4250,7 +4256,7 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 					result.RestoredGrantLocks++
 					changed = true
 				}
-				if strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
+				if lostGrantLock && strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
 					days := grant.days
 					u.PendingEmby = true
 					u.PendingEmbyDays = &days

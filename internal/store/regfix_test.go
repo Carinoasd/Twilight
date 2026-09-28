@@ -83,3 +83,27 @@ func TestDetachInviteDoesNotReviveInviteCode(t *testing.T) {
 		t.Fatal("detached invite code must not be reusable by another account")
 	}
 }
+
+// 管理员移除 Emby / 清注册队列后，授权锁仍在：残留修复（启动、重载设置时执行）
+// 不得据码侧使用记录重新发放 PendingEmby。
+func TestRepairRegistrationResidueSkipsRevokedGrant(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	revoked, err := st.CreateUser(User{Username: "revoked", PasswordHash: "x", EmbyGrantLocked: true, RegistrationSource: "regcode", RegistrationCode: "USED-30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertRegCode(RegCode{Code: "USED-30", Type: 1, Days: 30, Active: false, UseCountLimit: 1, UseCount: 1, UsedBy: revoked.UID, UsedByUIDs: []int64{revoked.UID}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := st.RepairRegistrationResidue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RestoredPendingEntitlement != 0 {
+		t.Fatalf("revoked grant must not be re-issued: %#v", result)
+	}
+	got, _ := st.User(revoked.UID)
+	if got.PendingEmby || got.PendingEmbyDays != nil {
+		t.Fatalf("pending entitlement re-issued for revoked user: %#v", got)
+	}
+}
