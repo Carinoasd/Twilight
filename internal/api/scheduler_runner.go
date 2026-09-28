@@ -576,6 +576,11 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			if registered == 0 {
 				registered = u.CreatedAt
 			}
+			// 「多久没有 Emby」要从最近一次解绑算起，不能只看注册时间：注册三年、昨天
+			// 刚解绑 Emby 的老用户不应该被当成「注册后长期未开通」直接删掉。
+			if u.EmbyUnboundAt > registered {
+				registered = u.EmbyUnboundAt
+			}
 			if threshold > 0 && registered > threshold {
 				continue
 			}

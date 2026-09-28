@@ -234,11 +234,11 @@ func TestTelegramMembershipDryRunDoesNotDisable(t *testing.T) {
 
 func TestClassifyTelegramMembershipError(t *testing.T) {
 	cases := map[string]telegramMembershipErrKind{
-		"telegram getChatMember failed: Bad Request: chat not found (400)":                       telegramMembershipErrChatLevel,
+		"telegram getChatMember failed: Bad Request: chat not found (400)":                        telegramMembershipErrChatLevel,
 		"telegram getChatMember failed: Forbidden: bot was kicked from the supergroup chat (403)": telegramMembershipErrChatLevel,
-		"telegram getChatMember failed: Bad Request: user not found (400)":                       telegramMembershipErrUserMissing,
-		"telegram getChatMember failed: Bad Request: PARTICIPANT_ID_INVALID (400)":               telegramMembershipErrUserMissing,
-		"telegram getChatMember failed: Internal Server Error (500)":                             telegramMembershipErrOther,
+		"telegram getChatMember failed: Bad Request: user not found (400)":                        telegramMembershipErrUserMissing,
+		"telegram getChatMember failed: Bad Request: PARTICIPANT_ID_INVALID (400)":                telegramMembershipErrUserMissing,
+		"telegram getChatMember failed: Internal Server Error (500)":                              telegramMembershipErrOther,
 	}
 	for msg, want := range cases {
 		if got := classifyTelegramMembershipError(errors.New(msg)); got != want {

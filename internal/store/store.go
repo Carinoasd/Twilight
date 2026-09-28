@@ -190,17 +190,20 @@ type User struct {
 	// EmbyAutoDisabled 表示当前的 Emby 停用是本系统按 Web 状态（停用 / 过期）自动做的，
 	// 而不是管理员单独封禁 Emby。Emby 状态对账任务只会把带这个标记、且 Web 已恢复的
 	// 账号重新启用；EmbyDisabled=false 时恒为 false。
-	EmbyAutoDisabled                        bool     `json:"emby_auto_disabled,omitempty"`
-	Avatar                                  string   `json:"avatar,omitempty"`
-	Background                              string   `json:"background,omitempty"`
-	BGMMode                                 bool     `json:"bgm_mode"`
-	BGMManageMode                           bool     `json:"bgm_manage_mode"`
-	BGMToken                                string   `json:"bgm_token,omitempty"`
-	CreatedAt                               int64    `json:"created_at"`
-	RegisterTime                            int64    `json:"register_time"`
-	EmbyGrantLocked                         bool     `json:"emby_grant_locked"`
-	RegistrationSource                      string   `json:"registration_source,omitempty"`
-	RegistrationCode                        string   `json:"registration_code,omitempty"`
+	EmbyAutoDisabled   bool   `json:"emby_auto_disabled,omitempty"`
+	Avatar             string `json:"avatar,omitempty"`
+	Background         string `json:"background,omitempty"`
+	BGMMode            bool   `json:"bgm_mode"`
+	BGMManageMode      bool   `json:"bgm_manage_mode"`
+	BGMToken           string `json:"bgm_token,omitempty"`
+	CreatedAt          int64  `json:"created_at"`
+	RegisterTime       int64  `json:"register_time"`
+	EmbyGrantLocked    bool   `json:"emby_grant_locked"`
+	RegistrationSource string `json:"registration_source,omitempty"`
+	RegistrationCode   string `json:"registration_code,omitempty"`
+	// EmbyUnboundAt 是最近一次解除 Emby 绑定的时间。cleanup_no_emby 以
+	// max(注册时间, EmbyUnboundAt) 计算「多久没有 Emby」，避免把刚解绑的老用户直接删掉。
+	EmbyUnboundAt                           int64    `json:"emby_unbound_at,omitempty"`
 	PendingEmby                             bool     `json:"pending_emby"`
 	PendingEmbyDays                         *int     `json:"pending_emby_days,omitempty"`
 	NotifyOnLoginTelegram                   bool     `json:"notify_on_login_telegram,omitempty"`
@@ -219,7 +222,7 @@ type User struct {
 	// DisabledReason 记录 Web 账号被系统自动停用的原因（空 = 管理员手动或未知）。
 	// 目前只有群成员巡检写 DisabledReasonTelegramMembership；回群自动启用只处理
 	// 这个原因，绝不会把管理员手动停权的人重新放出来。Active 由其他路径改变时
-	// 由 normalizeUserDisabledReason 自动清空，避免旧原因残留。
+	// 由 normalizeUserStateMarkers 自动清空，避免旧原因残留。
 	DisabledReason      string  `json:"disabled_reason,omitempty"`
 	RebindingInProgress bool    `json:"rebinding_in_progress"`
 	RebindingSince      int64   `json:"rebinding_since,omitempty"`
@@ -229,10 +232,10 @@ type User struct {
 // DisabledReasonTelegramMembership 表示账号因退出要求的 Telegram 群组而被巡检停用。
 const DisabledReasonTelegramMembership = "telegram_membership"
 
-// normalizeUserDisabledReason 维护 DisabledReason 的不变量：Active 状态变化、而本次
+// normalizeUserStateMarkers 维护用户状态标记的不变量。DisabledReason：Active 状态变化、而本次
 // 修改没有同时显式设置新原因时，清空旧原因。这样管理员手动启停、续期启用等任何
 // 其他路径都会自然抹掉「群成员巡检停用」标记。
-func normalizeUserDisabledReason(old User, u *User) {
+func normalizeUserStateMarkers(old User, u *User) {
 	if old.Active != u.Active && u.DisabledReason == old.DisabledReason {
 		u.DisabledReason = ""
 	}
@@ -241,6 +244,9 @@ func normalizeUserDisabledReason(old User, u *User) {
 	}
 	if !u.EmbyDisabled {
 		u.EmbyAutoDisabled = false
+	}
+	if old.EmbyID != "" && u.EmbyID == "" {
+		u.EmbyUnboundAt = time.Now().Unix()
 	}
 }
 
@@ -2158,7 +2164,7 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 		if err := fn(&u); err != nil {
 			return err
 		}
-		normalizeUserDisabledReason(old, &u)
+		normalizeUserStateMarkers(old, &u)
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
@@ -2216,7 +2222,7 @@ func (s *Store) UpdateUsers(uids []int64, fn func(*User) error) (map[int64]error
 			results[uid] = ferr
 			continue
 		}
-		normalizeUserDisabledReason(old, &u)
+		normalizeUserStateMarkers(old, &u)
 		if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
 			results[uid] = ErrConflict
 			continue
@@ -2525,7 +2531,7 @@ func (s *Store) SetUserActiveAtomic(uid int64, active bool) (User, error) {
 		}
 		old := u
 		u.Active = active
-		normalizeUserDisabledReason(old, &u)
+		normalizeUserStateMarkers(old, &u)
 		s.state.Users[uid] = u
 		updated = u
 		return nil
@@ -2737,6 +2743,7 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 				oldOtherEmbyID := other.EmbyID
 				other.EmbyID = ""
 				other.EmbyUsername = ""
+				other.EmbyUnboundAt = time.Now().Unix()
 				other.PendingEmby = true
 				s.state.Users[other.UID] = other
 				s.maintainEmbyIDIndex(oldOtherEmbyID, other.EmbyID, other.UID)
@@ -2755,6 +2762,7 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 				return err
 			}
 		}
+		normalizeUserStateMarkers(before, &u)
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
