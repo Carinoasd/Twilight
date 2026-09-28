@@ -307,3 +307,35 @@ func TestTelegramLinkIssueWithoutBotIdentityFallsBackToManualCommand(t *testing.
 		t.Fatalf("expected manual fallback without bot identity: %+v", link)
 	}
 }
+
+// Bot 回复必须能区分“用户自己处理”与“需要管理员处理”的失败，并附错误码。
+func TestTelegramLinkResultMessagesAreDistinguishable(t *testing.T) {
+	cases := []struct {
+		result telegramLinkResult
+		want   []string
+	}{
+		{telegramLinkResult{Success: true, Scene: "register"}, []string{"完成注册"}},
+		{telegramLinkResult{Success: true, Scene: "user"}, []string{"绑定完成"}},
+		{telegramLinkResult{Code: http.StatusServiceUnavailable, ErrorCode: ErrTGNotConfigured}, []string{"未配置 Token", "错误码：TG_NOT_CONFIGURED"}},
+		{telegramLinkResult{Code: http.StatusBadGateway, ErrorCode: ErrTGBindGroupCheckFailed}, []string{"资格校验失败", "权限", "错误码：TG_BIND_GROUP_CHECK_FAILED"}},
+		{telegramLinkResult{Code: http.StatusForbidden, ErrorCode: ErrTGBindGroupMembershipRequired, Message: "绑定前需要先加入指定 Telegram 群组/频道: @g"}, []string{"@g", "再次点击", "错误码：TG_BIND_GROUP_MEMBERSHIP_REQUIRED"}},
+		{telegramLinkResult{Code: http.StatusServiceUnavailable, ErrorCode: ErrBindCodeSaveFailed}, []string{"数据库", "telegram link operation failed", "错误码：BIND_CODE_SAVE_FAILED"}},
+		{telegramLinkResult{Code: http.StatusConflict, ErrorCode: ErrTGAlreadyBound}, []string{"换绑审批", "错误码：TG_ALREADY_BOUND"}},
+		{telegramLinkResult{Code: http.StatusConflict, ErrorCode: ErrTGBindTargetTaken}, []string{"其他账号", "重新获取", "错误码：TG_BIND_TARGET_TAKEN"}},
+		{telegramLinkResult{Code: http.StatusNotFound, ErrorCode: ErrTGBindCodeNotFound}, []string{"无效或已过期", "错误码：TG_BIND_CODE_NOT_FOUND"}},
+		{telegramLinkResult{Code: http.StatusTooManyRequests, ErrorCode: ErrUploadRateLimited}, []string{"频繁"}},
+	}
+	seen := map[string]bool{}
+	for _, tc := range cases {
+		got := telegramLinkResultMessage(tc.result)
+		for _, want := range tc.want {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%+v: reply %q lacks %q", tc.result, got, want)
+			}
+		}
+		if seen[got] {
+			t.Fatalf("duplicate reply for %+v: %q", tc.result, got)
+		}
+		seen[got] = true
+	}
+}
