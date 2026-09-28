@@ -1440,16 +1440,22 @@ func normalizeCORSOrigin(raw string) string {
 	return parsed.String()
 }
 
-func (a *App) setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+// cookieDomain 返回配置的 cookie Domain；未配置或不含 "." 的值退化为 host-only。
+// 会话 cookie 与其它需要跟随部署拓扑的 cookie 共用同一口径。
+func (a *App) cookieDomain() string {
 	domain := strings.TrimSpace(a.cfg().CookieDomain)
 	if domain != "" && (strings.Count(domain, ".") < 1 || !strings.Contains(domain, ".")) {
-		domain = ""
+		return ""
 	}
+	return domain
+}
+
+func (a *App) setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
 	cookie := &http.Cookie{
 		Name:     a.cfg().SessionCookie,
 		Value:    token,
 		Path:     "/",
-		Domain:   domain,
+		Domain:   a.cookieDomain(),
 		Expires:  expires,
 		MaxAge:   int(time.Until(expires).Seconds()),
 		HttpOnly: true,

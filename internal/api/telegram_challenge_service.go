@@ -54,7 +54,11 @@ func (a *App) createBindCode(w http.ResponseWriter, r *http.Request, uid int64, 
 		return
 	}
 	if scene == "register" {
-		http.SetCookie(w, &http.Cookie{Name: telegramBrowserCookie, Value: proof, Path: "/api", HttpOnly: true, Secure: a.cfg().CookieSecure, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+		// 浏览器证明必须与会话 cookie 走同一套 SameSite / Domain 配置：前后端跨站
+		// 部署（session_cookie_samesite = none）时，写死 Lax 的 cookie 不会随跨站
+		// fetch / WebSocket 回传，注册场景的状态查询与提交会一律判定为「不是生成
+		// 绑定码的浏览器」。
+		http.SetCookie(w, &http.Cookie{Name: telegramBrowserCookie, Value: proof, Path: "/api", Domain: a.cookieDomain(), HttpOnly: true, Secure: a.cfg().CookieSecure, SameSite: sameSite(a.cfg().CookieSameSite), MaxAge: 600})
 	}
 	ok(w, "OK", map[string]any{"bind_code": token, "challenge_id": id, "expires_in": 300})
 }
