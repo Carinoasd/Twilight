@@ -469,3 +469,10 @@ func validateStrongPassword(password, label string) (bool, string) {
 	}
 	return true, ""
 }
+
+// embyRemoteIsAdministrator 报告远端 Emby 用户是否为服务器管理员。管理员账号不能被
+// 同步任务按名称自动认领，也不能被孤儿清理删除。
+func embyRemoteIsAdministrator(user map[string]any) bool {
+	policy, _ := user["Policy"].(map[string]any)
+	return boolish(policy["IsAdministrator"])
+}

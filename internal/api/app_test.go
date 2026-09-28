@@ -2792,7 +2792,9 @@ func TestSchedulerEmbySyncRepairsPlaceholderAndMissingIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(numeric(summary["filled_emby_ids"])) != 2 || int(numeric(summary["repaired_placeholders"])) != 1 {
+	// 只有占位 ID 的账号会按名称修复；没有 EmbyID、只有同名 EmbyUsername 的账号
+	// 只列为候选，不能自动认领（否则注册同名账号即可接管他人 Emby）。
+	if int(numeric(summary["filled_emby_ids"])) != 1 || int(numeric(summary["repaired_placeholders"])) != 1 || int(numeric(summary["name_candidates"])) != 1 {
 		t.Fatalf("unexpected emby sync summary: %#v", summary)
 	}
 	updatedAlpha, _ := app.store().User(alpha.UID)
@@ -2800,8 +2802,8 @@ func TestSchedulerEmbySyncRepairsPlaceholderAndMissingIDs(t *testing.T) {
 		t.Fatalf("placeholder Emby ID was not repaired: %#v", updatedAlpha)
 	}
 	updatedBeta, _ := app.store().User(beta.UID)
-	if updatedBeta.EmbyID != "real-beta" || updatedBeta.EmbyUsername != "beta" {
-		t.Fatalf("missing Emby ID was not filled by username: %#v", updatedBeta)
+	if updatedBeta.EmbyID != "" {
+		t.Fatalf("same-name Emby account must not be auto-linked: %#v", updatedBeta)
 	}
 }
 

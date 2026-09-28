@@ -375,19 +375,34 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			}
 		}
 		updatedNames, syncedState, stateUnchanged, missing, filledIDs, repairedPlaceholders, conflicts := 0, 0, 0, 0, 0, 0, 0
+		nameCandidates := 0
 		for _, u := range users {
 			if err := syncCtx.Err(); err != nil {
-				return map[string]any{"success": false, "terminated": true, "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts}, []string{"job terminated"}, err
+				return map[string]any{"success": false, "terminated": true, "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, []string{"job terminated"}, err
 			}
 			placeholder := isSyntheticEmbyID(u.EmbyID, u.UID)
 			remoteUser, okRemote := remoteByID[u.EmbyID]
+			// 按名称认领远端账号只用于修复“面板自己开通、但 EmbyID 还是占位值”的账号。
+			// 没有占位 ID 的账号绝不按名称认领：注册码注册时 EmbyUsername 就是用户自己
+			// 填的 Web 用户名，注册一个与他人 Emby 同名的账号，等管理员跑一次同步就能
+			// 接管对方的 Emby（随后改密码、解绑、删号）。远端管理员账号同样不自动认领。
+			// 这些同名情况只记为候选，交给管理员手动绑定（手动绑定需要 Emby 密码）。
 			if !okRemote {
 				for _, name := range []string{u.EmbyUsername, u.Username} {
-					if candidate, okByName := remoteByName[normalizeEmbyName(name)]; okByName {
+					candidate, okByName := remoteByName[normalizeEmbyName(name)]
+					if strings.TrimSpace(name) == "" || !okByName {
+						continue
+					}
+					if placeholder && !embyRemoteIsAdministrator(candidate) {
 						remoteUser = candidate
 						okRemote = true
-						break
+					} else {
+						nameCandidates++
+						if len(logs) < 200 {
+							logs = append(logs, fmt.Sprintf("user #%d (%s): same-name Emby account found, not auto-linked (needs manual bind)", u.UID, u.Username))
+						}
 					}
+					break
 				}
 			}
 			if !okRemote {
@@ -478,7 +493,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"conflicts":             conflicts,
 			})
 		}
-		return map[string]any{"success": true, "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts}, logs, nil
+		return map[string]any{"success": true, "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
 	case "cleanup_no_emby":
 		ignoreEnabled := jobParamBool(params, "ignore_enabled_flag", false)
 		enabled := jobParamBool(params, "enabled", jobParamBool(params, "auto_enabled", a.cfg().AutoCleanupNoEmby))
@@ -779,7 +794,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		unlinked := []map[string]any{}
 		for _, user := range remote {
 			id := embyRemoteID(user)
-			if id == "" || localEmbyIDs[id] {
+			// Emby 服务器管理员（通常是站长自己的账号）从来不归面板管理，不能当孤儿删掉。
+			if id == "" || localEmbyIDs[id] || embyRemoteIsAdministrator(user) {
 				continue
 			}
 			name := embyRemoteName(user)
