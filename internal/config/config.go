@@ -199,6 +199,9 @@ type Config struct {
 	BangumiEnabled                 bool
 	BangumiManageEnabled           bool
 	BangumiWebhookSecret           string
+	// BangumiWebhookAllowLegacyToken 兼容期开关：true 时仍接受共享 token（头或 ?token=）鉴权并记警告；
+	// false 时 webhook 只接受 HMAC 签名请求。
+	BangumiWebhookAllowLegacyToken bool
 	TMDBAPIKey                     string
 	TMDBAPIURL                     string
 	TMDBImageURL                   string
@@ -461,6 +464,7 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.BangumiEnabled = reader.boolValue(cfg.BangumiEnabled, "BangumiSync.enabled", "bangumi_sync_enabled")
 	cfg.BangumiManageEnabled = reader.boolValue(cfg.BangumiManageEnabled, "BangumiSync.manage_enabled", "bangumi_sync_manage_enabled")
 	cfg.BangumiWebhookSecret = reader.stringValue(cfg.BangumiWebhookSecret, "BangumiSync.webhook_secret", "webhook_secret")
+	cfg.BangumiWebhookAllowLegacyToken = reader.boolValue(cfg.BangumiWebhookAllowLegacyToken, "BangumiSync.webhook_allow_legacy_token")
 	cfg.TMDBAPIKey = reader.stringValue(cfg.TMDBAPIKey, "Global.tmdb_api_key", "tmdb_api_key")
 	cfg.TMDBAPIURL = reader.stringValue(cfg.TMDBAPIURL, "Global.tmdb_api_url", "tmdb_api_url")
 	cfg.TMDBImageURL = reader.stringValue(cfg.TMDBImageURL, "Global.tmdb_image_url", "tmdb_image_url")
@@ -712,6 +716,7 @@ func defaults() Config {
 		TMDBAPIURL:                           "https://api.themoviedb.org/3",
 		TMDBImageURL:                         "https://image.tmdb.org/t/p",
 		BangumiAPIURL:                        "https://api.bgm.tv/v0",
+		BangumiWebhookAllowLegacyToken:       true,
 		MediaRequestEnabled:                  true,
 		MaxConcurrentRequestsPerUser:         3,
 		MaxConcurrentRequestsGlobal:          -1,

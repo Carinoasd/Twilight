@@ -1206,7 +1206,8 @@ func configSectionDefs() []configSectionDef {
 		{Key: "BangumiSync", Title: "Bangumi 管理与同步", Description: "Bangumi 自动同步（Webhook）与个人番剧管理\n关闭同步功能后：所有自动同步、用户/Bangumi 相关接口均拒绝服务，但管理员仍可查看用户 Bangumi 配置状态\n关闭管理功能后：用户面板隐藏手动管理区，无法查看或修改 Bangumi 收藏", Category: "integration", Collapsed: true, Fields: []configFieldDef{
 			{Key: "enabled", Label: "启用同步功能", Type: "bool", Description: "总开关。关闭后自动同步、Bangumi 个人页、收藏管理、收藏修改等所有 Bangumi 相关功能均拒绝服务，管理员仍可查看用户 BGM 配置状态"},
 			{Key: "manage_enabled", Label: "启用管理功能", Type: "bool", Description: "允许用户在个人面板手动管理、修改 Bangumi 收藏状态、进度及评分；关闭时隐藏前端管理入口并拒绝收藏修改接口"},
-			{Key: "webhook_secret", Label: "Webhook 密钥", Type: "secret", Description: "Bangumi Webhook 校验密钥（留空则不验证签名）"},
+			{Key: "webhook_secret", Label: "Webhook 密钥", Type: "secret", Description: "Bangumi Webhook 校验密钥（留空则拒绝所有 Webhook）；推荐用它对 timestamp + body 做 HMAC-SHA256 签名"},
+			{Key: "webhook_allow_legacy_token", Label: "允许共享 Token 鉴权（兼容期）", Type: "bool", Description: "开启时仍接受 X-Twilight-Bangumi-Token 头或 ?token= 的旧式鉴权（会记警告，无法防重放）；关闭后只接受 X-Twilight-Bangumi-Signature 签名请求"},
 		}},
 		{Key: "Ticket", Title: "工单系统", Description: "用户提交工单与管理员处理；工单类型请在「工单处理」页面管理", Category: "policy", Collapsed: true, Fields: []configFieldDef{
 			{Key: "enabled", Label: "启用工单系统", Type: "bool", Description: "开启后用户可提交工单，管理员可在后台管理"},
@@ -1325,7 +1326,7 @@ func configValues(cfg config.Config) map[string]map[string]any {
 		"Scheduler":    {"enabled": cfg.SchedulerEnabled, "tick_interval_seconds": cfg.SchedulerTickIntervalSeconds, "expired_check_time": cfg.SchedulerExpiredCheckTime, "expiring_check_time": cfg.SchedulerExpiringCheckTime, "daily_stats_time": cfg.SchedulerDailyStatsTime, "session_cleanup_interval": cfg.SchedulerSessionCleanupInterval, "cleanup_no_emby_time": cfg.SchedulerCleanupNoEmbyTime, "cleanup_pending_emby_time": cfg.SchedulerCleanupPendingEmbyTime, "cleanup_unused_uploads_time": cfg.SchedulerCleanupUnusedUploadsTime, "cleanup_audit_logs_time": cfg.SchedulerCleanupAuditLogsTime, "cleanup_ticket_images_time": cfg.SchedulerCleanupTicketImagesTime},
 		"SystemUpdate": {"auto_update_enabled": cfg.SystemUpdateEnabled, "repo_url": cfg.SystemUpdateRepoURL, "branch": cfg.SystemUpdateBranch, "restart_services": cfg.SystemUpdateRestartServices, "auto_update_trigger_type": cfg.SystemUpdateTriggerType, "auto_update_interval_hours": cfg.SystemUpdateIntervalHours, "auto_update_time": cfg.SystemUpdateTime},
 		"Notification": {"enabled": cfg.NotificationEnabled, "expiry_remind_days": cfg.NotificationExpiryRemindDays, "login_notify_telegram_template": cfg.LoginNotifyTelegramTemplate, "login_notify_email_subject_template": cfg.LoginNotifyEmailSubjectTemplate, "login_notify_email_body_template": cfg.LoginNotifyEmailBodyTemplate},
-		"BangumiSync":  {"enabled": cfg.BangumiEnabled, "manage_enabled": cfg.BangumiManageEnabled, "webhook_secret": cfg.BangumiWebhookSecret},
+		"BangumiSync":  {"enabled": cfg.BangumiEnabled, "manage_enabled": cfg.BangumiManageEnabled, "webhook_secret": cfg.BangumiWebhookSecret, "webhook_allow_legacy_token": cfg.BangumiWebhookAllowLegacyToken},
 		"Ticket":       {"enabled": cfg.TicketSystemEnabled, "types": cfg.TicketTypes, "user_open_limit": cfg.TicketUserOpenLimit, "global_open_limit": cfg.TicketGlobalOpenLimit, "image_max_size": cfg.TicketImageMaxSize, "image_max_count": cfg.TicketImageMaxCount, "image_retention_days": cfg.TicketImageRetentionDays, "notify_telegram_template": cfg.TicketNotifyTelegramTemplate},
 		"AuditLog": {
 			"enabled": cfg.AuditLogEnabled, "auto_cleanup_enabled": cfg.AuditLogAutoCleanupEnabled,

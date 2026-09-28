@@ -4956,6 +4956,7 @@ func TestBangumiWebhookRequiresSecretWhenEnabled(t *testing.T) {
 		t.Fatalf("webhook without configured secret = %d body=%s", blocked.Code, blocked.Body.String())
 	}
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 	allowed := doJSON(app, http.MethodPost, "/api/v1/emby/bangumi/webhook?token=webhook-secret", `{"Event":"PlaybackStopped"}`, nil)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("webhook with secret = %d body=%s", allowed.Code, allowed.Body.String())
@@ -4969,6 +4970,7 @@ func TestBangumiWebhookRejectsStaleTimestamp(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().BangumiEnabled = true
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 
 	// 落在 1 小时之前——窗口 5 分钟,必拒。
 	stale := strconv.FormatInt(time.Now().Unix()-3600, 10)
@@ -5007,6 +5009,7 @@ func TestBangumiWebhookIdempotentReplay(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().BangumiEnabled = true
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 	created, err := app.store().CreateUser(store.User{Username: "viewer", PasswordHash: "x"})
 	if err != nil {
 		t.Fatal(err)

@@ -239,30 +239,36 @@ POST /api/v1/emby/bangumi/webhook
 
 该路由鉴权级别为 `AuthPublic`（免登录），凭据是与 `webhook_secret` 匹配的密钥。鉴权在解析请求体之前完成，未通过鉴权的请求不会读取 body，避免无凭据投递大体积 JSON 触发资源放大。
 
-### 密钥来源（优先级）
+### 签名模式（推荐）
 
-1. 请求头 `X-Twilight-Bangumi-Token`（推荐）。
-2. 请求头 `X-Webhook-Token`（兼容别名）。
-3. 查询参数 `?token=`（兼容旧回调，**每次命中都会打 Warn 日志**，提示运维迁移到请求头，因为查询字符串可能被上游代理 / CDN 的 access log 记录）。
+请求同时携带：
 
-无论来自哪一路，密钥都与 `BangumiWebhookSecret` 用常量时间比较（`constantTimeStringEqual`，基于 `crypto/subtle`，并消除了长度不一致引入的 timing 信号）。若 `webhook_secret` 为空或不匹配，返回 HTTP 403（`UNAUTHORIZED`，消息"Webhook 密钥无效"）。
+- `X-Twilight-Bangumi-Timestamp`：Unix 秒级时间戳（**必填**）。
+- `X-Twilight-Bangumi-Signature`：`sha256=` + 十六进制的 `HMAC-SHA256(webhook_secret, "<timestamp>.<原始请求体>")`。
 
-若只能用 URL 携带密钥，可退化为：
+服务端先限量读取 body（256KB）再验签，签名覆盖时间戳与整个 body，因此截获的请求无法改写 `UserId` 等字段；时间戳偏差超过 **300 秒** 返回 410，缺失返回 401，非法返回 400；同一签名在窗口内只接受一次，逐字节重放返回 409。Emby / Jellyfin 的 Webhook 插件只能发静态请求头，无法计算签名，需要在两者之间放一个转发脚本（示例）：
 
-```text
-https://你的后端域名/api/v1/emby/bangumi/webhook?token=replace-with-random-secret
+```bash
+ts=$(date +%s)
+sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | sed 's/^.* //')
+curl -X POST "https://你的后端域名/api/v1/emby/bangumi/webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Twilight-Bangumi-Timestamp: $ts" \
+  -H "X-Twilight-Bangumi-Signature: sha256=$sig" \
+  --data-binary "$body"
 ```
 
-但生产环境不建议这样做。
+### 共享 Token 模式（兼容期，已淘汰）
 
-### 重放窗口（X-Twilight-Bangumi-Timestamp）
+未带签名头时按旧方式校验共享 token，**仅在 `BangumiSync.webhook_allow_legacy_token = true`（默认，兼容期）时接受**，每次命中都会打 Warn 日志：
 
-请求头 `X-Twilight-Bangumi-Timestamp` 携带 Unix 秒级时间戳，用于重放保护：
+1. 请求头 `X-Twilight-Bangumi-Token`。
+2. 请求头 `X-Webhook-Token`（兼容别名）。
+3. 查询参数 `?token=`（已淘汰：查询字符串可能被上游代理 / CDN 的 access log 记录）。
 
-- 容忍窗口为 **300 秒**（`bangumiWebhookReplayWindowSeconds`），覆盖常见的客户端时钟漂移。
-- 时间戳与服务器当前时间偏差超过窗口，返回 HTTP 410（`UNAUTHORIZED`，消息"Webhook 请求已过期"）。
-- 时间戳非法（无法解析为整数），返回 HTTP 400（"Webhook timestamp 非法"）。
-- 缺失该头时不报错，按兼容路径继续处理，但会打 Warn 日志提示运维补齐，此时无法做窗口校验。
+密钥与 `BangumiWebhookSecret` 用常量时间比较；为空或不匹配返回 HTTP 403（"Webhook 密钥无效"）。共享 token 只是口令，持有者可以替任意 `UserId` 写观看记录，时间戳也可以自填，因此确认改用签名后请把 `webhook_allow_legacy_token` 设为 `false`，此时旧式请求返回 401。
+
+兼容模式下 `X-Twilight-Bangumi-Timestamp` 仍可选：带了就按 300 秒窗口校验（过期 410、非法 400），不带则回落到服务器时间。
 
 ### 幂等去重（uid, item_id, played_at）
 
