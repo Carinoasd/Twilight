@@ -66,6 +66,9 @@ func (a *App) handleV2MediaDetail(w http.ResponseWriter, r *http.Request, params
 }
 
 func (a *App) handleV2MediaInventoryCheck(w http.ResponseWriter, r *http.Request, _ Params) {
+	if a.guardMediaInventory(w, r) {
+		return
+	}
 	payload := decodeMap(r)
 	if firstNonEmpty(stringValue(payload, "title"), stringValue(payload, "media_id"), stringValue(payload, "id"), stringValue(payload, "tmdb_id")) == "" {
 		failWithCode(w, http.StatusBadRequest, ErrMediaRequestPayloadEmpty, "缺少必要参数")

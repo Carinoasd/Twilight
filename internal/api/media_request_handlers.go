@@ -62,7 +62,43 @@ func (a *App) handleMediaDetail(w http.ResponseWriter, r *http.Request, params P
 	ok(w, "OK", result)
 }
 
+// mediaInventoryRateLimitPerMinute 是库存检查 / 库存搜索每个用户每分钟的上限。
+// 这两个接口用管理员 Emby token 访问全服务器媒体库，不能被当作任意查询代理。
+const mediaInventoryRateLimitPerMinute = 30
+
+// guardMediaInventory 统一检查求片开关与每用户限流；返回 true 表示已写出错误响应。
+func (a *App) guardMediaInventory(w http.ResponseWriter, r *http.Request) bool {
+	if a.requireMediaRequestEnabled(w) {
+		return true
+	}
+	uid := strconv.FormatInt(current(r).User.UID, 10)
+	if !a.allowRate(r.Context(), rateKey("media-inventory:uid:", uid), mediaInventoryRateLimitPerMinute, time.Minute) {
+		failWithCode(w, http.StatusTooManyRequests, ErrRateLimited, "请求过于频繁，请稍后再试")
+		return true
+	}
+	return false
+}
+
+// normalizeInventorySearchType 只允许 Movie / Series。原实现把 type 原样放进
+// IncludeItemTypes，任何登录用户都能用 Photo、Video、Folder 等类型列举整台 Emby
+// （含隐藏库、个人相片）。空值表示同时搜索电影与剧集。
+func normalizeInventorySearchType(raw string) ([]string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return []string{"Movie", "Series"}, true
+	case "movie":
+		return []string{"Movie"}, true
+	case "series", "tv":
+		return []string{"Series"}, true
+	default:
+		return nil, false
+	}
+}
+
 func (a *App) handleInventoryCheck(w http.ResponseWriter, r *http.Request, _ Params) {
+	if a.guardMediaInventory(w, r) {
+		return
+	}
 	payload := decodeMap(r)
 	if firstNonEmpty(stringValue(payload, "title"), stringValue(payload, "media_id"), stringValue(payload, "id"), stringValue(payload, "tmdb_id")) == "" {
 		failWithCode(w, http.StatusBadRequest, ErrMediaRequestPayloadEmpty, "缺少必要参数")
@@ -78,15 +114,18 @@ func (a *App) handleInventorySearch(w http.ResponseWriter, r *http.Request, _ Pa
 		failWithCode(w, http.StatusBadRequest, ErrMediaRequestQueryRequired, "missing search query")
 		return
 	}
+	includeTypes, validType := normalizeInventorySearchType(r.URL.Query().Get("type"))
+	if !validType {
+		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "type 只支持 Movie 或 Series")
+		return
+	}
+	if a.guardMediaInventory(w, r) {
+		return
+	}
 	if a.requireEmbyConfigured(w) {
 		return
 	}
 	limit := clamp(queryInt(r, "limit", 20), 1, 50)
-	itemType := strings.TrimSpace(r.URL.Query().Get("type"))
-	includeTypes := []string{"Movie", "Series"}
-	if itemType != "" {
-		includeTypes = []string{itemType}
-	}
 	items, err := a.embySearchItems(r.Context(), query, includeTypes, queryInt(r, "year", 0), limit)
 	if err != nil {
 		failWithCode(w, http.StatusBadGateway, ErrMediaInventorySearchFailed, "搜索库存失败")

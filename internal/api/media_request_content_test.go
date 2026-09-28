@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -72,5 +73,58 @@ func TestTrustedMediaPosterURL(t *testing.T) {
 		if got := app.trustedMediaPosterURL(input); got != want {
 			t.Errorf("trustedMediaPosterURL(%q)=%q, want %q", input, got, want)
 		}
+	}
+}
+
+// 库存搜索只允许 Movie / Series，受求片开关与每用户限流约束。
+func TestInventorySearchRestrictsTypesAndHonorsGuards(t *testing.T) {
+	app := newTestApp(t)
+	var seenTypes []string
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTypes = append(seenTypes, r.URL.Query().Get("IncludeItemTypes"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"Items":[],"TotalRecordCount":0}`))
+	}))
+	defer emby.Close()
+	app.cfg().EmbyURL = emby.URL
+	app.cfg().EmbyToken = "test-token"
+	_ = registerAndLogin(t, app, "admin", "Admin123456")
+	user := registerAndLogin(t, app, "inventory-user", "User123456")
+
+	if rr := doJSON(app, http.MethodGet, "/api/v2/media/inventory/search?q=a&type=Photo,Video,Folder", ``, user); rr.Code != http.StatusBadRequest {
+		t.Fatalf("arbitrary type status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(seenTypes) != 0 {
+		t.Fatalf("rejected type must not reach Emby, saw %v", seenTypes)
+	}
+	if rr := doJSON(app, http.MethodGet, "/api/v2/media/inventory/search?q=a", ``, user); rr.Code != http.StatusOK {
+		t.Fatalf("default search status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSON(app, http.MethodGet, "/api/v1/media/inventory/search?q=a&type=series", ``, user); rr.Code != http.StatusOK {
+		t.Fatalf("series search status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(seenTypes) != 2 || seenTypes[0] != "Movie,Series" || seenTypes[1] != "Series" {
+		t.Fatalf("unexpected IncludeItemTypes: %v", seenTypes)
+	}
+
+	app.cfg().MediaRequestEnabled = false
+	if rr := doJSON(app, http.MethodGet, "/api/v2/media/inventory/search?q=a", ``, user); rr.Code != http.StatusForbidden {
+		t.Fatalf("disabled media requests status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSON(app, http.MethodPost, "/api/v2/media/inventory/check", `{"title":"x"}`, user); rr.Code != http.StatusForbidden {
+		t.Fatalf("disabled inventory check status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	app.cfg().MediaRequestEnabled = true
+	app.cfg().RateLimitEnabled = true
+	limited := false
+	for i := 0; i < mediaInventoryRateLimitPerMinute+2; i++ {
+		if rr := doJSON(app, http.MethodGet, "/api/v2/media/inventory/search?q=a", ``, user); rr.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("inventory search should be rate limited per user")
 	}
 }
