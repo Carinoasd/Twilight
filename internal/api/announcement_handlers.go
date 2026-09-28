@@ -73,6 +73,12 @@ func (a *App) handleAckAnnouncements(w http.ResponseWriter, r *http.Request, _ P
 	u := current(r).User
 	body := decodeMap(r)
 	ids := int64Slice(body["ids"])
+	// 正常前端一次最多确认几条强制已读公告；超大数组直接拒绝，避免单次请求在
+	// 全局锁里处理海量数据。
+	if len(ids) > 200 {
+		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "一次确认的公告过多")
+		return
+	}
 	if len(ids) == 0 {
 		ok(w, "OK", map[string]any{"acknowledged": 0})
 		return

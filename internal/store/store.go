@@ -4360,12 +4360,23 @@ func (s *Store) MarkAnnouncementsSeen(uid int64, ids []int64) error {
 		if !ok {
 			return ErrNotFound
 		}
+		// 只记录真实存在的公告：请求体里的 ids 由客户端提供，不做校验的话一个普通
+		// 用户就能反复塞进数万个随机 ID，让整份状态文档无限膨胀、每次落盘都在全局
+		// 锁里排序整张表。已删除公告的旧记录也顺手清掉。
+		valid := map[int64]bool{}
+		for _, ann := range s.state.Announcements {
+			valid[ann.ID] = true
+		}
 		existingSet := map[int64]bool{}
 		for _, id := range u.SeenAnnouncementIDs {
-			existingSet[id] = true
+			if valid[id] {
+				existingSet[id] = true
+			}
 		}
 		for _, id := range ids {
-			existingSet[id] = true
+			if valid[id] {
+				existingSet[id] = true
+			}
 		}
 		seen := make([]int64, 0, len(existingSet))
 		for id := range existingSet {
