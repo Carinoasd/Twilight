@@ -51,3 +51,35 @@ func TestDeleteUserKeepsRegCodeConsumption(t *testing.T) {
 		t.Fatalf("caller snapshot was mutated in place: got %v want %v", snapshot.UsedByUIDs, snapshotUIDs)
 	}
 }
+
+// 下级断开邀请关系后，原邀请码不得被第二个账号再次使用。
+func TestDetachInviteDoesNotReviveInviteCode(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	parent, err := st.CreateUser(User{Username: "inv-parent", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.CreateUser(User{Username: "inv-child", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alt, err := st.CreateUser(User{Username: "inv-alt", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertInviteCode(InviteCode{Code: "INV-ONCE", UID: parent.UID, InviterUID: parent.UID, Days: 30, UseCountLimit: 1, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ConsumeInviteCode("INV-ONCE", child.UID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DetachInvite(child.UID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.ParentOf(child.UID); ok {
+		t.Fatal("relation should be detached")
+	}
+	if _, err := st.ConsumeInviteCode("INV-ONCE", alt.UID); err == nil {
+		t.Fatal("detached invite code must not be reusable by another account")
+	}
+}

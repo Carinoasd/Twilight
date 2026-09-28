@@ -2333,8 +2333,11 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 				s.state.Users[uid] = u
 				userChanged = true
 			}
-			regRefs := s.clearRegCodeRefsForUIDLocked(uid)
-			invRefs := s.clearInviteUsageForUIDLocked(uid)
+			// 管理员显式"清理注册资格记录"：这是管理员主动收回并退还额度的操作
+			// （用于修复迁移误锁等脏数据），与用户自删 / 自助断开不同，保留退还语义，
+			// 走专门的 refund* 函数，避免与删号 / 断开的"只摘引用"路径混用。
+			regRefs := s.refundRegCodeUsageForUIDLocked(uid)
+			invRefs := s.refundInviteUsageForUIDLocked(uid)
 			result.RegcodeRefs += regRefs
 			result.InviteRefs += invRefs
 			if userChanged || regRefs > 0 || invRefs > 0 {
@@ -2389,11 +2392,12 @@ func (s *Store) removeRegCodeRefsForUIDLocked(uid int64) int {
 	return removed
 }
 
-// clearRegCodeRefsForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
-// 回退；回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
+// refundRegCodeUsageForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
+// 回退；仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用，删号走
+// removeRegCodeRefsForUIDLocked（不退还）。回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
 // 返回抹除的引用条数（每个码对同一 UID 至多一条）。UsedByTelegramIDs 保持不动：
 // TG 维度的占用无法可靠映射回单个 UID，避免误删他人记录。
-func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
+func (s *Store) refundRegCodeUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2435,11 +2439,13 @@ func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
 	return removed
 }
 
-// clearInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
+// refundInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
 // 断开邀请关系并抹除其在邀请码上的占用（UsedByUID/Used/UseCount/Active），使其可
 // 重新加入邀请树 / 使用邀请码。只清理其作为 child 的记录；其作为邀请人(inviter)
 // 生成、被他人使用的邀请码不受影响。返回处理的邀请记录数。
-func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
+// 会退还次数并重新启用码，仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用；
+// 下级自助 / 管理员断开邀请关系走 detachInviteRefsForUIDLocked（不退还）。
+func (s *Store) refundInviteUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2467,6 +2473,34 @@ func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
 		if !c.Active && c.UseCountLimit != -1 && c.UseCount < c.UseCountLimit {
 			c.Active = true
 		}
+		s.state.InviteCodes[code] = c
+		handled++
+	}
+	return handled
+}
+
+// detachInviteRefsForUIDLocked 断开该 UID 作为被邀请者的邀请关系，并只清掉邀请码上
+// 指向它的 UsedByUID 引用；不回退 UseCount、不改 Used / Active。旧实现（现
+// refundInviteUsageForUIDLocked）会把码退回并重新启用：下级到期后自助断开，同一张
+// 永不过期的邀请码就能被小号再次使用，无限循环且邀请人不知情。下级若需重新加入，
+// 靠"关系已断开"即可使用新的邀请码，不需要复活旧码。返回处理的记录数。
+func (s *Store) detachInviteRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	handled := 0
+	for key, rel := range s.state.InviteRelations {
+		if key != uid && rel.ChildUID != uid {
+			continue
+		}
+		delete(s.state.InviteRelations, key)
+		handled++
+	}
+	for code, c := range s.state.InviteCodes {
+		if c.UsedByUID != uid {
+			continue
+		}
+		c.UsedByUID = 0
 		s.state.InviteCodes[code] = c
 		handled++
 	}
@@ -4881,7 +4915,7 @@ func (s *Store) DetachInvite(uid int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mutateAndSaveLocked(func() error {
-		s.clearInviteUsageForUIDLocked(uid)
+		s.detachInviteRefsForUIDLocked(uid)
 		return nil
 	})
 }

@@ -901,8 +901,9 @@ func TestDetachInviteClearsInviteCodeUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain after detach")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("invite code usage should be cleared after detach: %#v", invite)
+	// 断开只清引用：码保持已用（不退次数、不重新启用），防止小号重复使用同一张码。
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("detach must only drop the reference and keep the code consumed: %#v", invite)
 	}
 }
 
@@ -967,8 +968,8 @@ func TestDetachInviteClearsLegacyRelationByChildUID(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain after legacy detach")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("legacy invite code usage should be cleared after detach: %#v", invite)
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("legacy detach must only drop the reference and keep the code consumed: %#v", invite)
 	}
 }
 
