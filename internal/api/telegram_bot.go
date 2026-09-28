@@ -807,7 +807,7 @@ func (a *App) telegramHandleFind(ctx context.Context, chatID int64, query string
 // 用法：/banweb <用户名/UID/关键词> [理由]
 func (a *App) telegramHandleBanWeb(ctx context.Context, chatID, telegramID int64, args []string) {
 	if len(args) == 0 {
-		_ = a.telegramSendMessage(ctx, chatID, "请发送 /banweb <用户名/UID/关键词> [理由]")
+		_ = a.telegramSendMessage(ctx, chatID, "请发送 /banweb <UID/完整用户名/Telegram ID/@用户名> [理由]")
 		return
 	}
 	query := args[0]
@@ -818,16 +818,10 @@ func (a *App) telegramHandleBanWeb(ctx context.Context, chatID, telegramID int64
 			reason = reason[:200]
 		}
 	}
-	users := a.telegramFindUsers(query, 6)
-	if len(users) == 0 {
-		_ = a.telegramSendMessage(ctx, chatID, "未找到匹配用户。")
+	target, ok := a.telegramResolveExactBanTarget(ctx, chatID, query)
+	if !ok {
 		return
 	}
-	if len(users) > 1 {
-		_ = a.telegramSendMessage(ctx, chatID, "找到多个匹配项，请使用 UID 精确指定。\n\n"+telegramUserList(users))
-		return
-	}
-	target := users[0]
 	if a.telegramProtectedTarget(target) {
 		_ = a.telegramSendMessage(ctx, chatID, "受保护账号禁止通过 Telegram 禁用。")
 		return
@@ -856,7 +850,7 @@ func (a *App) telegramHandleBanWeb(ctx context.Context, chatID, telegramID int64
 // 用法：/banemby <用户名/UID/关键词> [理由]
 func (a *App) telegramHandleBanEmby(ctx context.Context, chatID, telegramID int64, args []string) {
 	if len(args) == 0 {
-		_ = a.telegramSendMessage(ctx, chatID, "请发送 /banemby <用户名/UID/关键词> [理由]")
+		_ = a.telegramSendMessage(ctx, chatID, "请发送 /banemby <UID/完整用户名/Telegram ID/@用户名> [理由]")
 		return
 	}
 	query := args[0]
@@ -867,16 +861,10 @@ func (a *App) telegramHandleBanEmby(ctx context.Context, chatID, telegramID int6
 			reason = reason[:200]
 		}
 	}
-	users := a.telegramFindUsers(query, 6)
-	if len(users) == 0 {
-		_ = a.telegramSendMessage(ctx, chatID, "未找到匹配用户。")
+	target, ok := a.telegramResolveExactBanTarget(ctx, chatID, query)
+	if !ok {
 		return
 	}
-	if len(users) > 1 {
-		_ = a.telegramSendMessage(ctx, chatID, "找到多个匹配项，请使用 UID 精确指定。\n\n"+telegramUserList(users))
-		return
-	}
-	target := users[0]
 	if a.telegramProtectedTarget(target) {
 		_ = a.telegramSendMessage(ctx, chatID, "受保护账号禁止通过 Telegram 禁用 Emby。")
 		return
@@ -901,6 +889,41 @@ func (a *App) telegramHandleBanEmby(ctx context.Context, chatID, telegramID int6
 		detail["reason"] = reason
 	}
 	a.auditEntryIP("telegram", opUID, opName, "banemby_via_telegram", "admin", target.UID, detail)
+}
+
+// telegramResolveExactBanTarget 为 /banweb、/banemby 解析唯一目标。
+// 修复：原先用含邮箱、Emby 字段的模糊子串搜索，只命中一笔就直接停用——想封 bob
+// 却封到 bobby 或邮箱含 bob 的人。现在先用限缩字段的 SearchUsersByIdentity 取候选，
+// 再要求精确相等（UID、完整 Web 用户名、Telegram ID 或 @Telegram 用户名），
+// 恰好一个精确命中才执行；否则只列出候选，不做任何写入。
+func (a *App) telegramResolveExactBanTarget(ctx context.Context, chatID int64, query string) (store.User, bool) {
+	query = strings.TrimSpace(query)
+	candidates := a.store().SearchUsersByIdentity(query, store.UserIdentitySearchAny, 20)
+	lower := strings.ToLower(query)
+	tgName := strings.TrimPrefix(lower, "@")
+	exact := make([]store.User, 0, 2)
+	for _, u := range candidates {
+		if strconv.FormatInt(u.UID, 10) == query ||
+			strings.ToLower(u.Username) == lower ||
+			(u.TelegramID != 0 && strconv.FormatInt(u.TelegramID, 10) == query) ||
+			(tgName != "" && strings.ToLower(strings.TrimPrefix(strings.TrimSpace(u.TelegramUsername), "@")) == tgName) {
+			exact = append(exact, u)
+		}
+	}
+	switch {
+	case len(exact) == 1:
+		return exact[0], true
+	case len(exact) > 1:
+		_ = a.telegramSendMessage(ctx, chatID, "找到多个精确匹配项，请使用 UID 指定。\n\n"+telegramUserList(exact))
+	case len(candidates) > 0:
+		if len(candidates) > 6 {
+			candidates = candidates[:6]
+		}
+		_ = a.telegramSendMessage(ctx, chatID, "没有精确匹配的用户（需填写 UID、完整用户名、Telegram ID 或 @用户名）。相近结果：\n\n"+telegramUserList(candidates))
+	default:
+		_ = a.telegramSendMessage(ctx, chatID, "未找到匹配用户。")
+	}
+	return store.User{}, false
 }
 
 // telegramAdminIdentity 返回 Telegram 管理员在系统中的 UID 和 Username

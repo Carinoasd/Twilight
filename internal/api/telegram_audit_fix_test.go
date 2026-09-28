@@ -478,3 +478,28 @@ func TestTelegramPanelTemplateMasksEmailAndRegistrationCode(t *testing.T) {
 		t.Fatalf("registration_code placeholder not masked: %q", vars["registration_code"])
 	}
 }
+
+// /banweb、/banemby 只接受精确目标；模糊命中一笔也不得执行。
+func TestTelegramBanWebRequiresExactTarget(t *testing.T) {
+	app := newTestApp(t)
+	tg := newRecordingTelegramServer(t, app)
+	bobby := mustCreateTGUser(t, app, store.User{Username: "bobby", Role: store.RoleNormal, Active: true})
+	mailer := mustCreateTGUser(t, app, store.User{Username: "carol", Email: "bob@example.com", Role: store.RoleNormal, Active: true, EmbyID: "e-carol"})
+	posted := fakeEmbyPolicyServer(t, app)
+	ctx := context.Background()
+	app.telegramHandleBanWeb(ctx, 42, 42, []string{"bobb"})        // 只模糊命中 bobby
+	app.telegramHandleBanWeb(ctx, 42, 42, []string{"bob@example"}) // 只模糊命中 carol 的邮箱
+	app.telegramHandleBanEmby(ctx, 42, 42, []string{"e-carol"})    // 只模糊命中 EmbyID
+	if len(*posted) != 0 {
+		t.Fatalf("fuzzy /banemby disabled Emby: %v", *posted)
+	}
+	for _, u := range []store.User{bobby, mailer} {
+		if got, _ := app.store().User(u.UID); !got.Active {
+			t.Fatalf("fuzzy query disabled %s; sent=%v", u.Username, tg.sentTexts())
+		}
+	}
+	app.telegramHandleBanWeb(ctx, 42, 42, []string{"BOBBY"})
+	if got, _ := app.store().User(bobby.UID); got.Active {
+		t.Fatalf("exact username should disable bobby; sent=%v", tg.sentTexts())
+	}
+}
