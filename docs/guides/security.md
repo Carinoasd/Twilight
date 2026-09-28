@@ -158,7 +158,7 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 - 用 Nginx / Caddy 暴露单一入口，仅开放 80/443；后端服务端口尽量仅监听内网或本机；限制管理接口访问来源（网段 / IP / WAF）。
 - 后端对所有响应附带安全响应头（`applySecurityHeaders`）：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin`、`Permissions-Policy`、`X-Permitted-Cross-Domain-Policies: none`、`Cross-Origin-Opener-Policy`、`Cross-Origin-Resource-Policy`，以及一条收紧的 `Content-Security-Policy`（`default-src 'none'`，后端只吐 JSON / 静态上传资源）。WebUI 由 Next.js 提供：`webui/src/proxy.ts`（Next.js middleware）按请求注入 CSP（`connect-src` 从 `NEXT_PUBLIC_API_URL` 推导，附加白名单逐条过 origin 校验），`next.config.mjs` 的 `headers()` 输出与请求上下文无关的静态安全头。Nginx 负责同源反代和缓存边界：只有 `/_next/static/` 下带 hash 的产物长期缓存，HTML 外壳保持 `no-store`。
 - 反向代理若覆盖这些头，应保持同等或更严格策略。
-- 信任代理头需谨慎：仅当 `API.trust_proxy_headers = true` **且** 直接上游落在 `API.trusted_proxy_cidrs` 列表内时，`clientIP` 才消费 `CF-Connecting-IP` / `X-Real-IP` / `X-Forwarded-For`；否则一律用 TCP 对端地址（fail-closed）。`trusted_proxy_cidrs` 为空时即便 `trust_proxy_headers = true` 也不会消费任何代理头，启动期会打 `Error` 提示。`X-Forwarded-For` 按从右向左逐跳验证，避免客户端伪造最左端 IP 绕过 IP 限流 / 黑名单。
+- 信任代理头需谨慎：仅当 `API.trust_proxy_headers = true` **且** 直接上游落在 `API.trusted_proxy_cidrs` 列表内时，`clientIP` 才消费 `CF-Connecting-IP` / `X-Real-IP` / `X-Forwarded-For`；否则一律用 TCP 对端地址（fail-closed）。`trusted_proxy_cidrs` 为空时即便 `trust_proxy_headers = true` 也不会消费任何代理头，启动期会打 `Error` 提示。`X-Forwarded-For` 按从右向左逐跳验证，避免客户端伪造最左端 IP 绕过 IP 限流 / 黑名单。注意 `CF-Connecting-IP` 优先级最高：受信代理必须覆盖或清空客户端自带的这个头（仓库的 `deploy/nginx-twilight.conf` 已 `proxy_set_header CF-Connecting-IP ""`），否则任何人都能伪造 IP；部署在 Cloudflare 后面时应在 nginx 用 `real_ip_header CF-Connecting-IP` 还原真实 IP。
 
 ## 9. 前端资源、背景图与头像
 
