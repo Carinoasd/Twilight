@@ -531,3 +531,28 @@ func TestTelegramPanelNonAdminIsThrottled(t *testing.T) {
 		t.Fatalf("non-admin interactions flooded the group with %d messages: %v", len(sent), tg.sentTexts())
 	}
 }
+
+// 花名册只记录配置里的群；陌生群的发言与成员事件都不入库。
+func TestTelegramRosterOnlyRecordsConfiguredChats(t *testing.T) {
+	app := newTestApp(t)
+	newRecordingTelegramServer(t, app)
+	app.cfg().TelegramGroupIDs = []string{"-1001", "@namedgroup"}
+	app.observeTelegramRoster(tgTextUpdate(-1001, 7001, "hi"))
+	named := tgTextUpdate(-1002, 7002, "hi")
+	named.Message.Chat.Username = "NamedGroup"
+	app.observeTelegramRoster(named)
+	app.observeTelegramRoster(tgTextUpdate(-9999, 7003, "spam"))
+	app.observeTelegramRoster(&telegramUpdate{ChatMember: &telegramChatMemberUpdate{
+		Chat:          telegramChat{ID: -9999, Type: "supergroup"},
+		NewChatMember: telegramChatMember{Status: "member", User: telegramUser{ID: 7004}},
+	}})
+	for chat, want := range map[string]int{"-1001": 1, "-1002": 1, "-9999": 0} {
+		rows, err := app.store().TelegramRoster(chat, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != want {
+			t.Fatalf("roster %s rows=%d want %d", chat, len(rows), want)
+		}
+	}
+}

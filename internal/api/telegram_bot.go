@@ -354,7 +354,7 @@ func (a *App) observeTelegramRoster(update *telegramUpdate) {
 		fromID := message.From.ID
 		// 私聊 + 群聊都顺手刷新已绑定用户的 Telegram 用户名（无额外 API 调用）。
 		a.refreshTelegramUsername(fromID, message.From.Username)
-		if chatID != 0 && fromID > 0 && chatID != fromID {
+		if chatID != 0 && fromID > 0 && chatID != fromID && a.telegramRosterChatConfigured(message.Chat) {
 			_ = a.store().UpsertTelegramRoster(fmt.Sprint(chatID), fromID, "member", message.From.IsBot)
 		}
 		return
@@ -373,11 +373,42 @@ func (a *App) observeTelegramRoster(update *telegramUpdate) {
 		return
 	}
 	a.refreshTelegramUsername(user.ID, user.Username)
+	if !a.telegramRosterChatConfigured(event.Chat) {
+		return
+	}
 	if status == "left" || status == "kicked" {
 		_ = a.store().MarkTelegramRosterLeft(fmt.Sprint(chatID), user.ID, status)
 		return
 	}
 	_ = a.store().UpsertTelegramRoster(fmt.Sprint(chatID), user.ID, firstNonEmpty(status, "member"), user.IsBot)
+}
+
+// telegramRosterChatConfigured 修复：花名册只记录配置里的群组/频道。
+// 原先 Bot 所在的任何群（包括别人把 Bot 拉进去的群）都会写进
+// twilight_telegram_roster，可被灌号让表无上限增长。配置项可以是数字 ID
+// 或 @用户名，两种都认。
+func (a *App) telegramRosterChatConfigured(chat telegramChat) bool {
+	if chat.ID == 0 {
+		return false
+	}
+	id := strconv.FormatInt(chat.ID, 10)
+	username := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(chat.Username), "@"))
+	cfg := a.cfg()
+	for _, list := range [][]string{cfg.TelegramGroupIDs, cfg.TelegramChannelIDs} {
+		for _, raw := range list {
+			value := strings.TrimSpace(raw)
+			if value == "" {
+				continue
+			}
+			if value == id {
+				return true
+			}
+			if username != "" && strings.HasPrefix(value, "@") && strings.EqualFold(strings.TrimPrefix(value, "@"), username) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // refreshTelegramUsername 在收到任意来自已绑定用户的更新时被动刷新其存储的
