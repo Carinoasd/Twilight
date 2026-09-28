@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -270,9 +271,29 @@ func (a *App) writeAuditEntry(entry store.AuditLog) {
 		limit = 10000
 	}
 	if err := a.store().AddAuditLog(entry, limit); err != nil {
-		// Do not recurse into runtime logging with the full detail payload. The
-		// persistence error is already sanitized by the shared text redactor.
-		fmt.Printf("audit log persistence failed: %s\n", redactSensitiveText(err.Error()))
+		// 审计写入失败不能静默吞掉：走 zap 运行日志并累计计数，计数经
+		// /system/stats 与数据库健康检查暴露。日志里只放 action 等元数据，不放 detail。
+		auditWriteFailures.Add(1)
+		auditWriteLastFailureAt.Store(time.Now().Unix())
+		zap.L().Error("audit log persistence failed",
+			zap.String("action", entry.Action),
+			zap.String("category", entry.Category),
+			zap.String("source", entry.Source),
+			zap.String("error", redactSensitiveText(err.Error())))
+	}
+}
+
+// 审计写入失败计数（进程级）。多实例部署时各实例各自计数。
+var (
+	auditWriteFailures      atomic.Int64
+	auditWriteLastFailureAt atomic.Int64
+)
+
+// auditWriteFailureStats 返回审计写入失败的累计次数与最近一次失败时间（unix 秒，0 表示从未失败）。
+func auditWriteFailureStats() map[string]any {
+	return map[string]any{
+		"failures":        auditWriteFailures.Load(),
+		"last_failure_at": auditWriteLastFailureAt.Load(),
 	}
 }
 

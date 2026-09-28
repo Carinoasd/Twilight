@@ -1726,6 +1726,8 @@ func (a *App) systemStatsData() map[string]any {
 		},
 		"routes": len(a.routes),
 		"uptime": int64(time.Since(runtimeStartedAt).Seconds()),
+		// 审计写入失败计数，便于发现操作日志静默丢失。
+		"audit_log": auditWriteFailureStats(),
 	}
 }
 
@@ -1752,6 +1754,7 @@ func (a *App) databaseHealth(parent context.Context) map[string]any {
 		"storage_warning":   a.databaseMismatchWarning(),
 		"state_read_ok":     true,
 		"user_count":        userCount,
+		"audit_log":         auditWriteFailureStats(),
 	}
 	if storageMismatch {
 		result["status"] = "configuration_mismatch"

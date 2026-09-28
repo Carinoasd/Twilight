@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/prejudice-studio/twilight/internal/store"
@@ -48,4 +49,33 @@ func TestAuditLogMaintenanceRequiresConfirmAndLeavesProtectedRecord(t *testing.T
 
 func storeAuditQueryAction(action string) store.AuditLogQuery {
 	return store.AuditLogQuery{Action: action, Limit: 10}
+}
+
+// 审计写入失败要计数并能在 /api/v2/admin/stats 看到，而不是只 fmt.Printf。
+func TestAuditWriteFailureIsCountedAndExposedInStats(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().AuditLogEnabled = true
+	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	db := app.store().DB()
+	if _, err := db.Exec(`ALTER TABLE twilight_audit_logs RENAME TO twilight_audit_logs_broken`); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			_, _ = db.Exec(`ALTER TABLE twilight_audit_logs_broken RENAME TO twilight_audit_logs`)
+		}
+	}
+	t.Cleanup(restore)
+	before := auditWriteFailures.Load()
+	app.auditSystem("scheduler", "sample_action", 0, nil)
+	restore()
+	if got := auditWriteFailures.Load(); got != before+1 {
+		t.Fatalf("audit failure counter=%d, want %d", got, before+1)
+	}
+	rr := doJSON(app, http.MethodGet, "/api/v2/admin/stats", ``, admin)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"audit_log":{"failures":`) {
+		t.Fatalf("stats should expose audit_log failures, status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }
