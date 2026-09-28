@@ -4948,6 +4948,42 @@ func (s *Store) RegCode(code string) (RegCode, bool) {
 	return r, ok
 }
 
+// UpdateRegCode 在 store 写锁内读取注册码的最新值并交给 fn 做字段级修改。
+// 管理员编辑 / 清理使用记录原先在锁外读快照、改字段后 UpsertRegCode 整笔覆写：
+// 其间若有用户成功兑换，UseCount++ 与 UsedByUIDs 会被旧值覆盖（次数倒退、
+// per-identity 记录丢失），码在其间被删除还会被复活。fn 基于最新状态执行，
+// 版本冲突重放时也会重新读取；码不存在返回 ErrNotFound。
+func (s *Store) UpdateRegCode(code string, fn func(*RegCode) error) (RegCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updated RegCode
+	err := s.mutateAndSaveLocked(func() error {
+		rc, ok := s.state.RegCodes[code]
+		if !ok {
+			return ErrNotFound
+		}
+		if len(rc.UsedByUIDs) > 0 {
+			rc.UsedByUIDs = append([]int64(nil), rc.UsedByUIDs...)
+		}
+		if len(rc.UsedByTelegramIDs) > 0 {
+			rc.UsedByTelegramIDs = append([]int64(nil), rc.UsedByTelegramIDs...)
+		}
+		if fn != nil {
+			if err := fn(&rc); err != nil {
+				return err
+			}
+		}
+		rc.Code = code
+		s.state.RegCodes[code] = rc
+		updated = rc
+		return nil
+	})
+	if err != nil {
+		return RegCode{}, err
+	}
+	return updated, nil
+}
+
 func (s *Store) UpsertRegCode(code RegCode) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -195,32 +196,29 @@ func (a *App) handleUpdateRegcode(w http.ResponseWriter, r *http.Request, params
 	if a.refreshStoreForRequest(w, r) {
 		return
 	}
-	reg, okReg := a.store().RegCode(params["code"])
-	if !okReg {
+	code := params["code"]
+	if _, okReg := a.store().RegCode(code); !okReg {
 		failWithCode(w, http.StatusNotFound, ErrRegcodeNotFound, "注册码不存在")
 		return
 	}
 	payload := decodeMap(r)
 	// 部分更新：只改动 payload 中显式出现的字段，缺省字段保持原值。
 	// 支持备注、停用/启用、有效期（小时）、授予天数、使用次数上限。
-	if _, has := payload["note"]; has {
-		reg.Note = truncateString(stringValue(payload, "note"), 120)
+	// 先在锁外完成全部入参校验，再交给 store.UpdateRegCode 在写锁内基于最新值
+	// 只改这些字段——不能用锁外快照整笔覆写，否则会吞掉并发兑换的 UseCount /
+	// UsedByUIDs，或把刚被删除的码复活。
+	_, hasNote := payload["note"]
+	note := truncateString(stringValue(payload, "note"), 120)
+	_, hasActive := payload["active"]
+	// 无法解析的数值沿用旧行为"保持原值"：用哨兵默认值识别后视为未提供。
+	const keepValue = math.MinInt32
+	_, hasValidity := payload["validity_time"]
+	var validity int64
+	if hasValidity && intValue(payload, "validity_time", keepValue) == keepValue {
+		hasValidity = false
 	}
-	if _, has := payload["active"]; has {
-		was := reg.Active
-		reg.Active = boolValue(payload, "active", reg.Active)
-		now := time.Now().Unix()
-		if was && !reg.Active {
-			reg.PauseStart = now
-		} else if !was && reg.Active {
-			if reg.PauseStart > 0 {
-				reg.PausedSeconds += now - reg.PauseStart
-			}
-			reg.PauseStart = 0
-		}
-	}
-	if _, has := payload["validity_time"]; has {
-		validity := int64(intValue(payload, "validity_time", int(reg.ValidityTime)))
+	if hasValidity {
+		validity = int64(intValue(payload, "validity_time", keepValue))
 		if validity == 0 {
 			validity = -1
 		}
@@ -232,19 +230,27 @@ func (a *App) handleUpdateRegcode(w http.ResponseWriter, r *http.Request, params
 			failWithCode(w, http.StatusBadRequest, ErrBadRequest, "卡码有效期不能超过 876000 小时（约百年）")
 			return
 		}
-		reg.ValidityTime = validity
 	}
-	if _, has := payload["days"]; has {
-		days := normalizeRegCodeDays(intValue(payload, "days", reg.Days))
+	_, hasDays := payload["days"]
+	var days int
+	if hasDays && intValue(payload, "days", keepValue) == keepValue {
+		hasDays = false
+	}
+	if hasDays {
+		days = normalizeRegCodeDays(intValue(payload, "days", keepValue))
 		// 与创建口径一致：正天数封顶 36500，避免静默发放永久权益。
 		if days > 36500 {
 			failWithCode(w, http.StatusBadRequest, ErrBadRequest, "days 不能超过 36500")
 			return
 		}
-		reg.Days = days
 	}
-	if _, has := payload["use_count_limit"]; has {
-		useLimit := intValue(payload, "use_count_limit", reg.UseCountLimit)
+	_, hasUseLimit := payload["use_count_limit"]
+	var useLimit int
+	if hasUseLimit && intValue(payload, "use_count_limit", keepValue) == keepValue {
+		hasUseLimit = false
+	}
+	if hasUseLimit {
+		useLimit = intValue(payload, "use_count_limit", keepValue)
 		if useLimit == 0 {
 			useLimit = 1
 		}
@@ -252,25 +258,60 @@ func (a *App) handleUpdateRegcode(w http.ResponseWriter, r *http.Request, params
 			failWithCode(w, http.StatusBadRequest, ErrBadRequest, "使用次数上限只能为 -1 或正整数")
 			return
 		}
-		reg.UseCountLimit = useLimit
-		// 抬高次数上限后，重新激活「用满自动停用」的码。consumeRegCodeLocked 用满时
-		// 置 Active=false 但不设 PauseStart；管理员显式暂停才会设 PauseStart>0。故仅当
-		//   ① 本次请求未显式改 active（尊重管理员显式意图）
-		//   ② 当前 !Active 且 PauseStart==0（是「用满」而非「被暂停」）
-		//   ③ 新上限仍有余量（-1 无限次，或 UseCount < 新上限）
-		// 三者同时满足才回激活。否则抬限额静默无效——consumableRegCodeLocked 首行
-		// !r.Active 直接判 ErrNotFound，用户侧仍报「无效/已过期」，管理员困惑。
-		if _, activeExplicit := payload["active"]; !activeExplicit && !reg.Active && reg.PauseStart == 0 {
-			if useLimit == -1 || int(reg.UseCount) < useLimit {
-				reg.Active = true
+	}
+	var before store.RegCode
+	reg, err := a.store().UpdateRegCode(code, func(reg *store.RegCode) error {
+		before = *reg
+		if hasNote {
+			reg.Note = note
+		}
+		if hasActive {
+			was := reg.Active
+			reg.Active = boolValue(payload, "active", reg.Active)
+			now := time.Now().Unix()
+			if was && !reg.Active {
+				reg.PauseStart = now
+			} else if !was && reg.Active {
+				if reg.PauseStart > 0 {
+					reg.PausedSeconds += now - reg.PauseStart
+				}
+				reg.PauseStart = 0
 			}
 		}
+		if hasValidity {
+			reg.ValidityTime = validity
+		}
+		if hasDays {
+			reg.Days = days
+		}
+		if hasUseLimit {
+			reg.UseCountLimit = useLimit
+			// 抬高次数上限后，重新激活「用满自动停用」的码。consumeRegCodeLocked 用满时
+			// 置 Active=false 但不设 PauseStart；管理员显式暂停才会设 PauseStart>0。故仅当
+			//   ① 本次请求未显式改 active（尊重管理员显式意图）
+			//   ② 当前 !Active 且 PauseStart==0（是「用满」而非「被暂停」）
+			//   ③ 新上限仍有余量（-1 无限次，或 UseCount < 新上限）
+			// 三者同时满足才回激活。否则抬限额静默无效——consumableRegCodeLocked 首行
+			// !r.Active 直接判 ErrNotFound，用户侧仍报「无效/已过期」，管理员困惑。
+			if !hasActive && !reg.Active && reg.PauseStart == 0 {
+				if useLimit == -1 || reg.UseCount < useLimit {
+					reg.Active = true
+				}
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		failWithCode(w, http.StatusNotFound, ErrRegcodeNotFound, "注册码不存在")
+		return
 	}
-	if err := a.store().UpsertRegCode(reg); statusFromError(w, err) {
+	if statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "update_regcode", "admin", 0, map[string]any{
-		"code": reg.Code,
+		"code_hint": regcodeAuditHint(reg.Code),
+		"before":    regcodeAuditFields(before),
+		"after":     regcodeAuditFields(reg),
 	})
 	ok(w, "注册码已更新", a.regcodeDTO(reg))
 }
@@ -459,29 +500,35 @@ func (a *App) handleClearRegcodeUsage(w http.ResponseWriter, r *http.Request, pa
 		failWithCode(w, http.StatusBadRequest, ErrRegcodeBatchConfirm, "需要确认短语 confirm="+confirmClearRegcodeUsage)
 		return
 	}
-	reg, okReg := a.store().RegCode(params["code"])
-	if !okReg {
+	// 在 store 写锁内基于最新值清零，避免锁外快照整笔覆写把刚被删除的码复活。
+	var oldUseCount int
+	var oldUsedByUIDs, oldUsedByTelegramIDs []int64
+	reg, err := a.store().UpdateRegCode(params["code"], func(reg *store.RegCode) error {
+		oldUseCount = reg.UseCount
+		oldUsedByUIDs = regcodeUsedByUIDs(*reg)
+		oldUsedByTelegramIDs = reg.UsedByTelegramIDs
+		reg.UseCount = 0
+		reg.UsedBy = 0
+		reg.UsedByUIDs = nil
+		reg.UsedByTelegramIDs = nil
+		reg.Active = true
+		now := time.Now().Unix()
+		if reg.PauseStart > 0 {
+			reg.PausedSeconds += now - reg.PauseStart
+		}
+		reg.PauseStart = 0
+		return nil
+	})
+	if errors.Is(err, store.ErrNotFound) {
 		failWithCode(w, http.StatusNotFound, ErrRegcodeNotFound, "注册码不存在")
 		return
 	}
-	oldUseCount := reg.UseCount
-	oldUsedByUIDs := regcodeUsedByUIDs(reg)
-	oldUsedByTelegramIDs := reg.UsedByTelegramIDs
-	reg.UseCount = 0
-	reg.UsedBy = 0
-	reg.UsedByUIDs = nil
-	reg.UsedByTelegramIDs = nil
-	reg.Active = true
-	now := time.Now().Unix()
-	if reg.PauseStart > 0 {
-		reg.PausedSeconds += now - reg.PauseStart
-	}
-	reg.PauseStart = 0
-	if err := a.store().UpsertRegCode(reg); statusFromError(w, err) {
+	if statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "clear_regcode_usage", "admin", 0, map[string]any{
-		"code": reg.Code, "cleared_use_count": oldUseCount,
+		"code_hint": regcodeAuditHint(reg.Code), "cleared_use_count": oldUseCount,
+		"cleared_uids": auditUIDSample(oldUsedByUIDs), "cleared_telegram_count": len(oldUsedByTelegramIDs),
 	})
 	ok(w, "使用记录已清理", map[string]any{
 		"code":                     reg.Code,

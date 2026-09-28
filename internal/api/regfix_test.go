@@ -97,3 +97,68 @@ func TestRegisterEmbyClampsInviteGrantToInviterExpiry(t *testing.T) {
 		t.Fatalf("activation expiry %d exceeds inviter expiry %d", updated.ExpiredAt, inviterExpiry)
 	}
 }
+
+// staleRegcodeAdminRequest 构造一个"本请求已刷新过 store"的管理员请求，
+// 用来稳定复现"handler 读到的是旧状态、其间另一进程已写入"的竞态窗口。
+func staleRegcodeAdminRequest(method, path, body string, admin store.User) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	ctx := context.WithValue(req.Context(), principalKey, principal{User: admin})
+	ctx = context.WithValue(ctx, requestStoreRefreshKey{}, &requestStoreRefreshState{completed: true})
+	return req.WithContext(ctx)
+}
+
+// 管理员编辑卡码不得用旧快照覆盖期间发生的兑换（UseCount / UsedByUIDs）。
+func TestUpdateRegcodeDoesNotOverwriteConcurrentConsumption(t *testing.T) {
+	app := newTestApp(t)
+	admin, err := app.store().CreateUser(store.User{Username: "rc-admin", Role: store.RoleAdmin, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := app.store().CreateUser(store.User{Username: "rc-user", Role: store.RoleNormal, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store().UpsertRegCode(store.RegCode{Code: "RACE-EDIT-0001", Type: 2, Days: 30, UseCountLimit: 5, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	other := reopenTestStore(t)
+	if _, err := other.ConsumeRegCode("RACE-EDIT-0001", user.UID, 0); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	app.handleUpdateRegcode(rr, staleRegcodeAdminRequest(http.MethodPut, "/api/v1/admin/regcodes/RACE-EDIT-0001", `{"note":"edited"}`, admin), Params{"code": "RACE-EDIT-0001"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	got, _ := app.store().RegCode("RACE-EDIT-0001")
+	if got.Note != "edited" {
+		t.Fatalf("note not updated: %+v", got)
+	}
+	if got.UseCount != 1 || len(got.UsedByUIDs) != 1 || got.UsedByUIDs[0] != user.UID {
+		t.Fatalf("concurrent consumption was overwritten by stale snapshot: %+v", got)
+	}
+}
+
+// 清理使用记录不得把期间已被删除的码复活。
+func TestClearRegcodeUsageDoesNotResurrectDeletedCode(t *testing.T) {
+	app := newTestApp(t)
+	admin, err := app.store().CreateUser(store.User{Username: "rc-admin2", Role: store.RoleAdmin, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store().UpsertRegCode(store.RegCode{Code: "RACE-CLEAR-0001", Type: 2, Days: 30, UseCountLimit: 1, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	other := reopenTestStore(t)
+	if err := other.DeleteRegCode("RACE-CLEAR-0001"); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	app.handleClearRegcodeUsage(rr, staleRegcodeAdminRequest(http.MethodPost, "/api/v1/admin/regcodes/RACE-CLEAR-0001/clear-usage", `{"confirm":"`+confirmClearRegcodeUsage+`"}`, admin), Params{"code": "RACE-CLEAR-0001"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("clear usage on deleted code should be 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, ok := app.store().RegCode("RACE-CLEAR-0001"); ok {
+		t.Fatal("deleted regcode was resurrected")
+	}
+}
