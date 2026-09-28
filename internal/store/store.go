@@ -3877,16 +3877,17 @@ func (s *Store) CreateMediaRequestWithOptions(r MediaRequest, opts MediaRequestC
 		if r.Revision <= 0 {
 			r.Revision = 1
 		}
-		s.state.MediaRequests[r.ID] = r
+		// 存入副本：调用方传入的 MediaInfo map 不能与 s.state 共用。
+		s.state.MediaRequests[r.ID] = cloneMediaRequest(r)
 		return nil
 	})
 	if conflictHit {
-		return conflict, ErrConflict
+		return cloneMediaRequest(conflict), ErrConflict
 	}
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return r, nil
+	return cloneMediaRequest(r), nil
 }
 
 func mediaRequestInventoryIssue(r MediaRequest) bool {
@@ -3938,7 +3939,7 @@ func (s *Store) MediaRequest(id int64) (MediaRequest, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.state.MediaRequests[id]
-	return r, ok
+	return cloneMediaRequest(r), ok // MediaInfo map 不与 s.state 共用
 }
 
 func (s *Store) ListMediaRequests(uid int64, all bool) []MediaRequest {
@@ -3947,7 +3948,7 @@ func (s *Store) ListMediaRequests(uid int64, all bool) []MediaRequest {
 	out := make([]MediaRequest, 0)
 	for _, r := range s.state.MediaRequests {
 		if all || r.UID == uid {
-			out = append(out, r)
+			out = append(out, cloneMediaRequest(r))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
@@ -3971,7 +3972,7 @@ func (s *Store) FindMediaRequestByKey(key string) (MediaRequest, bool) {
 	defer s.mu.RUnlock()
 	for _, r := range s.state.MediaRequests {
 		if r.RequireKey == key {
-			return r, true
+			return cloneMediaRequest(r), true
 		}
 	}
 	return MediaRequest{}, false
@@ -3988,6 +3989,8 @@ func (s *Store) UpdateMediaRequest(id int64, fn func(*MediaRequest) error) (Medi
 		if !ok {
 			return ErrNotFound
 		}
+		// fn 可能写 MediaInfo 的键：先 clone，旧 map 可能正被锁外读者持有。
+		r = cloneMediaRequest(r)
 		if err := fn(&r); err != nil {
 			return err
 		}
@@ -4000,7 +4003,7 @@ func (s *Store) UpdateMediaRequest(id int64, fn func(*MediaRequest) error) (Medi
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return updated, nil
+	return cloneMediaRequest(updated), nil
 }
 
 func (s *Store) DeleteMediaRequest(id int64) error {
@@ -4029,7 +4032,7 @@ func (s *Store) DeleteMediaRequestIfRevision(id int64, expectedRevision *int64) 
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return deleted, nil
+	return cloneMediaRequest(deleted), nil
 }
 
 func (s *Store) UpsertBindCode(code BindCode) error {
@@ -4960,7 +4963,9 @@ func (s *Store) RegCode(code string) (RegCode, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.state.RegCodes[code]
-	return r, ok
+	// 深拷贝 UsedByUIDs/UsedByTelegramIDs：删除用户等写路径会修剪这些 slice，
+	// 锁外的调用方不能与 s.state 共用底层数组。
+	return cloneRegCode(r), ok
 }
 
 func (s *Store) UpsertRegCode(code RegCode) error {
@@ -5176,7 +5181,7 @@ func (s *Store) ListRegCodes() []RegCode {
 	defer s.mu.RUnlock()
 	out := make([]RegCode, 0, len(s.state.RegCodes))
 	for _, c := range s.state.RegCodes {
-		out = append(out, c)
+		out = append(out, cloneRegCode(c)) // 不与 s.state 共用 UsedBy* 底层数组
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out

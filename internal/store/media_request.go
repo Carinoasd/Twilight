@@ -263,7 +263,9 @@ func (s *Store) ListMediaRequestsPageWithOptions(opts MediaRequestListOptions) M
 		end = len(top)
 	}
 	requests := make([]MediaRequest, end-offset)
-	copy(requests, top[offset:end])
+	for i, r := range top[offset:end] {
+		requests[i] = cloneMediaRequest(r) // MediaInfo map 不与 s.state 共用
+	}
 	users := make(map[int64]User, len(requests))
 	for _, request := range requests {
 		if user, ok := s.state.Users[request.UID]; ok {
@@ -356,6 +358,11 @@ func (s *Store) ListMediaRequestGroupsPageWithOptions(opts MediaRequestListOptio
 		end = total
 	}
 	selected := groups[offset:end]
+	for _, group := range selected {
+		for i := range group.Requests {
+			group.Requests[i] = cloneMediaRequest(group.Requests[i]) // MediaInfo map 不与 s.state 共用
+		}
+	}
 	users := make(map[int64]User)
 	for _, group := range selected {
 		for _, request := range group.Requests {
@@ -437,7 +444,7 @@ func (s *Store) UpdateMediaRequestStatusIfRevision(id int64, rawStatus string, a
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return updated, nil
+	return cloneMediaRequest(updated), nil
 }
 
 func (s *Store) UpdateMediaRequestStatusByKey(key, rawStatus, adminNote string, replaceNote bool, expectedRevision *int64) (MediaRequest, error) {
@@ -466,7 +473,7 @@ func (s *Store) UpdateMediaRequestStatusByKey(key, rawStatus, adminNote string, 
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return updated, nil
+	return cloneMediaRequest(updated), nil
 }
 
 // UpdateMediaRequestsStatusByKey applies one status transition to every
@@ -527,6 +534,9 @@ func (s *Store) UpdateMediaRequestsStatusByKey(items []MediaRequestBatchItem, ra
 	if err != nil {
 		return nil, err
 	}
+	for i := range updated {
+		updated[i] = cloneMediaRequest(updated[i])
+	}
 	return updated, nil
 }
 
@@ -572,5 +582,5 @@ func (s *Store) DeleteMediaRequestByKey(key string, expectedRevision *int64) (Me
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return deleted, nil
+	return cloneMediaRequest(deleted), nil
 }

@@ -53,7 +53,7 @@ func (s *Store) AddSchedulerRunReturning(run SchedulerRun) (SchedulerRun, error)
 	if err != nil {
 		return SchedulerRun{}, err
 	}
-	return run, nil
+	return cloneSchedulerRun(run), nil
 }
 
 // TryStartSchedulerRun persists a running row only when the same job has no
@@ -112,7 +112,7 @@ func (s *Store) TryStartSchedulerRun(run SchedulerRun, staleBeforeUnix, nowUnix 
 	if err != nil || !started {
 		return SchedulerRun{}, false, err
 	}
-	return run, true, nil
+	return cloneSchedulerRun(run), true, nil
 }
 
 func (s *Store) UpdateSchedulerRun(id int64, fn func(*SchedulerRun) error) (SchedulerRun, error) {
@@ -129,7 +129,8 @@ func (s *Store) UpdateSchedulerRun(id int64, fn func(*SchedulerRun) error) (Sche
 			if s.state.SchedulerRuns[i].ID != id {
 				continue
 			}
-			run := s.state.SchedulerRuns[i]
+			// fn 可能写 Summary/Params 的键：先深拷贝，旧 map 可能正被锁外读者持有。
+			run := cloneSchedulerRun(s.state.SchedulerRuns[i])
 			if err := fn(&run); err != nil {
 				return err
 			}
@@ -143,7 +144,7 @@ func (s *Store) UpdateSchedulerRun(id int64, fn func(*SchedulerRun) error) (Sche
 	if err != nil {
 		return SchedulerRun{}, err
 	}
-	return result, nil
+	return cloneSchedulerRun(result), nil
 }
 
 func (s *Store) SchedulerRuns(jobID string, limit int) []SchedulerRun {
@@ -155,7 +156,8 @@ func (s *Store) SchedulerRuns(jobID string, limit int) []SchedulerRun {
 	out := make([]SchedulerRun, 0, limit)
 	for _, run := range s.state.SchedulerRuns {
 		if jobID == "" || run.JobID == jobID {
-			out = append(out, run)
+			// 深拷贝 Params/Summary/Logs：锁外编码不能与写者共用 map。
+			out = append(out, cloneSchedulerRun(run))
 			if len(out) >= limit {
 				break
 			}
@@ -175,6 +177,7 @@ func (s *Store) SchedulerRunSnapshot(jobID string, limit int) SchedulerRunSnapsh
 		if jobID != "" && run.JobID != jobID {
 			continue
 		}
+		run = cloneSchedulerRun(run) // 回传副本不与 s.state 共用 map/slice
 		if len(snapshot.Runs) < limit {
 			snapshot.Runs = append(snapshot.Runs, run)
 		}
@@ -222,6 +225,7 @@ func schedulerRunSnapshots(runs []SchedulerRun, jobIDs []string, limit int) map[
 		if !needed[run.JobID] {
 			continue
 		}
+		run = cloneSchedulerRun(run) // 回传副本不与 s.state 共用 map/slice
 		snap := result[run.JobID]
 		if len(snap.Runs) < limit {
 			snap.Runs = append(snap.Runs, run)
@@ -350,7 +354,7 @@ func (s *Store) LastSchedulerRunByType(jobID, runType string) (SchedulerRun, boo
 			found = true
 		}
 	}
-	return best, found
+	return cloneSchedulerRun(best), found
 }
 
 func (s *Store) SetSchedulerSchedule(jobID string, spec map[string]any, custom bool) (SchedulerSchedule, error) {
@@ -414,11 +418,15 @@ func markSchedulerRunInterrupted(run *SchedulerRun, nowUnix int64) {
 	run.Error = "job interrupted before completion"
 	run.FinishedAt = nowUnix
 	run.EndedAt = nowUnix
-	if run.Summary == nil {
-		run.Summary = map[string]any{}
+	// 先 clone 再写：旧 Summary map 可能已交给锁外读者（SchedulerRuns 等的副本、
+	// 未走 clone 的 legacy 读路径），就地写键会触发 concurrent map read/write fatal。
+	summary := cloneSchedulerMap(run.Summary)
+	if summary == nil {
+		summary = map[string]any{}
 	}
-	run.Summary["interrupted"] = true
-	run.Summary["success"] = false
+	summary["interrupted"] = true
+	summary["success"] = false
+	run.Summary = summary
 }
 
 func (s *Store) SchedulerSchedule(jobID string) (SchedulerSchedule, bool) {

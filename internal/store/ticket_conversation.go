@@ -136,6 +136,9 @@ func (s *Store) AppendTicketMessage(ticketID int64, actor User, content, request
 	if err != nil {
 		return TicketReplyResult{}, err
 	}
+	// 回传的工单副本深拷贝，调用方在锁外使用时不与 s.state 共用底层数组。
+	result.Ticket = cloneTicket(result.Ticket)
+	result.Previous = cloneTicket(result.Previous)
 	return result, nil
 }
 

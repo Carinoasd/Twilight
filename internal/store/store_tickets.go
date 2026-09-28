@@ -134,7 +134,7 @@ func (s *Store) CreateTicket(t Ticket, userOpenLimit, globalOpenLimit int) (Tick
 	if err != nil {
 		return Ticket{}, err
 	}
-	return t, nil
+	return cloneTicket(t), nil
 }
 
 func (s *Store) upsertTicketLocked(t Ticket, now int64) Ticket {
@@ -184,7 +184,7 @@ func (s *Store) ListTickets(filter TicketFilter) []Ticket {
 	out := make([]Ticket, 0)
 	for _, t := range s.state.Tickets {
 		if ticketMatchesFilter(t, filter) {
-			out = append(out, t)
+			out = append(out, cloneTicket(t))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
@@ -234,7 +234,8 @@ func (s *Store) Ticket(id int64) (Ticket, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	t, ok := s.state.Tickets[id]
-	return t, ok
+	// 深拷贝：调用方在锁外编码/修改，不能与 s.state 共用底层数组。
+	return cloneTicket(t), ok
 }
 
 func (s *Store) DeleteTicket(id int64) error {
@@ -320,7 +321,7 @@ func (s *Store) UpdateTicket(ticketID int64, patch TicketUpdate) (Ticket, error)
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 // ReopenTicket 用户重开自己已关闭的工单：把「已关闭 → 待处理」的状态翻转与开单配额复核
@@ -364,7 +365,7 @@ func (s *Store) ReopenTicket(ticketID, uid int64, userOpenLimit, globalOpenLimit
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 func (s *Store) SetTicketNotify(ticketID int64, enabled bool, ownerUID ...int64) (Ticket, error) {
@@ -391,7 +392,7 @@ func (s *Store) SetTicketNotify(ticketID int64, enabled bool, ownerUID ...int64)
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 // AddTicketAttachment 给工单追加一张图片元数据。返回更新后的工单。
@@ -449,7 +450,7 @@ func (s *Store) addTicketAttachment(ticketID int64, att TicketAttachment, actorR
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 // AddTicketReply 向工单追加一条回复。
@@ -478,7 +479,7 @@ func (s *Store) AddTicketReply(ticketID int64, reply TicketReply) (Ticket, error
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 func applyTicketReplyLocked(t *Ticket, reply TicketReply, now int64) {
@@ -536,7 +537,11 @@ func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRol
 		if idx < 0 {
 			return ErrNotFound
 		}
-		t.Attachments = append(t.Attachments[:idx], t.Attachments[idx+1:]...)
+		// 配置新 slice 而不是就地位移：旧的底层数组可能正被锁外的读者（Ticket()
+		// 回传的副本、JSON 编码中）读取，就地 append(x[:i], x[i+1:]...) 会与其 data race。
+		remaining := make([]TicketAttachment, 0, len(t.Attachments)-1)
+		remaining = append(remaining, t.Attachments[:idx]...)
+		t.Attachments = append(remaining, t.Attachments[idx+1:]...)
 		t.UpdatedAt = time.Now().Unix()
 		bumpTicketRevision(&t)
 		s.state.Tickets[ticketID] = t
@@ -546,7 +551,7 @@ func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRol
 	if err != nil {
 		return Ticket{}, err
 	}
-	return out, nil
+	return cloneTicket(out), nil
 }
 
 // ClosedTicketsWithAttachmentsBefore 返回所有已关闭且 ClosedAt 早于 cutoff 的工单，
@@ -557,7 +562,7 @@ func (s *Store) ClosedTicketsWithAttachmentsBefore(cutoff int64) []Ticket {
 	out := make([]Ticket, 0)
 	for _, t := range s.state.Tickets {
 		if NormalizeTicketStatus(t.Status) == TicketStatusClosed && t.ClosedAt > 0 && t.ClosedAt < cutoff && len(t.Attachments) > 0 {
-			out = append(out, t)
+			out = append(out, cloneTicket(t))
 		}
 	}
 	return out

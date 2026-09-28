@@ -153,8 +153,7 @@ WHERE recent <= $2 OR latest_type=1 OR status IN ('queued','running','cancel_req
 		// Legacy records have no lease. This is a read projection only; new
 		// leased work never expires based on its start time.
 		if runs[i].LeaseUntil == 0 && runs[i].Status == "running" && runs[i].StartedAt < time.Now().Unix()-1800 {
-			runs[i].Summary = cloneSchedulerMap(runs[i].Summary)
-			markSchedulerRunInterrupted(&runs[i], time.Now().Unix())
+			markSchedulerRunInterrupted(&runs[i], time.Now().Unix()) // 内部先 clone Summary
 		}
 	}
 	return SchedulerOverview{Runs: schedulerRunSnapshots(runs, jobIDs, limit), Schedules: schedulerSchedules(s.state.SchedulerSchedules, jobIDs)}, nil
