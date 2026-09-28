@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"fmt"
+	"go.uber.org/zap"
 	"math"
 	"regexp"
 	"strconv"
@@ -45,23 +45,23 @@ func (a *App) searchMedia(ctx context.Context, query, source, mediaType string, 
 		tmdb := <-tmdbResult
 		bangumi := <-bangumiResult
 		if tmdb.err != nil {
-			sourceErrors["tmdb"] = fmt.Sprintf("TMDB 搜索失败：%v", tmdb.err)
+			sourceErrors["tmdb"] = mediaSearchFailure("tmdb", tmdb.err)
 		}
 		if bangumi.err != nil {
-			sourceErrors["bangumi"] = fmt.Sprintf("Bangumi 搜索失败：%v", bangumi.err)
+			sourceErrors["bangumi"] = mediaSearchFailure("bangumi", bangumi.err)
 		}
 		results = interleaveMediaResults(tmdb.items, bangumi.items, limit)
 	} else if source == "bangumi" {
 		if items, err := a.searchBangumi(ctx, query, limit); err == nil {
 			results = append(results, items...)
 		} else {
-			sourceErrors["bangumi"] = fmt.Sprintf("Bangumi 搜索失败：%v", err)
+			sourceErrors["bangumi"] = mediaSearchFailure("bangumi", err)
 		}
 	} else {
 		if items, err := a.searchTMDB(ctx, query, mediaType, limit); err == nil {
 			results = append(results, items...)
 		} else {
-			sourceErrors["tmdb"] = fmt.Sprintf("TMDB 搜索失败：%v", err)
+			sourceErrors["tmdb"] = mediaSearchFailure("tmdb", err)
 		}
 	}
 	if len(sourceErrors) == 0 {
@@ -259,4 +259,15 @@ func mediaResultFromFields(source, id, title, mediaType, poster string) map[stri
 		sourceURL = "https://www.themoviedb.org/" + firstNonEmpty(mediaType, "movie") + "/" + id
 	}
 	return map[string]any{"id": parsedID, "title": title, "original_title": title, "media_type": mediaType, "overview": "", "release_date": "", "year": nil, "poster": poster, "poster_url": poster, "vote_average": 0, "rating": 0, "source": source, "source_url": sourceURL, "extra": map[string]any{}}
+}
+
+// mediaSearchFailure 只把固定文案交给前端。上游错误（尤其是 net/http 的 *url.Error）
+// 会带着完整请求 URL，而 TMDB 的 api_key 就在 query 里；原样回传等于把站点的
+// TMDB 密钥发给任何登录用户。细节脱敏后只写服务端日志。
+func mediaSearchFailure(source string, err error) string {
+	zap.L().Warn("media search source failed", zap.String("source", source), zap.String("error", redactSensitiveText(err.Error())))
+	if source == "tmdb" {
+		return "TMDB 搜索暂时不可用"
+	}
+	return "Bangumi 搜索暂时不可用"
 }

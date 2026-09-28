@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,5 +57,17 @@ func TestGeneratedPasswordRequiresOldPassword(t *testing.T) {
 	rr := doJSONWithHeaders(app, http.MethodPut, "/api/v2/settings/password/generate", `{"old_password":"User123456"}`, cookies, headers)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "new_password") {
 		t.Fatalf("with old password: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TMDB 失败时回给前端的只能是固定文案，不能带出含 api_key 的上游 URL。
+func TestMediaSearchFailureHidesUpstreamDetail(t *testing.T) {
+	err := errors.New(`Get "https://api.themoviedb.org/3/search/multi?api_key=SECRETKEY123&query=x": dial tcp: i/o timeout`)
+	got := mediaSearchFailure("tmdb", err)
+	if strings.Contains(got, "SECRETKEY123") || strings.Contains(got, "themoviedb") {
+		t.Fatalf("upstream detail leaked: %q", got)
+	}
+	if strings.Contains(redactSensitiveText(err.Error()), "SECRETKEY123") {
+		t.Fatalf("log redaction does not strip api_key: %q", redactSensitiveText(err.Error()))
 	}
 }
