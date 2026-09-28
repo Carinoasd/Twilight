@@ -402,3 +402,66 @@ func TestTelegramOffsetResetsWhenBotIdentityChangesAcrossRestart(t *testing.T) {
 		t.Fatalf("same bot should not reset: offset=%d reset=%v err=%v", offset, reset, err)
 	}
 }
+
+// fakeEmbyPolicyServer 记录对 /Users/{id}/Policy 的写入，GET /Users/{id} 返回一个启用中的用户。
+func fakeEmbyPolicyServer(t *testing.T, app *App) *[]string {
+	t.Helper()
+	var mu sync.Mutex
+	posted := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/Policy"):
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			posted = append(posted, fmt.Sprintf("%s disabled=%v", r.URL.Path, body["IsDisabled"]))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/Users/"):
+			id := strings.TrimPrefix(r.URL.Path, "/Users/")
+			_, _ = fmt.Fprintf(w, `{"Id":%q,"Name":"x","Policy":{"IsDisabled":false}}`, id)
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	app.cfg().EmbyURL = srv.URL
+	app.cfg().EmbyToken = "token"
+	return &posted
+}
+
+// JS 停用账号要同步关停 Emby；setExpiry 不能把手动封禁的账号解封。
+func TestDeveloperJSDisableSyncsEmbyAndExpiryKeepsBan(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().AuditLogEnabled = true
+	posted := fakeEmbyPolicyServer(t, app)
+	admin := mustCreateTGUser(t, app, store.User{Username: "js-ban-admin", Role: store.RoleAdmin, Active: true, TelegramID: 5301, PasswordHash: "unused"})
+	target := mustCreateTGUser(t, app, store.User{Username: "js-ban-target", Role: store.RoleNormal, Active: true, EmbyID: "emby-js-ban", EmbyUsername: "t", ExpiredAt: time.Now().Add(24 * time.Hour).Unix(), PasswordHash: "unused"})
+
+	future := time.Now().Add(30 * 24 * time.Hour).Unix()
+	code := fmt.Sprintf(`users.disable(%d); const r = users.setExpiry(%d, %d); reply(String(r.ok));`, target.UID, target.UID, future)
+	out, logs, err := app.telegramRunJSCustomCommand(code, telegramCommandCtx{FromID: admin.TelegramID}, true)
+	if err != nil || strings.TrimSpace(out) != "true" {
+		t.Fatalf("script failed: out=%q err=%v logs=%v", out, err, logs)
+	}
+	if len(*posted) == 0 || !strings.Contains((*posted)[0], "/Users/emby-js-ban/Policy disabled=true") {
+		t.Fatalf("users.disable did not disable Emby: %v", *posted)
+	}
+	got, _ := app.store().User(target.UID)
+	if got.Active {
+		t.Fatal("setExpiry re-enabled a manually disabled account")
+	}
+	if got.ExpiredAt != future {
+		t.Fatalf("expiry not written: %d", got.ExpiredAt)
+	}
+
+	// 因到期而停用的账号，续期仍应恢复启用（保持原有续期语义）。
+	expired := mustCreateTGUser(t, app, store.User{Username: "js-expired", Role: store.RoleNormal, Active: false, ExpiredAt: time.Now().Add(-time.Hour).Unix(), PasswordHash: "unused"})
+	code = fmt.Sprintf(`users.setExpiry(%d, %d);`, expired.UID, future)
+	if _, logs, err := app.telegramRunJSCustomCommand(code, telegramCommandCtx{FromID: admin.TelegramID}, true); err != nil {
+		t.Fatalf("renew failed: %v %v", err, logs)
+	}
+	if got, _ := app.store().User(expired.UID); !got.Active {
+		t.Fatal("renewing an expiry-disabled account should re-enable it")
+	}
+}
