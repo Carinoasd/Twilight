@@ -457,6 +457,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		logs = append(logs, fmt.Sprintf("batch: after_uid=%d, %d users, next_after_uid=%d", afterUID, len(users), nextAfterUID))
 		updatedNames, syncedState, stateUnchanged, missing, filledIDs, repairedPlaceholders, conflicts := 0, 0, 0, 0, 0, 0, 0
+		filledUIDs, embyDisabledUIDs := []int64{}, []int64{}
 		nameCandidates := 0
 		for _, u := range users {
 			if err := syncCtx.Err(); err != nil {
@@ -530,6 +531,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				if err == nil {
 					if remoteID != u.EmbyID {
 						filledIDs++
+						filledUIDs = appendLimitedUID(filledUIDs, u.UID)
 						if placeholder {
 							repairedPlaceholders++
 						}
@@ -559,6 +561,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				return err
 			}) == nil {
 				syncedState++
+				embyDisabledUIDs = appendLimitedUID(embyDisabledUIDs, updatedUser.UID)
 				logs = append(logs, "user #"+fmt.Sprintf("%d", updatedUser.UID)+" ("+updatedUser.Username+"): emby disabled by policy")
 			}
 		}
@@ -573,6 +576,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"repaired_placeholders": repairedPlaceholders,
 				"missing":               missing,
 				"conflicts":             conflicts,
+				"filled_uids":           filledUIDs,
+				"emby_disabled_uids":    embyDisabledUIDs,
 			})
 		}
 		return map[string]any{"success": true, "after_uid": afterUID, "next_after_uid": nextAfterUID, "truncated": truncated, "batch_users": len(users), "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
@@ -604,6 +609,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		deleted := 0
 		failed := 0
 		skippedPending := 0
+		deletedUsers := []map[string]any{}
 		for _, u := range a.store().ListUsers() {
 			if err := r.Context().Err(); err != nil {
 				return map[string]any{"success": false, "terminated": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "skipped_pending_emby": skippedPending}, []string{"job terminated"}, err
@@ -641,6 +647,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			} else {
 				cancel()
 				deleted++
+				if len(deletedUsers) < auditUIDListLimit {
+					deletedUsers = append(deletedUsers, map[string]any{"uid": u.UID, "username": u.Username})
+				}
 			}
 		}
 		if deleted > 0 {
@@ -648,6 +657,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"deleted":    deleted,
 				"candidates": candidates,
 				"failed":     failed,
+				"days":       days,
+				"users":      deletedUsers,
 			})
 		}
 		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "days": days, "days_threshold": days, "preserve_tg_bound": preserveTG, "skipped_pending_emby": skippedPending}, []string{fmt.Sprintf("processed %d no-Emby web users", candidates)}, nil
@@ -785,6 +796,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		adminSet := a.telegramAdminSet(r.Context(), chats[0])
 		kicked, skipped, failedCount, notInGroup, scanned := 0, 0, 0, 0, 0
+		kickedTargets := []map[string]any{}
 		logs := []string{}
 		for _, target := range targets {
 			if err := r.Context().Err(); err != nil {
@@ -836,6 +848,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				continue
 			}
 			kicked++
+			if len(kickedTargets) < auditUIDListLimit {
+				kickedTargets = append(kickedTargets, map[string]any{"uid": target.UID, "telegram_id": target.TelegramID, "reason": target.Reason})
+			}
 		}
 		summary["kicked"] = kicked
 		summary["skipped"] = skipped
@@ -849,6 +864,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"skipped": skipped,
 				"failed":  failedCount,
 				"chat_id": chats[0],
+				"targets": kickedTargets,
 			})
 		}
 		return summary, logs, nil
@@ -868,6 +884,13 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "enabled": false}, []string{"system auto update disabled"}, nil
 		}
 		result := applyGitUpdate(r.Context(), a.cfg().SystemUpdateRepoURL, a.cfg().SystemUpdateBranch, a.cfg().SystemUpdateRestartServices, false, false)
+		// 排程触发的系统更新（git pull + 重启）旧实现完全不写稽核。
+		a.auditSystem("scheduler", "system_update", 0, map[string]any{
+			"branch":    a.cfg().SystemUpdateBranch,
+			"success":   boolish(result["success"]),
+			"message":   truncateString(redactSensitiveText(asString(result["message"])), 300),
+			"restarted": a.cfg().SystemUpdateRestartServices,
+		})
 		if !boolish(result["success"]) {
 			return result, nil, fmt.Errorf("%s", asString(result["message"]))
 		}
@@ -878,9 +901,17 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "reason": "auto cleanup disabled"}, nil, nil
 		}
 		logs := []string{}
+		before := a.store().AuditLogCount()
+		detail := map[string]any{"before": before}
+		success := true
 		// 按条数裁剪（保留最新 N 条）
 		if maxEntries := jobParamInt(params, "max_entries", 0); maxEntries > 0 {
-			_ = a.store().PruneAuditLogs(maxEntries)
+			// 旧实现用 `_ =` 吞掉裁剪错误，任务照样显示成功。
+			if err := a.store().PruneAuditLogs(maxEntries); err != nil {
+				success = false
+				logs = append(logs, "failed to enforce max entries: "+redactSensitiveText(err.Error()))
+			}
+			detail["max_entries"] = maxEntries
 			logs = append(logs, fmt.Sprintf("enforced max %d entries (current: %d)", maxEntries, a.store().AuditLogCount()))
 		}
 		// 按天数裁剪
@@ -888,9 +919,17 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			preserveAdmin := jobParamBool(params, "preserve_admin", true)
 			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
 			removed := a.store().PruneAuditLogsByAge(cutoff, preserveAdmin)
+			detail["retention_days"], detail["preserve_admin"], detail["removed_by_age"] = retentionDays, preserveAdmin, removed
 			logs = append(logs, fmt.Sprintf("removed %d entries older than %d days (preserve_admin=%v)", removed, retentionDays, preserveAdmin))
 		}
-		return map[string]any{"success": true, "current": a.store().AuditLogCount()}, logs, nil
+		current := a.store().AuditLogCount()
+		// 裁剪稽核日志本身也要留痕（写在裁剪之后，这一笔一定保留）。
+		if current != before || !success {
+			detail["after"] = current
+			detail["removed"] = before - current
+			a.auditSystem("scheduler", "prune_audit_logs", 0, detail)
+		}
+		return map[string]any{"success": success, "current": a.store().AuditLogCount()}, logs, nil
 	case "cleanup_unlinked_emby":
 		if !a.embyConfigured() {
 			return map[string]any{"success": true, "configured": false}, []string{"Emby not configured"}, nil
@@ -930,6 +969,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			logs = append(logs, "unlinked Emby user: "+id+" ("+name+")")
 		}
 		deleted := 0
+		deletedIDs := []string{}
 		if !dryRun && delete {
 			for _, user := range unlinked {
 				id := embyRemoteID(user)
@@ -941,14 +981,18 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					continue
 				}
 				deleted++
+				if len(deletedIDs) < auditUIDListLimit {
+					deletedIDs = append(deletedIDs, id)
+				}
 				logs = append(logs, "deleted Emby user: "+id)
 			}
 		}
 		if deleted > 0 {
 			a.auditSystem("scheduler", "delete_unlinked_emby", 0, map[string]any{
-				"unlinked": len(unlinked),
-				"deleted":  deleted,
-				"dry_run":  dryRun || !delete,
+				"unlinked":      len(unlinked),
+				"deleted":       deleted,
+				"dry_run":       dryRun || !delete,
+				"emby_user_ids": deletedIDs,
 			})
 		}
 		return map[string]any{"success": true, "unlinked": len(unlinked), "deleted": deleted, "dry_run": dryRun || !delete}, logs, nil
