@@ -302,7 +302,9 @@ func (a *App) confirmTelegramLink(ctx context.Context, token string, telegramID 
 	if !l.Confirmed() {
 		var result telegramLinkResult
 		if missing, err := a.telegramBindRequirementMissing(ctx, telegramID); err != nil {
-			logTelegramLinkFailure("membership", err)
+			// Telegram 协议层已脱敏 Bot Token，这里记录上游原因供管理员定位
+			// （Bot 不在群 / 无权限 / chat_id 配错 / 接口超时）。
+			zap.L().Warn("telegram link membership check failed", zap.Int64("telegram_id", telegramID), zap.Error(err))
 			result = fail(http.StatusBadGateway, ErrTGBindGroupCheckFailed, "Telegram 加群/频道校验失败，请稍后重试")
 		} else if len(missing) > 0 {
 			result = fail(http.StatusForbidden, ErrTGBindGroupMembershipRequired, "绑定前需要先加入指定 Telegram 群组/频道: "+strings.Join(missing, ", "))
@@ -323,7 +325,7 @@ func (a *App) confirmTelegramLink(ctx context.Context, token string, telegramID 
 	case errors.Is(err, store.ErrConflict):
 		return fail(http.StatusConflict, ErrTGBindTargetTaken, "该 Telegram 已被占用或绑定状态已变化")
 	case err != nil:
-		logTelegramLinkFailure("confirm", err)
+		logTelegramLinkFailure("confirm_write", err)
 		return fail(http.StatusServiceUnavailable, ErrBindCodeSaveFailed, "绑定服务暂不可用，请稍后重试")
 	}
 	if bound {
@@ -332,6 +334,9 @@ func (a *App) confirmTelegramLink(ctx context.Context, token string, telegramID 
 	return telegramLinkResult{Success: true, Code: http.StatusOK, Scene: confirmed.Scene, Message: "绑定已确认"}
 }
 
+// telegramLinkResultMessage 把确认结果翻译成给用户看的 Bot 回复。失败时区分
+// “用户自己能处理”（过期 / 未加群 / 频繁）与“需要管理员处理”（Bot 未配置 /
+// 群组校验出错 / 数据库不可用），并附带错误码，方便按运行日志定位。
 func telegramLinkResultMessage(result telegramLinkResult) string {
 	if result.Success {
 		if result.Scene == "register" {
@@ -339,25 +344,33 @@ func telegramLinkResultMessage(result telegramLinkResult) string {
 		}
 		return "Telegram 绑定完成，可以回到网页继续。"
 	}
-	switch result.Code {
-	case http.StatusNotFound:
-		return "绑定链接无效或已过期，请在网页重新获取。"
-	case http.StatusConflict:
-		if result.ErrorCode == ErrTGAlreadyBound {
-			return "当前账号已绑定 Telegram，请先在网页完成换绑审批和解绑。"
-		}
-		return "该 Telegram 已被占用或绑定状态已变化，请回到网页检查。"
-	case http.StatusTooManyRequests:
-		return "操作过于频繁，请稍后再试。"
-	case http.StatusForbidden:
-		return firstNonEmpty(result.Message, "绑定前需要先加入指定 Telegram 群组/频道。")
-	case http.StatusBadGateway, http.StatusServiceUnavailable:
-		return "绑定服务暂时不可用，请稍后重试。"
-	case http.StatusBadRequest:
-		return "绑定链接格式无效，请在网页重新获取后再试。"
+	var text string
+	switch {
+	case result.ErrorCode == ErrTGNotConfigured:
+		text = "Bot 未启用或未配置 Token，无法完成绑定，请联系管理员检查 [Telegram] 配置。"
+	case result.ErrorCode == ErrTGBindGroupCheckFailed:
+		text = "Telegram 群组/频道资格校验失败：Bot 可能不在目标群组/频道，或没有读取成员的权限，也可能是 Telegram 接口暂时异常。请稍后重试；若持续出现请联系管理员核对 force_bind_group / group_ids / channel_ids 配置。"
+	case result.ErrorCode == ErrTGBindGroupMembershipRequired:
+		text = firstNonEmpty(result.Message, "绑定前需要先加入指定 Telegram 群组/频道。") + "\n加入后再次点击网页上的绑定链接即可。"
+	case result.ErrorCode == ErrTGAlreadyBound:
+		text = "当前账号已绑定 Telegram，请先在网页完成换绑审批和解绑。"
+	case result.ErrorCode == ErrTGBindTargetTaken:
+		text = "该 Telegram 已绑定到其他账号，或这条绑定链接已被其他 Telegram 确认 / 已被新链接取代。请回到网页重新获取绑定链接。"
+	case result.ErrorCode == ErrBindCodeSaveFailed:
+		text = "绑定服务暂时不可用（数据库读写失败），请稍后重试；若持续出现请联系管理员查看运行日志中的 telegram link operation failed。"
+	case result.Code == http.StatusNotFound:
+		text = "绑定链接无效或已过期，请在网页重新获取。"
+	case result.Code == http.StatusTooManyRequests:
+		text = "操作过于频繁，请稍后再试。"
+	case result.Code == http.StatusBadRequest:
+		text = "绑定链接格式无效，请在网页重新获取后再试。"
 	default:
-		return "绑定失败，请回到网页检查绑定状态后重试。"
+		text = "绑定失败，请回到网页检查绑定状态后重试。"
 	}
+	if result.ErrorCode != "" {
+		text += "\n\n错误码：" + string(result.ErrorCode)
+	}
+	return text
 }
 
 // telegramConfirmLinkFromChat 是 Bot 消息处理侧的薄封装：确认并回复。
