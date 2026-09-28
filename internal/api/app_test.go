@@ -6624,7 +6624,7 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := app.store().CreateUser(store.User{Username: "child", Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
+	child, err := app.store().CreateUser(store.User{Username: "child", Email: "child-private@example.com", TelegramID: 987654321, Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6640,6 +6640,10 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	app.handleDetachExpiredInviteChild(rr, req, Params{"uid": strconv.FormatInt(child.UID, 10)})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("detach status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	// 上级断开下级时，回应不得带出下级的个人信息。
+	if body := rr.Body.String(); strings.Contains(body, "child-private@example.com") || strings.Contains(body, "987654321") || strings.Contains(body, "registration_code") {
+		t.Fatalf("detach response leaks child's private fields: %s", body)
 	}
 	if _, ok := app.store().ParentOf(child.UID); ok {
 		t.Fatal("child still has invite parent")
