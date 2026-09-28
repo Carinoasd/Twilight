@@ -888,11 +888,12 @@ func (a *App) handleBindEmby(w http.ResponseWriter, r *http.Request, _ Params) {
 			return
 		}
 	}
+	inviteCap := a.inviteActivationExpiryCap(p.User)
 	u, _, err := a.store().BindUserEmbyAtomicWithUpdate(p.User.UID, embyID, firstNonEmpty(asString(embyUser["Name"]), embyUsername), false, func(u *store.User, before store.User) error {
 		if strings.TrimSpace(before.EmbyID) != "" {
 			return store.ErrConflict
 		}
-		a.consumePendingEmbyEntitlementOnBind(u, before)
+		a.consumePendingEmbyEntitlementOnBind(u, before, inviteCap)
 		return nil
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -911,7 +912,8 @@ func (a *App) handleBindEmby(w http.ResponseWriter, r *http.Request, _ Params) {
 	ok(w, "Emby account linked", map[string]any{"emby_id": u.EmbyID, "emby_username": u.EmbyUsername, "user": publicUser(u)})
 }
 
-func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.User) {
+// inviteCap 为 inviteActivationExpiryCap 的结果（锁外预先计算），0 表示不封顶。
+func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.User, inviteCap int64) {
 	if !before.PendingEmby {
 		return
 	}
@@ -930,6 +932,9 @@ func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.Us
 		u.ExpiredAt = permanentExpiryUnix
 	} else {
 		u.ExpiredAt = expiryFromDays(days, time.Now())
+	}
+	if u.Role != store.RoleAdmin && u.Role != store.RoleWhitelist {
+		u.ExpiredAt = boundedInviteExpiry(u.ExpiredAt, inviteCap)
 	}
 }
 
@@ -972,6 +977,16 @@ func (a *App) handleRegisterEmby(w http.ResponseWriter, r *http.Request, params 
 		failWithCode(w, http.StatusConflict, ErrEmbyCapacityReached, fmt.Sprintf("Emby 用户数量已达上限 %d/%d", current, limit))
 		return
 	}
+	// 邀请来源的待开通资格：开通后的到期不得超过邀请人当前到期；邀请人已到期时
+	// 直接拒绝，避免先建出远端账号再立刻判为过期。
+	inviteCap := int64(0)
+	if p.User.PendingEmby && p.User.Role != store.RoleAdmin && p.User.Role != store.RoleWhitelist {
+		inviteCap = a.inviteActivationExpiryCap(p.User)
+		if inviteCap > 0 && inviteCap <= time.Now().Unix() {
+			failWithCode(w, http.StatusForbidden, ErrInviterDaysShort, "邀请人有效期已到期，暂不能开通 Emby")
+			return
+		}
+	}
 	createdUser, err := a.embyCreateUser(r.Context(), embyUsername, embyPassword)
 	if err != nil {
 		failWithCode(w, http.StatusBadGateway, ErrEmbyCreateFailed, "创建 Emby 用户失败，请稍后重试")
@@ -1006,6 +1021,9 @@ func (a *App) handleRegisterEmby(w http.ResponseWriter, r *http.Request, params 
 			u.ExpiredAt = permanentExpiryUnix
 		} else {
 			u.ExpiredAt = expiryFromDays(days, time.Now())
+		}
+		if hadPendingEmby && u.Role != store.RoleAdmin && u.Role != store.RoleWhitelist {
+			u.ExpiredAt = boundedInviteExpiry(u.ExpiredAt, inviteCap)
 		}
 		return nil
 	})

@@ -1179,6 +1179,27 @@ func (a *App) maxCodeDays(user store.User) (int, string) {
 	if permanentMaxDays <= 0 {
 		permanentMaxDays = 365
 	}
+	// ExpiredAt=-1 有双重语义：注册后尚未开通 Emby 的普通用户也是 -1（表示"未设置"），
+	// 并非永久号。旧实现一律按永久处理，30 天注册码注册、先不开通的用户即可发
+	// permanent_invite_max_days（默认 365）天邀请码放大权益。这里对"无 Emby 的普通
+	// 用户"改用待开通资格天数封顶；既无 Emby 又无待开通资格则不允许发码。
+	// 管理员 / 白名单账号不受影响，有限期的 ExpiredAt 仍走下方常规计算。
+	if strings.TrimSpace(user.EmbyID) == "" && user.Role != store.RoleAdmin && user.Role != store.RoleWhitelist && expiryIsPermanent(user.ExpiredAt) {
+		if !user.PendingEmby {
+			return 0, "尚未开通 Emby，不能生成邀请码"
+		}
+		pendingDays := a.cfg().EmbyDirectRegisterDays
+		if user.PendingEmbyDays != nil {
+			pendingDays = *user.PendingEmbyDays
+		}
+		if pendingDays == 0 {
+			pendingDays = 30
+		}
+		if pendingDays < 0 || pendingDays > permanentMaxDays {
+			return permanentMaxDays, ""
+		}
+		return pendingDays, ""
+	}
 	if expiryIsPermanent(user.ExpiredAt) {
 		return permanentMaxDays, ""
 	}
@@ -1190,6 +1211,26 @@ func (a *App) maxCodeDays(user store.User) (int, string) {
 		days = permanentMaxDays
 	}
 	return days, ""
+}
+
+// inviteActivationExpiryCap 返回邀请来源用户开通 Emby 时不得超过的到期时间（邀请人
+// 当前 ExpiredAt）；非邀请来源、已断开关系或邀请人为永久号时返回 0（不封顶）。
+// 使用邀请码时 boundedInviteExpiry 只约束当时的 ExpiredAt，真正开通时会按
+// PendingEmbyDays 从开通当下重新起算，延后开通即可超出邀请人期限，故开通时再封顶一次。
+// 必须在 store 写锁外调用（内部读 store）。
+func (a *App) inviteActivationExpiryCap(u store.User) int64 {
+	if strings.TrimSpace(u.RegistrationSource) != registrationSourceInvite {
+		return 0
+	}
+	rel, ok := a.store().ParentOf(u.UID)
+	if !ok {
+		return 0
+	}
+	inviter, ok := a.store().User(rel.ParentUID)
+	if !ok || inviter.ExpiredAt <= 0 || inviter.ExpiredAt >= permanentExpiryUnix {
+		return 0
+	}
+	return inviter.ExpiredAt
 }
 
 func (a *App) inviteRootUID(uid int64) int64 {

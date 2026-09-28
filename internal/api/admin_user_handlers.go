@@ -1038,8 +1038,12 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 	}
 	embyID := asString(remoteUser["Id"])
 	embyName := firstNonEmpty(asString(remoteUser["Name"]), embyNameInput, embyID)
+	inviteCap := int64(0)
+	if targetUser, okTarget := a.store().User(targetUID); okTarget {
+		inviteCap = a.inviteActivationExpiryCap(targetUser)
+	}
 	updatedUser, displacedUID, updateErr := a.store().BindUserEmbyAtomicWithUpdate(targetUID, embyID, embyName, force, func(u *store.User, before store.User) error {
-		a.consumePendingEmbyEntitlementOnBind(u, before)
+		a.consumePendingEmbyEntitlementOnBind(u, before, inviteCap)
 		return nil
 	})
 	if errors.Is(updateErr, store.ErrConflict) {
