@@ -65,7 +65,7 @@ cp deploy/docker/.env.example .env
 vim .env
 ```
 
-`.env` 至少应修改 `POSTGRES_PASSWORD` 和 `BOT_INTERNAL_SECRET`。示例文件只使用占位符，不包含真实密钥。
+`.env` 至少应修改 `POSTGRES_PASSWORD` 和 `BOT_INTERNAL_SECRET`。示例文件只使用占位符，不包含真实密钥。`POSTGRES_PASSWORD` 没有默认值，未设置时 `docker compose` 会直接报错退出。
 
 ### 4. 启动服务
 

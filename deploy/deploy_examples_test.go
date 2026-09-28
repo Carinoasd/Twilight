@@ -53,3 +53,16 @@ func TestSetupSystemdDefaultsToDedicatedUserWithSandbox(t *testing.T) {
 		t.Fatalf("hardening block used %d times, want api/worker/webui units", got)
 	}
 }
+
+func TestDockerComposeRequiresPostgresPassword(t *testing.T) {
+	for _, name := range []string{"../docker-compose.yml", "../docker-compose.prod.yml"} {
+		content := readDeployFile(t, name)
+		if strings.Contains(content, "POSTGRES_PASSWORD:-") {
+			t.Fatalf("%s must not provide a default Postgres password", name)
+		}
+	}
+	compose := readDeployFile(t, "../docker-compose.yml")
+	if !strings.Contains(compose, "${POSTGRES_PASSWORD:?") {
+		t.Fatal("docker-compose.yml must require POSTGRES_PASSWORD")
+	}
+}
