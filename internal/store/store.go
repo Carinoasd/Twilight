@@ -1063,6 +1063,12 @@ func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(cont
 			return err
 		}
 		if err := mutate(); err != nil {
+			// errNoChange：闭包确认本次未改动 state（复检后发现无事可做），直接视为成功、
+			// 跳过整份 JSONB 序列化与写库，也不递增 version，其他进程无需整份重载。
+			// 闭包承诺未改内存，故不必 restore（省一次多 MB unmarshal）。
+			if errors.Is(err, errNoChange) {
+				return nil
+			}
 			// mutate 失败：本身就不打算落盘，状态可能被改了一半，回滚到快照。
 			s.restoreStateLocked(prev)
 			return err
@@ -3505,6 +3511,8 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 	var updated User
 	changed := false
 	err := s.mutateAndSaveLocked(func() error {
+		// 版本冲突会重放闭包：外部结果变量每次都从零开始。
+		updated, changed = User{}, false
 		uid, indexed := s.telegramIDMap[telegramID]
 		current, found := s.state.Users[uid]
 		if !indexed {
@@ -3516,11 +3524,12 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 			}
 		}
 		if !indexed || !found || current.TelegramID != telegramID {
-			return nil
+			// 锁内复检发现已解绑/换绑：什么都不改，跳过整份落盘。
+			return errNoChange
 		}
 		updated = current
 		if current.TelegramUsername == username {
-			return nil
+			return errNoChange
 		}
 		old := current
 		current.TelegramUsername = username
@@ -5552,6 +5561,12 @@ var (
 // 则 fail-closed 上抛（这些路径的调用方要么丢弃错误、要么可安全重试），
 // 绝不再走「盲写整份 jsonb 覆盖他进程刚提交的写」的丢更新老路。
 var errStateVersionConflict = errors.New("state version conflict")
+
+// errNoChange 由 mutateAndSaveLocked 的闭包返回，表示「复检后无任何改动」：
+// helper 据此跳过落盘并向调用方返回 nil。闭包返回它之前绝不能改动 s.state，
+// 否则这些改动会成为未落盘的幽灵变更。只用于 persist==nil 的 mutateAndSaveLocked
+// 以及 persist 在无改动时也无需执行的场景。
+var errNoChange = errors.New("store: mutation made no change")
 
 var (
 	errTelegramMembershipRebindProtected = errors.New("telegram membership rebind protected")

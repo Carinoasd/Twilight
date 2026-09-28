@@ -176,11 +176,12 @@ func (s *Store) DetachExpiredTicketAttachments(id, revision, cutoff int64) ([]Ti
 		removed = nil
 		ticket, exists := s.state.Tickets[id]
 		if !exists || TicketRevision(ticket) != revision || NormalizeTicketStatus(ticket.Status) != TicketStatusClosed || ticket.ClosedAt <= 0 || ticket.ClosedAt >= cutoff {
-			return nil
+			// 条件不符即无事可做：返回 errNoChange 跳过整份落盘（不递增 version）。
+			return errNoChange
 		}
 		removed = append([]TicketAttachment(nil), ticket.Attachments...)
 		if len(removed) == 0 {
-			return nil
+			return errNoChange
 		}
 		ticket.Attachments = nil
 		ticket.UpdatedAt = time.Now().Unix()
