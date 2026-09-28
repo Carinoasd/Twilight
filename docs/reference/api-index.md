@@ -773,7 +773,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | POST | `/api/v2/security/devices/{device_id}/trust` | User | 把设备标记为受信任（免风控/二次校验）：置 `Trusted=true` 且 `Blocked=false`。写审计 `trust_device` |
 | GET | `/api/v2/security/login-history` | User | 自己的登录历史：`limit` 默认 50、钳制 1–100；返回 `{records, total}` |
 | GET | `/api/v2/admin/security/ip-blacklist` | Admin | 列出全局 IP 黑名单条目 |
-| POST | `/api/v2/admin/security/ip-blacklist` | Admin | 新增黑名单条目：`ip` 必填，`reason` 可选，`hours` 为 `-1` 或不传表示永久、>0 为封禁小时数（0 或别的负数返回 400）。写审计 `add_ip_blacklist` |
+| POST | `/api/v2/admin/security/ip-blacklist` | Admin | 新增黑名单条目：`ip` 必填（单个 IPv4/IPv6 或 CIDR 前缀，服务端校验并规范化，格式错误返回 400 `IP_INVALID`），`reason` 可选，`hours` 为 `-1` 或不传表示永久、>0 为封禁小时数（0 或别的负数返回 400）。写审计 `add_ip_blacklist`（`expire_at` 为过期时间戳，`-1` 表示永久） |
 | DELETE | `/api/v2/admin/security/ip-blacklist` | Admin | 将 IP 移出黑名单，DELETE 请求体传 `{ip}`。写审计 `delete_ip_blacklist` |
 | GET | `/api/v2/admin/security/suspicious` | Admin | 可疑登录活动：`hours` 默认 24，返回被拦截的登录记录（`uid`、`ip`、`device`、`time`、`reason`） |
 | GET | `/api/v2/admin/security/users/{uid}/devices` | Admin | 管理员查看**任意用户**的设备列表；非 Admin 访问带 `:uid` 的路径直接 403，uid 非正整数 400 |

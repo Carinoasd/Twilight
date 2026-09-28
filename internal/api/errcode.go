@@ -285,6 +285,7 @@ const (
 	ErrTGIDTaken                  ErrCode = "TG_ID_TAKEN"
 	ErrDeviceIDRequired           ErrCode = "DEVICE_ID_REQUIRED"
 	ErrIPRequired                 ErrCode = "IP_REQUIRED"
+	ErrIPInvalid                  ErrCode = "IP_INVALID"
 	ErrIPBlacklistDurationInvalid ErrCode = "IP_BLACKLIST_DURATION_INVALID"
 	ErrUploadRateLimited          ErrCode = "UPLOAD_RATE_LIMITED"
 	ErrUploadInvalidPayload       ErrCode = "UPLOAD_INVALID_PAYLOAD"
