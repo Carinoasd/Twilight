@@ -4631,6 +4631,11 @@ func (s *Store) ConsumeInviteCode(code string, childUID int64) (InviteCode, erro
 		if _, exists := s.parentOfLocked(childUID); exists {
 			return ErrConflict
 		}
+		// 邀请人不能是被邀请人自己的下级：X 邀请 Y、Y 再发码给 X 会形成 X↔Y 环，
+		// 之后所有按父链向上走的计算都会在全局写锁里死循环。
+		if c.InviterUID != 0 && s.isDescendantLocked(c.InviterUID, childUID) {
+			return ErrConflict
+		}
 		c.UseCount++
 		c.Used = true
 		c.UsedByUID = childUID
@@ -4674,6 +4679,11 @@ func (s *Store) ConsumeInviteCodeAndUpdateUser(code string, childUID int64, maxD
 			return ErrConflict
 		}
 		if _, exists := s.parentOfLocked(childUID); exists {
+			return ErrConflict
+		}
+		// 邀请人不能是被邀请人自己的下级：X 邀请 Y、Y 再发码给 X 会形成 X↔Y 环，
+		// 之后所有按父链向上走的计算都会在全局写锁里死循环。
+		if c.InviterUID != 0 && s.isDescendantLocked(c.InviterUID, childUID) {
 			return ErrConflict
 		}
 		// 锁内重检邀请树深度与根用户上限，防止并发绕过
@@ -4803,7 +4813,10 @@ func (s *Store) inviteDepthLocked(uid int64, maxDepth int) int {
 
 func (s *Store) inviteRootLocked(uid int64) int64 {
 	current := uid
-	for {
+	// seen 防护：历史数据里若已经存在环（本修复之前可以产生），也必须能结束。
+	seen := map[int64]bool{}
+	for !seen[current] {
+		seen[current] = true
 		rel, ok := s.parentOfLocked(current)
 		if !ok {
 			break
@@ -4825,7 +4838,9 @@ func (s *Store) inviteDescendantCountLocked(rootUID int64) int {
 
 func (s *Store) isDescendantLocked(uid, ancestor int64) bool {
 	current := uid
-	for {
+	seen := map[int64]bool{}
+	for !seen[current] {
+		seen[current] = true
 		rel, ok := s.parentOfLocked(current)
 		if !ok {
 			return false
@@ -4835,6 +4850,7 @@ func (s *Store) isDescendantLocked(uid, ancestor int64) bool {
 		}
 		current = rel.ParentUID
 	}
+	return false
 }
 
 func (s *Store) DetachInvite(uid int64) error {
