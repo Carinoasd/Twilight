@@ -135,7 +135,7 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 
 ## 绑定流程
 
-1. 用户在 Web 端生成有效期 300 秒的 32 位十六进制绑定码（128 位随机熵）。服务端另返回观察 ID `challenge_id`；注册场景同时设置 HttpOnly 浏览器证明 Cookie。
+1. 用户在 Web 端生成有效期 300 秒的 32 位十六进制绑定码（128 位随机熵）。服务端另返回观察 ID `challenge_id`；注册场景同时设置 HttpOnly 浏览器证明 Cookie（`SameSite` / `Domain` 与会话 Cookie 配置一致，跨站部署需 `session_cookie_samesite = none`）。
 2. 用户私聊 Bot，发送 `/bind <绑定码>`，或直接发送绑定码本身。
 3. Bot 将绑定码转为大写并按正则 `^[A-Za-z0-9]{6,64}$` 校验格式（`telegramBindCodePattern`）。
 4. 校验绑定码是否存在、是否过期，以及该 Telegram 是否已被其它账号占用。

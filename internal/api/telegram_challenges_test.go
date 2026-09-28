@@ -41,8 +41,8 @@ func issueRegisterChallenge(t *testing.T, app *App) (string, string, []*http.Coo
 		t.Fatalf("invalid separated credentials")
 	}
 	cookie := findCookie(rr.Result().Cookies(), telegramBrowserCookie)
-	if cookie == nil || !cookie.HttpOnly || cookie.Path != "/api" || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 600 {
-		t.Fatalf("browser proof cookie missing protections")
+	if cookie == nil || !cookie.HttpOnly || cookie.Path != "/api" || cookie.SameSite != sameSite(app.cfg().CookieSameSite) || cookie.Domain != app.cookieDomain() || cookie.MaxAge != 600 {
+		t.Fatalf("browser proof cookie missing protections: %+v", cookie)
 	}
 	if strings.Contains(rr.Body.String(), cookie.Value) {
 		t.Fatal("proof leaked in body")
@@ -307,5 +307,31 @@ func TestTelegramChallengeDiagnosticsExcludeRawErrors(t *testing.T) {
 	}
 	if logs[1].ContextMap()["failure_kind"] != "timeout" {
 		t.Fatal("timeout not classified")
+	}
+}
+
+// 跨站部署（前端与 API 不同站点）依赖 session_cookie_samesite = none 与可选的
+// session_cookie_domain 让浏览器回传 cookie。浏览器证明 cookie 必须跟随同一配置，
+// 否则注册场景在生成绑定码后立即被判定为「不是生成绑定码的浏览器」。
+func TestTelegramChallengeBrowserProofCookieFollowsSessionCookiePolicy(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().CookieSameSite = "none"
+	app.cfg().CookieSecure = true
+	app.cfg().CookieDomain = "example.com"
+	_, id, cookies := issueRegisterChallenge(t, app)
+	cookie := findCookie(cookies, telegramBrowserCookie)
+	if cookie.SameSite != http.SameSiteNoneMode || !cookie.Secure || cookie.Domain != "example.com" {
+		t.Fatalf("proof cookie ignores cookie policy: %+v", cookie)
+	}
+	rr := doJSON(app, http.MethodGet, "/api/v2/registration/telegram/bind-code/status?code="+id, "", cookies)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"status":"pending"`) {
+		t.Fatalf("owner status: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// 未配置 Domain 时保持 host-only；单字标签的 Domain 同样退化为 host-only。
+	app.cfg().CookieDomain = "localhost"
+	_, _, cookies = issueRegisterChallenge(t, app)
+	if cookie := findCookie(cookies, telegramBrowserCookie); cookie.Domain != "" {
+		t.Fatalf("single-label domain should be host-only: %+v", cookie)
 	}
 }
