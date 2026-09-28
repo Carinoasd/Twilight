@@ -360,3 +360,35 @@ func (s *sessionStore) FallbackCount() int64 {
 	}
 	return s.fallbackCount.Load()
 }
+
+// DeleteAll 吊销全部会话（内存、Redis、PostgreSQL）。数据库恢复 / 迁移导入会把
+// NextUserID 回卷到备份时点，之后新注册的用户会拿到旧用户的 UID；会话只绑定 uid，
+// 不清掉的话旧浏览器里的会话会直接以新用户身份通过鉴权。
+func (s *sessionStore) DeleteAll(ctx context.Context) int {
+	removed := 0
+	s.mu.Lock()
+	for token := range s.items {
+		delete(s.items, token)
+		if s.redis != nil {
+			_ = s.redis.Del(ctx, s.prefix+token)
+		}
+		removed++
+	}
+	s.mu.Unlock()
+	if db := s.pgDB(); db != nil {
+		rows, err := db.QueryContext(ctx, `DELETE FROM twilight_sessions RETURNING token`)
+		if err == nil {
+			for rows.Next() {
+				var token string
+				if rows.Scan(&token) == nil {
+					removed++
+					if s.redis != nil {
+						_ = s.redis.Del(ctx, s.prefix+token)
+					}
+				}
+			}
+			rows.Close()
+		}
+	}
+	return removed
+}

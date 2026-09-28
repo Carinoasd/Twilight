@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -69,5 +70,30 @@ func TestMediaSearchFailureHidesUpstreamDetail(t *testing.T) {
 	}
 	if strings.Contains(redactSensitiveText(err.Error()), "SECRETKEY123") {
 		t.Fatalf("log redaction does not strip api_key: %q", redactSensitiveText(err.Error()))
+	}
+}
+
+// 数据库恢复会回卷 UID 分配：恢复后旧浏览器里的会话必须全部失效。
+func TestDatabaseRestoreRevokesAllSessions(t *testing.T) {
+	app := newTestApp(t)
+	_ = registerAndLogin(t, app, "admin", "Admin123456")
+	snapshot, err := app.store().Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookies := registerAndLogin(t, app, "later", "User123456")
+	if rr := doJSON(app, http.MethodGet, "/api/v1/users/me", "", cookies); rr.Code != http.StatusOK {
+		t.Fatalf("precondition: %d", rr.Code)
+	}
+	app.sessions().DeleteAll(context.Background())
+	if err := app.store().LoadSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if rr := doJSON(app, http.MethodGet, "/api/v1/users/me", "", cookies); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("session survived restore: %d %s", rr.Code, rr.Body.String())
+	}
+	var count int
+	if err := app.store().DB().QueryRow(`SELECT count(*) FROM twilight_sessions`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("sessions table not cleared: %d %v", count, err)
 	}
 }

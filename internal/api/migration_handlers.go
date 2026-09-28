@@ -265,6 +265,7 @@ func (a *App) applyMigrationImport(r *http.Request, archive migration.Archive, p
 			rollbackConfig()
 			return nil
 		}
+		a.sessions().DeleteAll(r.Context())
 		if _, err := a.store().ImportMigrationArchive(r.Context(), archive); err != nil {
 			rollbackResources()
 			status, message = http.StatusInternalServerError, "迁移数据库导入失败"

@@ -201,6 +201,8 @@ func (a *App) handleDatabaseRestore(w http.ResponseWriter, r *http.Request, _ Pa
 		failWithCode(w, http.StatusInternalServerError, ErrDBRestoreBackupFail, "恢复前备份失败")
 		return
 	}
+	// 恢复会回卷 UID 分配，先吊销全部会话（含 Redis），否则旧会话可能落到新用户身上。
+	a.sessions().DeleteAll(r.Context())
 	if err := a.store().LoadSnapshot(targetData); err != nil {
 		failWithCode(w, http.StatusBadRequest, ErrDBRestoreFailed, "备份恢复失败")
 		return

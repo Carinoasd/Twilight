@@ -5135,6 +5135,12 @@ func TestDatabaseAdminBackupRestoreAndAuth(t *testing.T) {
 	if _, ok := app.store().FindUserByUsername("extra"); ok {
 		t.Fatal("restore did not replace state")
 	}
+	// 恢复会吊销全部会话（UID 可能被重新分配），管理员自己也要重新登录。
+	if stale := doJSONWithHeaders(app, http.MethodGet, "/api/v1/system/admin/database/backups", ``, []*http.Cookie{adminCookie}, nil); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("session survived restore status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	adminLogin = doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"Admin123456"}`, nil)
+	adminCookie = findCookie(adminLogin.Result().Cookies(), "twilight_session")
 	traversal := doJSONWithHeaders(app, http.MethodPost, "/api/v1/system/admin/database/restore", `{"name":"../state.json"}`, []*http.Cookie{adminCookie}, map[string]string{"X-Twilight-Client": "webui"})
 	if traversal.Code != http.StatusBadRequest {
 		t.Fatalf("restore traversal status=%d body=%s", traversal.Code, traversal.Body.String())

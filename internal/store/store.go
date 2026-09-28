@@ -1410,6 +1410,10 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links`)
 	}
 	if err == nil {
+		// 恢复后 UID 可能被重新分配给别人：会话只绑定 uid，必须一并作废。
+		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_sessions`)
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
