@@ -47,13 +47,10 @@ func (a *App) systemUserLimitReachedExcluding(excludeRegCode, excludeInviteCode 
 		}
 		current += slots
 	}
-	for _, code := range a.store().ListAllInviteCodes() {
-		slots := remainingInviteUserSlots(code, now)
-		if excludeInviteCode != "" && strings.EqualFold(code.Code, excludeInviteCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
+	// 邀请码不计入系统用户上限：邀请码只能由已注册用户使用，不会新增用户。
+	// 旧实现把每张未用邀请码都算作 1 个待注册名额，普通用户各生成几张不用的
+	// 邀请码即可把新注册挡在"已达上限"之外。excludeInviteCode 参数保留兼容。
+	_ = excludeInviteCode
 	return current >= limit, current, limit
 }
 
@@ -63,14 +60,6 @@ func remainingRegCodeUserSlots(code store.RegCode, now int64) int {
 		return 0
 	}
 	if code.Type != 1 && code.Type != 3 {
-		return 0
-	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
-}
-
-// remainingInviteUserSlots 邀请码剩余可注册用户数（计入系统用户上限）。
-func remainingInviteUserSlots(code store.InviteCode, now int64) int {
-	if !code.Active || (code.ExpiredAt > 0 && code.ExpiredAt <= now) {
 		return 0
 	}
 	return remainingUseSlots(code.UseCount, code.UseCountLimit)
@@ -93,15 +82,12 @@ func (a *App) embyCapacityReachedExcluding(excludeUID int64, excludeRegCode, exc
 			current++
 		}
 	}
-	for _, code := range a.store().ListAllInviteCodes() {
-		slots := remainingInviteSlots(code, now)
-		// 本次消费只占用该码 1 个名额：仅扣减 1，而非把整码剩余名额全部排除。
-		// 否则多名额码的 N 个并发消费者会集体躲在同一份缓冲后越过上限（TOCTOU 过度承诺）。
-		if excludeInviteCode != "" && strings.EqualFold(code.Code, excludeInviteCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
+	// 未使用的邀请码不预占 Emby 名额：普通用户可自行生成邀请码（默认每人 10 张、
+	// 不过期），旧实现每张都占 1 个名额，少数账号囤码即可让持码用户开通 Emby 时
+	// 报"已达上限"。邀请码被使用后受邀者进入 PendingEmby，由上方用户循环计入；
+	// 使用时（handleInviteUse / handleUseCode）也会先做容量检查。
+	// 管理员签发的注册码仍按剩余次数预占，保持"批量发码不超卖"的原意。
+	_ = excludeInviteCode
 	for _, code := range a.store().ListRegCodes() {
 		slots := remainingRegCodeEmbySlots(code, now)
 		if excludeRegCode != "" && strings.EqualFold(code.Code, excludeRegCode) && slots > 0 {
@@ -110,13 +96,6 @@ func (a *App) embyCapacityReachedExcluding(excludeUID int64, excludeRegCode, exc
 		current += slots
 	}
 	return limit > 0 && current >= limit, current, limit
-}
-
-func remainingInviteSlots(code store.InviteCode, now int64) int {
-	if !code.Active || (code.ExpiredAt > 0 && code.ExpiredAt <= now) {
-		return 0
-	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
 }
 
 func remainingRegCodeEmbySlots(code store.RegCode, now int64) int {

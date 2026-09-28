@@ -162,3 +162,25 @@ func TestClearRegcodeUsageDoesNotResurrectDeletedCode(t *testing.T) {
 		t.Fatal("deleted regcode was resurrected")
 	}
 }
+
+// 普通用户囤积的未使用邀请码不得占用系统用户上限与 Emby 名额。
+func TestUnusedInviteCodesDoNotReserveCapacity(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().UserLimit = 3
+	app.cfg().EmbyUserLimit = 3
+	owner, err := app.store().CreateUser(store.User{Username: "hoarder", Role: store.RoleNormal, Active: true, EmbyID: "h-emby"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"HOARD-1", "HOARD-2", "HOARD-3", "HOARD-4"} {
+		if err := app.store().UpsertInviteCode(store.InviteCode{Code: code, UID: owner.UID, InviterUID: owner.UID, Days: 30, UseCountLimit: 1, Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reached, current, _ := app.systemUserLimitReached(); reached || current != 1 {
+		t.Fatalf("unused invite codes must not count toward user limit: reached=%v current=%d", reached, current)
+	}
+	if reached, current, _ := app.embyCapacityReached(0); reached || current != 1 {
+		t.Fatalf("unused invite codes must not reserve Emby slots: reached=%v current=%d", reached, current)
+	}
+}

@@ -5412,13 +5412,14 @@ func TestEmbyCapacityCountsPendingEntitlementsSeparatelyFromSystemLimit(t *testi
 		t.Fatal(err)
 	}
 
-	// 系统用户上限现在也会计入有效注册码/邀请码的剩余名额。REG-A（type=1）和 INV-A
-	// 各占 1 个名额，REG-RENEW（type=2）不算，加上已有 1 个用户 = 3。
-	if reached, current, limit := app.systemUserLimitReached(); reached || current != 3 || limit != 100 {
-		t.Fatalf("system limit should count local users + pending codes, got reached=%v current=%d limit=%d", reached, current, limit)
+	// 系统用户上限计入有效注册码（type=1/3）的剩余名额：REG-A 占 1 个，REG-RENEW
+	// （type=2）不算；邀请码只能给已注册用户使用，不计入。加上已有 1 个用户 = 2。
+	if reached, current, limit := app.systemUserLimitReached(); reached || current != 2 || limit != 100 {
+		t.Fatalf("system limit should count local users + pending regcodes only, got reached=%v current=%d limit=%d", reached, current, limit)
 	}
-	if reached, current, limit := app.embyCapacityReached(0); !reached || current != 3 || limit != 3 {
-		t.Fatalf("emby capacity should count existing users and pending code slots, got reached=%v current=%d limit=%d", reached, current, limit)
+	// Emby 名额：已绑定用户 1 + REG-A 1；未使用的邀请码不预占名额。
+	if reached, current, limit := app.embyCapacityReached(0); reached || current != 2 || limit != 3 {
+		t.Fatalf("emby capacity should not reserve slots for unused invite codes, got reached=%v current=%d limit=%d", reached, current, limit)
 	}
 }
 
