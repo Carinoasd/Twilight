@@ -258,12 +258,18 @@ type principal struct {
 
 type auditRequestState struct {
 	wrote atomic.Bool
+	// dryRun 记录本次请求是否为预览：0 未知，1 实际执行，2 预览。
+	// decodeMap 发现 payload 显式带 dry_run 时自动写入，handler 也可用
+	// markAuditDryRun 显式标记；fallback 审计据此在 detail 里加 dry_run。
+	dryRun atomic.Int32
 }
 
 type statusResponseWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+	// errorCode 由 writeJSONWithCode 回填，供失败请求的 fallback 审计记录 error_code。
+	errorCode string
 }
 
 func (w *statusResponseWriter) WriteHeader(status int) {
@@ -882,7 +888,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	a.maybeAuditHTTPMutation(r, route, params, principal, status)
+	a.maybeAuditHTTPMutation(r, route, params, principal, status, lw.errorCode)
 }
 
 func (a *App) allowRate(ctx context.Context, key string, limit int, window time.Duration) bool {
@@ -1644,6 +1650,7 @@ func decodeMap(r *http.Request) map[string]any {
 	if jsonDepthExceeds(payload, maxJSONNestingDepth) {
 		return map[string]any{}
 	}
+	noteAuditDryRunFromPayload(r, payload)
 	return payload
 }
 

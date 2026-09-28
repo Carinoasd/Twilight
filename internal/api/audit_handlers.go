@@ -61,6 +61,10 @@ func (a *App) auditWithUser(r *http.Request, uid int64, username, action, catego
 
 func (a *App) auditEntry(r *http.Request, uid int64, username, action, category string, targetUID int64, detail map[string]any) {
 	markRequestAuditWritten(r)
+	// 用户自助操作的 target 记成本人，按 target_uid 筛某个用户时才能查到他的自助记录。
+	if targetUID <= 0 && uid > 0 && normalizeAuditCategory(category) == "user" {
+		targetUID = uid
+	}
 	entry := store.AuditLog{
 		UID:       uid,
 		Username:  username,
@@ -73,6 +77,65 @@ func (a *App) auditEntry(r *http.Request, uid int64, username, action, category 
 		IP:        a.clientIP(r),
 	}
 	a.writeAuditEntry(entry)
+}
+
+// markAuditDryRun 让 handler 显式声明本次请求是否为预览（dry-run）。
+// payload 未带 dry_run、而 handler 默认按预览执行时应调用它，fallback 审计才能区分。
+func markAuditDryRun(r *http.Request, dryRun bool) {
+	if r == nil {
+		return
+	}
+	state, _ := r.Context().Value(auditRequestKey).(*auditRequestState)
+	if state == nil {
+		return
+	}
+	if dryRun {
+		state.dryRun.Store(2)
+	} else {
+		state.dryRun.Store(1)
+	}
+}
+
+// noteAuditDryRunFromPayload 在 decodeMap 解出 payload 后，若显式带了 dry_run 就记下。
+func noteAuditDryRunFromPayload(r *http.Request, payload map[string]any) {
+	if raw, exists := payload["dry_run"]; exists {
+		markAuditDryRun(r, auditTruthy(raw))
+	}
+}
+
+func auditTruthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
+}
+
+// requestAuditDryRun 返回本次请求的 dry_run 状态；known=false 表示无法判断。
+// 优先 handler / payload 的标记，其次 query 的 dry_run。
+func requestAuditDryRun(r *http.Request) (dryRun bool, known bool) {
+	if r == nil {
+		return false, false
+	}
+	if state, _ := r.Context().Value(auditRequestKey).(*auditRequestState); state != nil {
+		switch state.dryRun.Load() {
+		case 1:
+			return false, true
+		case 2:
+			return true, true
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("dry_run")); raw != "" {
+		return auditTruthy(raw), true
+	}
+	return false, false
 }
 
 func markRequestAuditWritten(r *http.Request) {
@@ -100,7 +163,7 @@ func (a *App) auditHTTPMutationConfigured() bool {
 	return a.cfg().AuditLogEnabled
 }
 
-func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Params, p *principal, status int) {
+func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Params, p *principal, status int, errorCode string) {
 	// 审计总开关关闭时，本次请求的 fallback 审计已无意义，直接短路。
 	// 配置在每请求只读一次（auditHTTPMutationConfigured，见 writeAuditEntry 对
 	// AuditLogEnabled 的同口径）；关闭期间热路径不再为「是否该补审计」反复装配
@@ -108,7 +171,11 @@ func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Param
 	if !a.auditHTTPMutationConfigured() {
 		return
 	}
-	if route == nil || !shouldFallbackAuditHTTPMutation(r, route, status) || requestAuditWritten(r) {
+	if route == nil || requestAuditWritten(r) {
+		return
+	}
+	kind := fallbackAuditKind(r, route, status)
+	if kind == fallbackAuditSkip {
 		return
 	}
 	uid, username := int64(0), ""
@@ -121,41 +188,77 @@ func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Param
 			category = "admin"
 		} else {
 			category = "user"
+		}
+		// 自助路由（User / APIKey）的操作对象就是本人，管理员自己改自己的设置也一样。
+		if route.Auth == AuthUser || route.Auth == AuthAPIKey {
 			targetUID = p.User.UID
 		}
 	}
 	if target := safeAuditTargetUID(params); target > 0 {
 		targetUID = target
 	}
-	a.auditEntry(r, uid, username, fallbackAuditAction(route), category, targetUID, map[string]any{
+	action := fallbackAuditAction(route)
+	detail := map[string]any{
 		"fallback":      true,
 		"path_template": route.Pattern,
 		"status":        status,
 		"params":        safeAuditRouteParams(params),
-	})
+	}
+	if dryRun, known := requestAuditDryRun(r); known {
+		detail["dry_run"] = dryRun
+	}
+	if kind == fallbackAuditFailed {
+		// 管理员写操作失败（403/409/5xx 等）也留痕，action 加 _failed 后缀。
+		action += "_failed"
+		if errorCode != "" {
+			detail["error_code"] = errorCode
+		}
+	}
+	a.auditEntry(r, uid, username, action, category, targetUID, detail)
 }
 
-func shouldFallbackAuditHTTPMutation(r *http.Request, route *Route, status int) bool {
-	if r == nil || route == nil || status < 200 || status >= 300 {
-		return false
+type fallbackAuditDecision int
+
+const (
+	fallbackAuditSkip fallbackAuditDecision = iota
+	fallbackAuditSuccess
+	fallbackAuditFailed
+)
+
+// fallbackAuditKind 判断 handler 返回后是否需要补写 fallback 审计：
+//   - 2xx：User / Admin / APIKey 路由的写请求记成功；
+//   - 4xx / 5xx：只有 AuthAdmin 路由记失败（401 未登录、429 限流除外），
+//     普通用户的失败请求量大且多为输入错误，不记。
+func fallbackAuditKind(r *http.Request, route *Route, status int) fallbackAuditDecision {
+	if r == nil || route == nil {
+		return fallbackAuditSkip
 	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
-		return false
+		return fallbackAuditSkip
 	}
 	pattern := route.Pattern
 	// V1 and V2 share the audit store, so both prefixes must be exempted.
-	// Without the V2 branch, clearing or pruning audit logs writes new audit
-	// rows that immediately become candidates for the next prune.
+	// 审计日志维护接口在成功时已写不可删的自保记录；失败（如缺确认短语）不再补记，
+	// 避免裁剪 / 清空时产生新的待裁剪记录。
 	if strings.HasPrefix(pattern, "/api/v1/admin/audit-logs") ||
 		strings.HasPrefix(pattern, "/api/v2/admin/audit-logs") {
-		return false
+		return fallbackAuditSkip
 	}
 	if pattern == "/api/v1/auth/refresh" || pattern == "/api/v2/auth/refresh" {
-		return false
+		return fallbackAuditSkip
 	}
-	return route.Auth == AuthUser || route.Auth == AuthAdmin || route.Auth == AuthAPIKey
+	if status >= 200 && status < 300 {
+		if route.Auth == AuthUser || route.Auth == AuthAdmin || route.Auth == AuthAPIKey {
+			return fallbackAuditSuccess
+		}
+		return fallbackAuditSkip
+	}
+	if status >= 400 && status != http.StatusUnauthorized && status != http.StatusTooManyRequests && route.Auth == AuthAdmin {
+		return fallbackAuditFailed
+	}
+	return fallbackAuditSkip
 }
 
 func fallbackAuditAction(route *Route) string {
