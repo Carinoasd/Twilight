@@ -49,7 +49,12 @@ type delAccountPendingState struct {
 	SkipEmby    bool
 	ExpiresAt   int64
 	Reason      string // 用户可选的删除原因
+	// Stage 为 delAccountStageEmail 时只用于在「发码 → 验码」之间保存删除原因，
+	// 不拦截普通文本（不会把用户随手发的消息当成密码）。
+	Stage string
 }
+
+const delAccountStageEmail = "email"
 
 func delAccountPendingKey(chatID, fromID int64) string {
 	return fmt.Sprintf("%d:%d", chatID, fromID)
@@ -448,7 +453,7 @@ func (a *App) telegramHandleResetPassword(ctx context.Context, chatID, telegramI
 // 用户发送 Web 密码后，Bot 在此验证并进入 Emby 密码等待状态。
 func (a *App) telegramConsumeDelAccountPending(ctx context.Context, chatID, fromID int64, text string) bool {
 	state := a.peekDelAccountPending(chatID, fromID)
-	if state == nil {
+	if state == nil || state.Stage == delAccountStageEmail {
 		return false
 	}
 	if !state.WebVerified {
@@ -494,7 +499,7 @@ func (a *App) telegramConsumeDelAccountPending(ctx context.Context, chatID, from
 // 验证优先级：
 //  1. 已绑定已验证邮箱 → 必须使用邮箱验证码
 //  2. 已绑定 Emby → 需要 Web 密码 + Emby 密码两步验证
-//  3. 无绑定 → 直接确认删除
+//  3. 无绑定 → /delAccount confirm 后发送 Web 密码二次确认
 //
 // 安全约束：
 //   - 管理员/白名单账号拒绝删除
@@ -504,12 +509,12 @@ func (a *App) telegramConsumeDelAccountPending(ctx context.Context, chatID, from
 // 用法：
 //
 //	/delAccount                     查看可用的验证方式
-//	/delAccount <reason>            附带删除原因开始流程
-//	/delAccount email               向绑定邮箱发送验证码
+//	/delAccount email [原因]        向绑定邮箱发送验证码（原因暂存到验证后提交）
 //	/delAccount email <code>        验证邮箱验证码
-//	/delAccount emby                开始 Web + Emby 密码两步验证
+//	/delAccount emby [原因]         开始 Web + Emby 密码两步验证
 //	/delAccount cancel              取消操作
-//	/delAccount confirm             直接确认删除（无邮箱/Emby 时）
+//	/delAccount confirm [原因]      无邮箱/Emby 时，发送 Web 密码二次确认后删除
+//	其余参数只回说明，不会触发任何删除动作；子命令不分大小写。
 func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID int64, args []string) {
 	u, okUser := a.store().FindUserByTelegramID(telegramID)
 	if !okUser {
@@ -543,59 +548,39 @@ func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID i
 		} else if hasEmby {
 			msg += "🎬 你已绑定 Emby 账号，必须通过 Web 密码 + Emby 密码两步验证删除。\n发送 /delAccount emby 开始验证。\n\n可选：附带删除原因 /delAccount emby 原因说明"
 		} else {
-			msg += "\n由于未绑定邮箱或 Emby，发送 /delAccount confirm 即可直接删除。\n\n可选：附带删除原因 /delAccount confirm 原因说明"
+			msg += "\n由于未绑定邮箱或 Emby，发送 /delAccount confirm 后按提示发送 Web 登录密码即可删除。\n\n可选：附带删除原因 /delAccount confirm 原因说明"
 		}
 		_ = a.telegramSendMessage(ctx, chatID, msg)
 		return
 	}
 
-	// 提取删除原因：第一个词如果不是关键字且能以中文/英文开头，当作原因处理
+	// 修复：动词比对不分大小写（/delAccount Cancel 以前会被当成原因）；
+	// 不认得的参数一律只回说明，不再自动补上 confirm/emby/email 动作——
+	// 以前 /delAccount help 这类输入会让无邮箱、无 Emby 的账号被立即删除。
+	verb := strings.ToLower(args[0])
+	if !isKnownDelAccountVerb(verb) {
+		_ = a.telegramSendMessage(ctx, chatID, "未知参数："+truncateString(args[0], 32)+"\n请发送 /delAccount 查看可用的验证方式；删除原因请写在子命令之后，例如 /delAccount emby 原因说明。")
+		return
+	}
 	reason := ""
-	actionArgs := args
-	if !isKnownDelAccountVerb(args[0]) {
-		if len(args) >= 1 {
-			reason = strings.Join(args, " ")
-		}
-		actionArgs = []string{}
-		if hasEmail && emailConfigured {
-			actionArgs = []string{"email"}
-		} else if expiredInviteCleanup {
-			actionArgs = []string{"emby"}
-		} else if hasEmby {
-			actionArgs = []string{"emby"}
-		} else {
-			actionArgs = []string{"confirm"}
-		}
+	if len(args) > 1 {
+		reason = strings.Join(args[1:], " ")
 	}
 
-	switch actionArgs[0] {
+	switch verb {
 	case "email":
 		if !hasEmail || !emailConfigured {
 			_ = a.telegramSendMessage(ctx, chatID, "你未绑定已验证的邮箱，或邮件服务未配置。")
 			return
 		}
-		a.clearDelAccountPending(chatID, telegramID)
-		if len(actionArgs) == 1 && reason == "" {
-			// 检查是否后面跟着原因
-			if len(args) > 1 {
-				reason = strings.Join(args[1:], " ")
+		// 修复：只有「恰好一个参数且形如验证码」才当验证码处理；其余都视为删除原因，
+		// 原因存进 pending state，验证码通过后再带出来写入审计。
+		if len(args) == 2 && a.delAccountLooksLikeEmailCode(args[1]) {
+			pendingReason := ""
+			if pending := a.peekDelAccountPending(chatID, telegramID); pending != nil && pending.Stage == delAccountStageEmail && pending.UserUID == u.UID {
+				pendingReason = pending.Reason
 			}
-		}
-		if len(actionArgs) == 1 {
-			_, _, errCode, errMsg := a.issueEmailCode(ctx, "telegram", emailPurposeDelAccount, u.Email, u.UID)
-			if errCode != "" {
-				_ = a.telegramSendMessage(ctx, chatID, "发送验证码失败："+errMsg)
-				return
-			}
-			msg := "验证码已发送到你的绑定邮箱，请查收后发送 /delAccount email <验证码>"
-			if reason != "" {
-				msg += "\n\n删除原因将在验证后提交：" + truncateString(reason, 200)
-			}
-			_ = a.telegramSendMessage(ctx, chatID, msg)
-			return
-		}
-		if len(actionArgs) == 2 {
-			code := actionArgs[1]
+			code := args[1]
 			rec, found := a.store().FindActiveEmailVerification(emailPurposeDelAccount, u.Email, time.Now().Unix())
 			if !found {
 				_ = a.telegramSendMessage(ctx, chatID, "未找到有效的验证码，请重新发送 /delAccount email 获取新验证码。")
@@ -608,13 +593,36 @@ func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID i
 				return
 			}
 			if result == store.EmailVerificationOK {
-				a.telegramExecuteDelAccount(ctx, chatID, u, reason)
+				a.clearDelAccountPending(chatID, telegramID)
+				a.telegramExecuteDelAccount(ctx, chatID, u, pendingReason)
 				return
 			}
 			_ = a.telegramSendMessage(ctx, chatID, "验证码无效或已过期，请重新发送 /delAccount email 获取新验证码。")
 			return
 		}
-		_ = a.telegramSendMessage(ctx, chatID, "用法：/delAccount email 或 /delAccount email <验证码>")
+		a.clearDelAccountPending(chatID, telegramID)
+		_, _, errCode, errMsg := a.issueEmailCode(ctx, "telegram", emailPurposeDelAccount, u.Email, u.UID)
+		if errCode != "" {
+			_ = a.telegramSendMessage(ctx, chatID, "发送验证码失败："+errMsg)
+			return
+		}
+		ttl := a.cfg().EmailCodeTTLMinutes
+		if ttl <= 0 {
+			ttl = 10
+		}
+		a.saveDelAccountPending(&delAccountPendingState{
+			TelegramID: telegramID,
+			ChatID:     chatID,
+			UserUID:    u.UID,
+			Stage:      delAccountStageEmail,
+			ExpiresAt:  time.Now().Add(time.Duration(ttl) * time.Minute).Unix(),
+			Reason:     reason,
+		})
+		msg := "验证码已发送到你的绑定邮箱，请查收后发送 /delAccount email <验证码>"
+		if reason != "" {
+			msg += "\n\n删除原因将在验证后提交：" + truncateString(reason, 200)
+		}
+		_ = a.telegramSendMessage(ctx, chatID, msg)
 
 	case "emby":
 		if !hasEmby {
@@ -624,9 +632,6 @@ func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID i
 		if hasEmail && emailConfigured {
 			_ = a.telegramSendMessage(ctx, chatID, "你已绑定已验证邮箱，必须使用邮箱验证码删除。发送 /delAccount email 开始。")
 			return
-		}
-		if len(actionArgs) > 1 && reason == "" {
-			reason = strings.Join(actionArgs[1:], " ")
 		}
 		a.clearDelAccountPending(chatID, telegramID)
 		state := &delAccountPendingState{
@@ -661,28 +666,61 @@ func (a *App) telegramHandleDelAccount(ctx context.Context, chatID, telegramID i
 			_ = a.telegramSendMessage(ctx, chatID, "你绑定了 Emby 账号，必须通过 Web 密码 + Emby 密码两步验证删除。发送 /delAccount emby 开始。")
 			return
 		}
-		if len(args) > 1 && reason == "" {
-			reason = strings.Join(args[1:], " ")
-		}
+		// 修复：confirm 不再当场删除，而是进入 pending，要求在下一条消息里发送
+		// Web 登录密码作为二次确认（复用两步验证的 Web 密码阶段，跳过 Emby 阶段）。
 		a.clearDelAccountPending(chatID, telegramID)
-		a.telegramExecuteDelAccount(ctx, chatID, u, reason)
+		a.saveDelAccountPending(&delAccountPendingState{
+			TelegramID: telegramID,
+			ChatID:     chatID,
+			UserUID:    u.UID,
+			SkipEmby:   true,
+			ExpiresAt:  time.Now().Add(180 * time.Second).Unix(),
+			Reason:     reason,
+		})
+		msg := "即将永久删除你的账号。请在 3 分钟内发送你的 Web 登录密码作为最终确认。\n\n密码不会记录或分享，仅用于验证身份。\n发送 /cancel 取消操作。"
+		if reason != "" {
+			msg += "\n\n删除原因：" + truncateString(reason, 200)
+		}
+		_ = a.telegramSendMessage(ctx, chatID, msg)
 
 	case "cancel":
 		a.clearDelAccountPending(chatID, telegramID)
 		_ = a.telegramSendMessage(ctx, chatID, "已取消删除操作。")
-
-	default:
-		_ = a.telegramSendMessage(ctx, chatID, "未知参数。请发送 /delAccount 查看可用的验证方式。")
 	}
 }
 
-// isKnownDelAccountVerb 检查是否是 delAccount 的已知子命令。
+// isKnownDelAccountVerb 检查是否是 delAccount 的已知子命令（调用方需先转小写）。
 func isKnownDelAccountVerb(s string) bool {
-	switch s {
+	switch strings.ToLower(s) {
 	case "email", "emby", "confirm", "force", "cancel":
 		return true
 	}
 	return false
+}
+
+// delAccountLooksLikeEmailCode 判断参数是否形如本站当前配置生成的邮箱验证码
+// （长度与字符集都要对上），用来区分 /delAccount email <验证码> 和 <原因>。
+func (a *App) delAccountLooksLikeEmailCode(s string) bool {
+	length := a.cfg().EmailCodeLength
+	if length < 4 {
+		length = 6
+	}
+	if length > 12 {
+		length = 12
+	}
+	if len(s) != length {
+		return false
+	}
+	alphabet := emailCodeDigits
+	if strings.ToLower(strings.TrimSpace(a.cfg().EmailCodeType)) == "alphanumeric" {
+		alphabet = emailCodeAlnum
+	}
+	for _, r := range s {
+		if !strings.ContainsRune(alphabet, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // telegramExecuteDelAccount 执行账号删除操作（从本地删除 + 远端 Emby 解绑 + 清除会话）。

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prejudice-studio/twilight/internal/security"
 	"github.com/prejudice-studio/twilight/internal/store"
 )
 
@@ -66,6 +67,7 @@ func newRecordingTelegramServer(t *testing.T, app *App) *recordingTelegramServer
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:audit-fix"
 	app.cfg().TelegramAPIURL = f.URL
+	app.cfg().AuditLogEnabled = true
 	return f
 }
 
@@ -161,5 +163,104 @@ func TestTelegramPanelDisabledBlocksTwguserAndCallbacks(t *testing.T) {
 	}})
 	if got, _ := app.store().User(target.UID); !got.Active {
 		t.Fatal("disabled panel callback still disabled the target user")
+	}
+}
+
+func auditLogsByAction(app *App, action string) []store.AuditLog {
+	out := []store.AuditLog{}
+	for _, entry := range app.store().ListAuditLogs() {
+		if entry.Action == action {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func mustHashPassword(t *testing.T, password string) string {
+	t.Helper()
+	hash, err := security.HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+// 不认得的参数只回说明，不能把无邮箱无 Emby 的账号直接删掉；动词不分大小写。
+func TestTelegramDelAccountUnknownArgOnlyShowsHelp(t *testing.T) {
+	app := newTestApp(t)
+	tg := newRecordingTelegramServer(t, app)
+	u := mustCreateTGUser(t, app, store.User{Username: "del-unknown", PasswordHash: mustHashPassword(t, "Password123456"), Role: store.RoleNormal, Active: true, TelegramID: 5101})
+	ctx := context.Background()
+	for _, args := range [][]string{{"help"}, {"?"}, {"我想看看"}} {
+		app.telegramHandleDelAccount(ctx, 5101, 5101, args)
+		if _, ok := app.store().User(u.UID); !ok {
+			t.Fatalf("/delAccount %v deleted the account", args)
+		}
+		if app.peekDelAccountPending(5101, 5101) != nil {
+			t.Fatalf("/delAccount %v started a pending deletion", args)
+		}
+	}
+	app.telegramHandleDelAccount(ctx, 5101, 5101, []string{"Cancel"})
+	if !strings.Contains(tg.lastSent(), "已取消") {
+		t.Fatalf("/delAccount Cancel should be treated as cancel, got %q", tg.lastSent())
+	}
+}
+
+// confirm 必须二次确认（Web 密码），原因要带到审计里。
+func TestTelegramDelAccountConfirmRequiresPassword(t *testing.T) {
+	app := newTestApp(t)
+	newRecordingTelegramServer(t, app)
+	u := mustCreateTGUser(t, app, store.User{Username: "del-confirm", PasswordHash: mustHashPassword(t, "Password123456"), Role: store.RoleNormal, Active: true, TelegramID: 5102})
+	ctx := context.Background()
+	app.telegramHandleDelAccount(ctx, 5102, 5102, []string{"CONFIRM", "不用了"})
+	if _, ok := app.store().User(u.UID); !ok {
+		t.Fatal("/delAccount confirm deleted the account without a second confirmation")
+	}
+	if !app.telegramConsumeDelAccountPending(ctx, 5102, 5102, "wrong-password") {
+		t.Fatal("pending confirm should consume the password message")
+	}
+	if _, ok := app.store().User(u.UID); !ok {
+		t.Fatal("wrong password deleted the account")
+	}
+	if !app.telegramConsumeDelAccountPending(ctx, 5102, 5102, "Password123456") {
+		t.Fatal("pending confirm should consume the password message")
+	}
+	if _, ok := app.store().User(u.UID); ok {
+		t.Fatal("correct password should delete the account")
+	}
+	logs := auditLogsByAction(app, "self_delete_via_telegram")
+	if len(logs) != 1 || logs[0].Detail["reason"] != "不用了" {
+		t.Fatalf("delete audit missing reason: %#v", logs)
+	}
+}
+
+// /delAccount email <原因> 不能被当成验证码消耗；发码时的原因要带到验证后。
+func TestTelegramDelAccountEmailReasonIsNotCode(t *testing.T) {
+	app := newTestApp(t)
+	newRecordingTelegramServer(t, app)
+	cfg := app.cfg()
+	cfg.EmailEnabled = true
+	cfg.SMTPHost = "127.0.0.1"
+	cfg.SMTPPort = 1 // 连接立即被拒，发码失败但不会卡住
+	cfg.SMTPFromAddress = "noreply@example.com"
+	u := mustCreateTGUser(t, app, store.User{Username: "del-email", Email: "del@example.com", EmailVerified: true, EmailVerifiedAt: time.Now().Unix(), Role: store.RoleNormal, Active: true, TelegramID: 5103})
+	now := time.Now().Unix()
+	rec := store.EmailVerification{ID: "delacct-rec", Purpose: emailPurposeDelAccount, Email: u.Email, UID: u.UID, MaxAttempts: 1, CreatedAt: now, ExpiresAt: now + 600, LastSentAt: now}
+	rec.CodeHash = app.hashEmailCode(rec.ID, "135790")
+	if err := app.store().PutEmailVerification(rec); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// 原因只有一个词：修复前会被当成验证码，MaxAttempts=1 直接把真码烧掉。
+	app.telegramHandleDelAccount(ctx, 5103, 5103, []string{"email", "不想用了"})
+	// 模拟发码成功后留下的 pending 原因（真实发码依赖 SMTP，这里直接写入）。
+	app.saveDelAccountPending(&delAccountPendingState{TelegramID: 5103, ChatID: 5103, UserUID: u.UID, Stage: delAccountStageEmail, ExpiresAt: now + 600, Reason: "不想用了"})
+	app.telegramHandleDelAccount(ctx, 5103, 5103, []string{"email", "135790"})
+	if _, ok := app.store().User(u.UID); ok {
+		t.Fatal("valid email code should delete the account (reason must not burn the code)")
+	}
+	logs := auditLogsByAction(app, "self_delete_via_telegram")
+	if len(logs) != 1 || logs[0].Detail["reason"] != "不想用了" {
+		t.Fatalf("delete audit missing email-flow reason: %#v", logs)
 	}
 }
