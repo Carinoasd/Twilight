@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2350,6 +2351,44 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 	return result, nil
 }
 
+// removeRegCodeRefsForUIDLocked 只从注册码摘除对该 UID 的引用（UsedBy/UsedByUIDs），
+// 不回退 UseCount、不改 Active：用于删号等"用户自身消失"的路径，已消费次数不可退还，
+// 否则单次码可借删号重放。UsedByUIDs 用新切片重建而非就地 [:0] 改写——旧切片的底层
+// 数组可能被锁外持有的 RegCode 副本（RegCode()/ListRegCodes 的返回值）共享，就地
+// 改写会造成数据竞争并篡改调用方手里的快照。返回摘除的 UsedByUIDs 条数。
+func (s *Store) removeRegCodeRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	removed := 0
+	for code, rc := range s.state.RegCodes {
+		dirty := false
+		if rc.UsedBy == uid {
+			rc.UsedBy = 0
+			dirty = true
+		}
+		if slices.Contains(rc.UsedByUIDs, uid) {
+			pruned := make([]int64, 0, len(rc.UsedByUIDs))
+			for _, u := range rc.UsedByUIDs {
+				if u == uid {
+					removed++
+					continue
+				}
+				pruned = append(pruned, u)
+			}
+			if len(pruned) == 0 {
+				pruned = nil
+			}
+			rc.UsedByUIDs = pruned
+			dirty = true
+		}
+		if dirty {
+			s.state.RegCodes[code] = rc
+		}
+	}
+	return removed
+}
+
 // clearRegCodeRefsForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
 // 回退；回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
 // 返回抹除的引用条数（每个码对同一 UID 至多一条）。UsedByTelegramIDs 保持不动：
@@ -2900,40 +2939,10 @@ func (s *Store) deleteUserStateLocked(uid int64) error {
 		}
 	}
 
-	// RegCode：删除用户时清理所有引用并回退 UseCount，释放被占用的码额度。
-	for code, rc := range s.state.RegCodes {
-		dirty := false
-		if rc.UsedBy == uid {
-			rc.UsedBy = 0
-			dirty = true
-		}
-		if len(rc.UsedByUIDs) > 0 {
-			pruned := rc.UsedByUIDs[:0]
-			for _, u := range rc.UsedByUIDs {
-				if u == uid {
-					if rc.UseCount > 0 {
-						rc.UseCount--
-					}
-					continue
-				}
-				pruned = append(pruned, u)
-			}
-			if len(pruned) != len(rc.UsedByUIDs) {
-				if len(pruned) == 0 {
-					rc.UsedByUIDs = nil
-				} else {
-					rc.UsedByUIDs = pruned
-				}
-				dirty = true
-			}
-		}
-		if dirty {
-			if !rc.Active && rc.UseCountLimit != -1 && rc.UseCount < rc.UseCountLimit {
-				rc.Active = true
-			}
-			s.state.RegCodes[code] = rc
-		}
-	}
+	// RegCode：删除用户时只摘除对该 UID 的引用，不回退 UseCount、不重新启用。
+	// 旧实现会退还次数并把用满的码恢复 Active，用户用单次码开通后 /delAccount
+	// 自删即可让同一张码重新可用（重放 / 转手），故已消费的次数永久保留。
+	s.removeRegCodeRefsForUIDLocked(uid)
 
 	// 公告作者匿名化：公告本体不删，只清掉 CreatedByUID 引用。
 	for id, ann := range s.state.Announcements {
