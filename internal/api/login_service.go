@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,7 +39,7 @@ func loginFail(status int, code ErrCode, message string) error {
 	return &loginFailure{Status: status, Code: code, Message: message}
 }
 
-func (a *App) authenticateLogin(input loginInput) (store.User, error) {
+func (a *App) authenticateLogin(ctx context.Context, input loginInput) (store.User, error) {
 	if (input.Username == "" && input.Email == "") || input.Password == "" {
 		return store.User{}, loginFail(http.StatusBadRequest, ErrAuthCredentialsEmpty, "用户名/邮箱和密码不能为空")
 	}
@@ -53,6 +55,21 @@ func (a *App) authenticateLogin(input loginInput) (store.User, error) {
 		user, found = a.store().FindUserByEmail(lookupEmail)
 	} else {
 		user, found = a.store().FindUserByUsername(input.Username)
+	}
+
+	// Consume the account budget before any password verification, including
+	// successful guesses. Email takes precedence over username in both lookup
+	// and throttling; aliases of an existing account share one UID budget.
+	identifier := input.Username
+	if input.Email != "" {
+		identifier = input.Email
+	}
+	key := "identifier:" + strings.ToLower(strings.TrimSpace(identifier))
+	if found {
+		key = "uid:" + strconv.FormatInt(user.UID, 10)
+	}
+	if !a.allowRate(ctx, rateKey("login:user:", key), a.cfg().RateLimitLoginUserPer5m, 5*time.Minute) {
+		return store.User{}, loginFail(http.StatusTooManyRequests, ErrLoginRateLimited, "登录过于频繁，请稍后再试")
 	}
 
 	encoded := dummyPasswordHash()
@@ -147,18 +164,8 @@ func (a *App) handleLoginResource(w http.ResponseWriter, r *http.Request) {
 		UserAgent: r.UserAgent(),
 		IP:        a.clientIP(r),
 	}
-	user, err := a.authenticateLogin(input)
+	user, err := a.authenticateLogin(r.Context(), input)
 	if err != nil {
-		if failure, ok := err.(*loginFailure); ok && failure.Code == ErrLoginInvalid && a.cfg().RateLimitLoginUserPer5m > 0 {
-			userKey := strings.ToLower(strings.TrimSpace(input.Username))
-			if input.Email != "" && userKey == "" {
-				userKey = strings.ToLower(strings.TrimSpace(input.Email))
-			}
-			if userKey != "" && !a.allowRate(r.Context(), rateKey("login:user:", userKey), a.cfg().RateLimitLoginUserPer5m, 5*time.Minute) {
-				failWithCode(w, http.StatusTooManyRequests, ErrLoginRateLimited, "登录过于频繁，请稍后再试")
-				return
-			}
-		}
 		if failure, ok := err.(*loginFailure); ok {
 			failWithCode(w, failure.Status, failure.Code, failure.Message)
 			return

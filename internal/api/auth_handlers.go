@@ -69,13 +69,10 @@ func (a *App) handleLoginByAPIKey(w http.ResponseWriter, r *http.Request, _ Para
 		failWithCode(w, http.StatusForbidden, ErrAccountDisabled, "账号已被禁用")
 		return
 	}
-	token, expires, err := a.sessions().Create(r.Context(), u.UID)
-	if err != nil {
-		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
-		return
-	}
-	a.issueSessionCookies(w, token, expires)
-	ok(w, "登录成功", map[string]any{"token": token, "user": publicUser(u)})
+	// API scopes authorize only the API-key surface. Even all four scopes do
+	// not authorize a full Web session (especially for an administrator), and
+	// a detached session would outlive key revocation and expiration.
+	failWithCode(w, http.StatusForbidden, ErrAPIKeyPermissionDenied, "API Key 不能用于网页登录，请使用用户名或邮箱和密码")
 }
 
 func (a *App) handleDirectLoginUnavailable(w http.ResponseWriter, r *http.Request, _ Params) {

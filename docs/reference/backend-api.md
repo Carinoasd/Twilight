@@ -362,12 +362,14 @@ curl -X POST "http://localhost:5000/api/v1/auth/login" \
 - 说明：固定返回"直接登录不可用"。Telegram 仅用于绑定，不作为登录入口。
 - 认证：公开（`AuthPublic`）
 
-### 5.4 API Key 登录
+### 5.4 API Key 登录（已禁用会话兑换）
 
 `POST /auth/login/apikey`
 
-- 说明：用 API Key 换取登录态。
+- 说明：V1/V2 保留此兼容入口，但有效且所属账号启用的 API Key 返回 HTTP 403 + `API_KEY_PERMISSION_DENIED`，不会签发会话或 Cookie。无效、禁用或到期的 Key 仍返回 HTTP 401。API Key 仅用于 `/apikey/*` 权限受限接口；网页登录请使用用户名/邮箱和密码。
 - 认证：公开（`AuthPublic`）
+
+此限制同样适用于管理员的 Key、默认四项权限全部开启的 Key 和 legacy Key。API 权限不能代表完整网页权限，不能通过会话兑换绕过 scope、有效期或 Key 撤销。
 
 ### 5.5 登出
 

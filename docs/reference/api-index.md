@@ -51,7 +51,7 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | GET | `/api/v2/admin/health/emby` | Admin | 独立从后端连接 Emby 并读取有限服务状态；私有 `no-store`，失败不泄露上游诊断 |
 | GET | `/api/v2/admin/stats` | Admin | 返回用户、注册码、Redis 回退、路由和运行时间摘要；私有 `no-store`，不包含播放统计 |
 | POST | `/api/v2/auth/login` | Public | 使用 Web 用户名/邮箱和密码创建会话；响应不缓存 |
-| POST | `/api/v2/auth/login/apikey` | Public | 使用 API Key 创建会话；响应不缓存 |
+| POST | `/api/v2/auth/login/apikey` | Public | 兼容入口：有效 Key 返回 403，禁止兑换网页会话；响应不缓存 |
 | POST | `/api/v2/auth/login/telegram` | Public | 保留 Telegram 直登录兼容入口；当前按策略返回不可用 |
 | GET | `/api/v2/auth/me` | User | 返回当前会话的用户摘要；私有 `no-store` |
 | POST | `/api/v2/auth/logout` | User | 注销当前会话 |
@@ -166,7 +166,7 @@ V2 业务模块迁移采用兼容 adapter；未列入 V2 的接口仍使用 `/ap
 | POST | `/api/v1/auth/password/email/request` | Public | 邮箱找回密码第一步：向已验证邮箱发送验证码（统一成功响应防枚举） |
 | POST | `/api/v1/auth/password/email/reset` | Public | 邮箱找回密码第二步：校验验证码并重置登录密码 |
 | POST | `/api/v1/auth/login/telegram` | Public | Telegram 直登入口（当前由 `handleDirectLoginUnavailable` 返回不可用） |
-| POST | `/api/v1/auth/login/apikey` | Public | 用 API Key 换取登录会话 |
+| POST | `/api/v1/auth/login/apikey` | Public | 兼容入口：有效 Key 返回 403，禁止兑换网页会话 |
 | POST | `/api/v1/auth/logout` | User | 注销当前会话 |
 | POST | `/api/v1/auth/logout/all` | User | 注销该用户全部会话 |
 | GET | `/api/v1/auth/me` | User | 当前登录用户资料 |

@@ -128,7 +128,7 @@ JSON 请求体由统一解码器限制为 256 KiB、最多 32 层嵌套且只能
 | --- | --- | --- | --- |
 | 全局（每 IP） | `global_per_minute` | 1200 | 所有请求进入路由前先过这道闸 |
 | 登录（每 IP） | `login_per_minute` | 60 | 登录 / API Key 登录 |
-| 登录（每账号 5 分钟） | `login_user_per_5m` | 10 | 桶判定在「用户名是否存在」之前消耗，避免账号枚举时序差 |
+| 登录（每账号 5 分钟） | `login_user_per_5m` | 10 | 密码校验前消耗；已有账号按 UID 共享用户名/邮箱配额，未知账号按规范化登录标识计数；成功和失败尝试均计数 |
 | 注册（每 IP 10 分钟） | `register_per_10m` | 30 | |
 | 找回密码（每 IP 10 分钟） | `forgot_password_ip_per_10m` | 20 | 含邮箱找回两步 |
 | 找回密码（每账号 30 分钟） | `forgot_password_user_per_30m` | 10 | |
@@ -191,6 +191,8 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 
 ## 11. 最小权限原则
 
+- API Key 不得兑换完整网页会话，V1/V2 `/auth/login/apikey` 对有效且账号启用的 Key 返回 `API_KEY_PERMISSION_DENIED`，不签发 Token 或 Cookie；管理员和 legacy Key 同样受限。网页登录使用密码，外部集成继续使用带 scope 检查的 `/apikey/*`。升级前已兑换的会话应按需通过现有流程全部撤销。
+- Key 的正数 `expired_at` 在 Store 查询层强制校验，等于或早于当前 Unix 秒即无效；索引和扫描回退路径必须一致。此规则检查的是 Key 自身有效期，独立于账号到期状态。
 - API Key 仅授予必要 scope；`?apikey=` query 传参仅对显式允许 query 的 Key 生效（默认不允许）。
 - `/apikey/*` 在路由 handler 前强制执行 scope：账号读写分别要求 `account:read` / `account:write`，Emby 状态与会话操作分别要求 `emby:read` / `emby:write`。缺少 scope 返回 `API_KEY_PERMISSION_DENIED`，不能把 `permissions` 退化成仅展示字段。
 - API Key 不能自行修改权限；权限变更必须通过已登录 Web 端完成，避免只读 Key 自提权。
