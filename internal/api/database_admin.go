@@ -121,6 +121,7 @@ func (a *App) handleDatabaseBackupDelete(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	_ = os.Remove(store.BackupMetaPath(target))
+	a.audit(r, "delete_database_backup", "admin", 0, map[string]any{"name": info.Name, "size": info.Size})
 	ok(w, "数据库备份已删除", map[string]any{"backup": info})
 }
 
@@ -132,6 +133,7 @@ func (a *App) handleDatabaseBackup(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusInternalServerError, ErrDBBackupCreateFailed, "数据库备份失败")
 		return
 	}
+	a.audit(r, "create_database_backup", "admin", 0, map[string]any{"name": info.Name, "size": info.Size, "note": note})
 	ok(w, "数据库备份已创建", map[string]any{"backup": info})
 }
 
@@ -193,6 +195,8 @@ func (a *App) handleDatabaseRestore(w http.ResponseWriter, r *http.Request, _ Pa
 		},
 	}
 	if boolValue(payload, "dry_run", false) || boolValue(payload, "preview", false) || stringValue(payload, "confirm") != databaseRestoreConfirmPhrase {
+		// 预览不改任何数据：不写审计，也不让 fallback 把它记成与真恢复同名的动作。
+		skipAuditForDryRun(r)
 		ok(w, "恢复预览已生成", result)
 		return
 	}
@@ -211,6 +215,14 @@ func (a *App) handleDatabaseRestore(w http.ResponseWriter, r *http.Request, _ Pa
 	result["requires_confirmation"] = false
 	result["pre_restore_backup"] = preRestore
 	result["pre_operation_backup"] = preRestore
+	// 必须在 LoadSnapshot 之后写：恢复会用备份里的审计表整体替换当前审计表。
+	a.audit(r, "restore_database", "admin", 0, map[string]any{
+		"dry_run":            false,
+		"backup":             filepath.Base(target),
+		"pre_restore_backup": preRestore.Name,
+		"counts":             result["counts"],
+		"current_counts":     result["current_counts"],
+	})
 	ok(w, "数据库已恢复", result)
 }
 
@@ -270,6 +282,7 @@ func (a *App) handleDatabaseMigrate(w http.ResponseWriter, r *http.Request, _ Pa
 				return
 			}
 			targetReady = postgresTargetReadyMap(targetDriver, status)
+			skipAuditForDryRun(r)
 			ok(w, "迁移预检通过", a.databaseMigrationSummary(targetDriver, state, dryRun, snapshotBytes, targetReady))
 			return
 		}
@@ -294,6 +307,10 @@ func (a *App) handleDatabaseMigrate(w http.ResponseWriter, r *http.Request, _ Pa
 		summary := a.databaseMigrationSummary(targetDriver, state, dryRun, snapshotBytes, targetReady)
 		summary["pre_migration_backup"] = preMigration
 		summary["pre_operation_backup"] = preMigration
+		a.audit(r, "migrate_database", "admin", 0, map[string]any{
+			"dry_run": false, "source_driver": sourceDriver, "target_driver": targetDriver,
+			"pre_backup": preMigration.Name, "users": len(state.Users),
+		})
 		ok(w, "数据库已迁移到 PostgreSQL", summary)
 	case store.BackendJSON, "file":
 		targetDriver = store.BackendJSON
@@ -311,6 +328,7 @@ func (a *App) handleDatabaseMigrate(w http.ResponseWriter, r *http.Request, _ Pa
 		if dryRun {
 			summary := a.databaseMigrationSummary(store.BackendJSON, state, dryRun, snapshotBytes, targetReady)
 			summary["state_file"] = targetPath
+			skipAuditForDryRun(r)
 			ok(w, "迁移预检通过", summary)
 			return
 		}
@@ -334,6 +352,10 @@ func (a *App) handleDatabaseMigrate(w http.ResponseWriter, r *http.Request, _ Pa
 		summary["state_file"] = targetPath
 		summary["pre_migration_backup"] = preMigration
 		summary["pre_operation_backup"] = preMigration
+		a.audit(r, "migrate_database", "admin", 0, map[string]any{
+			"dry_run": false, "source_driver": sourceDriver, "target_driver": store.BackendJSON,
+			"state_file": filepath.Base(targetPath), "pre_backup": preMigration.Name, "users": len(state.Users),
+		})
 		ok(w, "数据库已迁移到 JSON 状态文件", summary)
 	default:
 		failWithCode(w, http.StatusBadRequest, ErrInvalidPayload, "不支持的数据库目标")

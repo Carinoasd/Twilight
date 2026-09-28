@@ -193,6 +193,7 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 	if options.Preview || options.Confirm != migrationImportConfirmPhrase {
 		summary["dry_run"] = true
 		summary["requires_confirmation"] = true
+		skipAuditForDryRun(r)
 		ok(w, "迁移导入预览已生成", summary)
 		return
 	}
@@ -215,7 +216,7 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 	summary["config_applied"] = options.ApplyConfig
 	summary["resources_written"] = len(plan.Entries)
 	a.audit(r, "import_migration_archive", "admin", 0, map[string]any{
-		"files": len(archive.Files), "resources": len(plan.Entries), "config_applied": options.ApplyConfig,
+		"files": len(archive.Files), "resources": len(plan.Entries), "resources_skipped": len(plan.Skipped), "config_applied": options.ApplyConfig,
 	})
 	ok(w, "迁移数据已导入", summary)
 }

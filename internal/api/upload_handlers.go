@@ -395,6 +395,7 @@ func (a *App) handleUploadServerIcon(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, status, ErrConfigSaveFailed, message)
 		return
 	}
+	a.audit(r, "upload_server_icon", "admin", 0, map[string]any{"filename": filename, "bytes": len(data), "content_type": contentType})
 	ok(w, "上传成功", map[string]any{
 		"server_icon": serverIcon,
 		"url":         "/api/v2/system/server-icon?ts=" + strconv.FormatInt(time.Now().Unix(), 10),

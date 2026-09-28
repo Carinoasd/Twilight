@@ -19,6 +19,12 @@ func (a *App) handleSystemUpdate(w http.ResponseWriter, r *http.Request, _ Param
 	dryRun := boolValue(payload, "dry_run", false)
 	allowDirty := boolValue(payload, "allow_dirty", false)
 	result := applyGitUpdate(r.Context(), repoURL, branch, restart, dryRun, allowDirty)
+	if dryRun {
+		skipAuditForDryRun(r)
+	} else {
+		// 成功与失败都记：失败响应是 4xx/5xx，fallback 不会记录。
+		a.audit(r, "system_update", "admin", 0, systemUpdateAuditDetail(result, branch))
+	}
 	if !boolish(result["success"]) {
 		// 走标准 envelope 而非裸 map：保留 result 作为 data 字段下发，
 		// error_code 由 result["error_code"] 透出，前端基于稳定码做分支
@@ -34,4 +40,27 @@ func (a *App) handleSystemUpdate(w http.ResponseWriter, r *http.Request, _ Param
 		return
 	}
 	ok(w, asString(result["message"]), result)
+}
+
+// systemUpdateAuditDetail 从 applyGitUpdate 的结果里摘出审计所需字段（不含命令输出）。
+func systemUpdateAuditDetail(result map[string]any, branch string) map[string]any {
+	commitOf := func(key string) string {
+		if state, ok := result[key].(map[string]any); ok {
+			return asString(state["commit"])
+		}
+		return ""
+	}
+	detail := map[string]any{
+		"branch":        branch,
+		"dry_run":       boolish(result["dry_run"]),
+		"success":       boolish(result["success"]),
+		"updated":       boolish(result["updated"]),
+		"restarted":     boolish(result["restart_scheduled"]),
+		"before_commit": commitOf("before"),
+		"after_commit":  commitOf("after"),
+	}
+	if code, ok := result["error_code"].(ErrCode); ok && code != "" {
+		detail["error_code"] = string(code)
+	}
+	return detail
 }

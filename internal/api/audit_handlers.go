@@ -82,6 +82,12 @@ func markRequestAuditWritten(r *http.Request) {
 	}
 }
 
+// skipAuditForDryRun 用于预览 / dry-run 分支：它们不改任何数据，不写审计，
+// 同时标记本请求"已处理审计"，避免 fallback 把预览记成与真实操作同名的动作。
+func skipAuditForDryRun(r *http.Request) {
+	markRequestAuditWritten(r)
+}
+
 func requestAuditWritten(r *http.Request) bool {
 	if r == nil {
 		return false

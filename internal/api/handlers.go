@@ -1940,6 +1940,8 @@ func (a *App) handleConfigSchemaUpdate(w http.ResponseWriter, r *http.Request, _
 }
 
 func (a *App) handleConfigSweep(w http.ResponseWriter, r *http.Request, _ Params) {
+	// 目前清扫不修改任何键；仍写明确审计，便于与其他配置操作一起追溯。
+	a.audit(r, "config_sweep", "admin", 0, map[string]any{"changed": false, "removed_keys": []string{}})
 	ok(w, "config check completed", map[string]any{"changed": false, "config_file": a.cfg().ConfigFile})
 }
 

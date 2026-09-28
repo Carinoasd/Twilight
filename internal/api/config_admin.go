@@ -110,7 +110,9 @@ func canonicalConfigSection(section string) string {
 func (a *App) handleConfigTOMLPutSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	content := stringValue(payload, "content")
+	var before map[string]map[string]any
 	info, status, message := a.editConfig(stringValue(payload, "expected_revision"), func(snapshot configEditSnapshot) (string, error) {
+		before = configValues(snapshot.file)
 		// 结构化回填：只有位于密钥键路径上的哨兵才换成磁盘同一路径的真值。
 		return restoreTOMLSecrets(content, snapshot.content, configValues(snapshot.file))
 	})
@@ -118,7 +120,7 @@ func (a *App) handleConfigTOMLPutSafe(w http.ResponseWriter, r *http.Request, _ 
 		failConfigEdit(w, status, message)
 		return
 	}
-	a.audit(r, "update_config_toml", "admin", 0, map[string]any{"bytes": len(content)})
+	a.audit(r, "update_config_toml", "admin", 0, map[string]any{"bytes": len(content), "changed_keys": a.configChangedKeysSince(before)})
 	ok(w, "配置已保存并热重载", info)
 }
 
@@ -197,6 +199,7 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 		},
 	}
 	if boolValue(payload, "dry_run", false) || boolValue(payload, "preview", false) || stringValue(payload, "confirm") != configRestoreConfirmPhrase {
+		skipAuditForDryRun(r)
 		ok(w, "配置恢复预览已生成", result)
 		return
 	}
@@ -212,7 +215,7 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 	result["pre_operation_backup"] = info["backup"]
 	result["reload"] = info["reload"]
 	result["revision"] = info["revision"]
-	a.audit(r, "restore_config_backup", "admin", 0, map[string]any{"backup": backup.Name, "bytes": len(content)})
+	a.audit(r, "restore_config_backup", "admin", 0, map[string]any{"backup": backup.Name, "bytes": len(content), "changed_keys": configChangedKeys(configValues(snapshot.file), a.currentFileConfigValues())})
 	ok(w, "配置已恢复并热重载", result)
 }
 
@@ -335,13 +338,66 @@ func (a *App) handleConfigSchemaFull(w http.ResponseWriter, r *http.Request, _ P
 func (a *App) handleConfigSchemaUpdateSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	rawSections, _ := payload["sections"].(map[string]any)
+	var before map[string]map[string]any
+	if snapshot, err := a.configEditSnapshot(); err == nil {
+		before = configValues(snapshot.file)
+	}
 	info, status, message := a.patchConfigSections(stringValue(payload, "expected_revision"), rawSections)
 	if status != http.StatusOK {
 		failConfigEdit(w, status, message)
 		return
 	}
-	a.audit(r, "update_config_schema", "admin", 0, map[string]any{"sections": sortedKeys(rawSections)})
+	a.audit(r, "update_config_schema", "admin", 0, map[string]any{"sections": sortedKeys(rawSections), "changed_keys": a.configChangedKeysSince(before)})
 	ok(w, "配置已保存并热重载", info)
+}
+
+// currentFileConfigValues 返回当前配置文件本身（不含覆盖层）的规范化值；读取失败返回 nil。
+func (a *App) currentFileConfigValues() map[string]map[string]any {
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		return nil
+	}
+	return configValues(snapshot.file)
+}
+
+// configChangedKeysSince 对比 before 与当前配置文件，返回变化的 "Section.key"。
+func (a *App) configChangedKeysSince(before map[string]map[string]any) []string {
+	if before == nil {
+		return nil
+	}
+	return configChangedKeys(before, a.currentFileConfigValues())
+}
+
+// configChangedKeys 返回两份规范化配置值之间变化的键路径（"Section.key"）。
+// 审计只记"哪些键变了"，不记前后值，密钥字段因此也不会进入审计明细。
+func configChangedKeys(before, after map[string]map[string]any) []string {
+	if before == nil || after == nil {
+		return nil
+	}
+	changed := []string{}
+	seen := map[string]bool{}
+	visit := func(section, key string) {
+		path := section + "." + key
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		if !reflect.DeepEqual(before[section][key], after[section][key]) {
+			changed = append(changed, path)
+		}
+	}
+	for section, fields := range before {
+		for key := range fields {
+			visit(section, key)
+		}
+	}
+	for section, fields := range after {
+		for key := range fields {
+			visit(section, key)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 // existingConfigContent 返回磁盘上的配置原文。文件不存在或读不出来时返回空串，
