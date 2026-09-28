@@ -15,4 +15,5 @@ export const confirmPhrases = {
   clearViolations: "CLEAR_VIOLATIONS",
   clearAuditLogs: "CLEAR_AUDIT_LOGS",
   pruneAuditLogs: "PRUNE_AUDIT_LOGS",
+  deleteAuditLog: "DELETE_AUDIT_LOG",
 } as const;

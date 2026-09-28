@@ -2694,7 +2694,9 @@
     "prunePreserveAdmin": "Preserve admin operation logs (age-based only)",
     "pruneConfirm": "Confirm Prune",
     "pruneDone": "Prune completed",
-    "pruneFailed": "Prune failed"
+    "pruneFailed": "Prune failed",
+    "deleteConfirmTitle": "Delete this audit log entry?",
+    "deleteConfirmDescription": "Entry #{id} ({action}) will be deleted. The deletion itself is recorded in a protected entry that cannot be removed."
   },
   "embyActivityLogs": {
     "title": "Emby Activity Logs",

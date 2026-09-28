@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/prejudice-studio/twilight/internal/store"
+	"go.uber.org/zap"
 )
 
 const (
@@ -624,10 +626,30 @@ func (a *App) handleDeleteAuditLog(w http.ResponseWriter, r *http.Request, param
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "无效的日志 ID")
 		return
 	}
-	if err := a.store().DeleteAuditLog(id); err != nil {
+	// 单条删除也要求确认短语（body 的 confirm 或 query 的 confirm 均可）。
+	if firstNonEmpty(stringValue(decodeMap(r), "confirm"), r.URL.Query().Get("confirm")) != confirmDeleteAuditLog {
+		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "需要确认短语 confirm="+confirmDeleteAuditLog)
+		return
+	}
+	deleted, err := a.store().DeleteAuditLog(id)
+	if errors.Is(err, store.ErrAuditLogProtected) {
+		failWithCode(w, http.StatusForbidden, ErrForbidden, "该审计记录不可删除")
+		return
+	}
+	if err != nil {
 		failWithCode(w, http.StatusNotFound, ErrNotFound, "日志不存在")
 		return
 	}
+	// 删除成功后再写一条不可删除的自保记录，记下被删记录的关键信息。
+	a.auditAuditLogMaintenance(r, "delete_audit_log", deleted.UID, map[string]any{
+		"log_id":             deleted.ID,
+		"deleted_action":     deleted.Action,
+		"deleted_category":   deleted.Category,
+		"deleted_uid":        deleted.UID,
+		"deleted_username":   deleted.Username,
+		"deleted_target_uid": deleted.TargetUID,
+		"deleted_created_at": deleted.CreatedAt,
+	})
 	ok(w, "已删除", nil)
 }
 
@@ -637,16 +659,17 @@ func (a *App) handleClearAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "需要确认短语 confirm="+confirmClearAuditLogs)
 		return
 	}
-	removed := a.store().AuditLogCount()
-	if err := a.store().ClearAuditLogs(); err != nil {
+	removed, err := a.store().ClearAuditLogs()
+	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrInternal, "清空失败")
 		return
 	}
+	a.auditAuditLogMaintenance(r, "clear_audit_logs", 0, map[string]any{"removed": removed})
 	ok(w, "审计日志已清空", map[string]any{"removed": removed})
 }
 
 // handlePruneAuditLogs 条件清理审计日志：支持按条数裁剪（max_entries）和按天数裁剪（retention_days），
-// 两者可同时指定。需要确认短语。preserve_admin 控制是否保留管理员操作日志（仅对天数裁剪有效）。
+// 两者可同时指定。需要确认短语。preserve_admin 控制是否保留管理员操作日志（对条数与天数裁剪都生效）。
 func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	if stringValue(payload, "confirm") != confirmPruneAuditLogs {
@@ -674,9 +697,16 @@ func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusInternalServerError, ErrInternal, "裁剪失败")
 		return
 	}
+	a.auditAuditLogMaintenance(r, "prune_audit_logs", 0, map[string]any{
+		"max_entries":      maxEntries,
+		"retention_days":   retentionDays,
+		"preserve_admin":   preserveAdmin,
+		"removed_by_limit": result.RemovedByLimit,
+		"removed_by_age":   result.RemovedByAge,
+	})
 	logs := []string{}
 	if maxEntries > 0 {
-		logs = append(logs, fmt.Sprintf("保留最近 %d 条，删除 %d 条", maxEntries, result.RemovedByLimit))
+		logs = append(logs, fmt.Sprintf("保留最近 %d 条，删除 %d 条（保留管理员=%v）", maxEntries, result.RemovedByLimit, preserveAdmin))
 	}
 	if retentionDays > 0 {
 		logs = append(logs, fmt.Sprintf("删除 %d 天前 %d 条（保留管理员=%v）", retentionDays, result.RemovedByAge, preserveAdmin))
@@ -685,6 +715,19 @@ func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		"current": a.store().AuditLogCount(),
 		"logs":    logs,
 	})
+}
+
+// auditAuditLogMaintenance 在删除 / 清空 / 裁剪审计日志之后写自保记录。这些 action
+// 在 store 层受保护，不会被后续任何删除操作带走。审计总开关关闭时仍写一条 zap
+// 运行日志，保证至少留下操作者与范围。
+func (a *App) auditAuditLogMaintenance(r *http.Request, action string, targetUID int64, detail map[string]any) {
+	p := current(r)
+	zap.L().Warn("audit log maintenance",
+		zap.String("action", action),
+		zap.Int64("operator_uid", p.User.UID),
+		zap.String("operator", p.User.Username),
+		zap.Any("detail", detail))
+	a.audit(r, action, "admin", targetUID, detail)
 }
 
 func auditLogDTO(log store.AuditLog) map[string]any {

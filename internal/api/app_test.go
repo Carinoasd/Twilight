@@ -3155,8 +3155,10 @@ func TestClearAuditLogsDoesNotRecreateAuditEntry(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("clear audit status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if count := app.store().AuditLogCount(); count != 0 {
-		t.Fatalf("clear audit recreated an audit entry, count=%d logs=%#v", count, app.store().ListAuditLogs())
+	// 清空后只留下一条不可删除的 clear_audit_logs 自保记录。
+	logs := app.store().ListAuditLogs()
+	if len(logs) != 1 || logs[0].Action != "clear_audit_logs" || logs[0].UID != admin.UID {
+		t.Fatalf("clear audit should leave exactly one protected record, logs=%#v", logs)
 	}
 }
 
@@ -3164,7 +3166,7 @@ func TestFallbackAuditCoversSuccessfulMutationsWithoutExplicitAudit(t *testing.T
 	app := newTestApp(t)
 	app.cfg().AuditLogEnabled = true
 	cookies := registerAndLogin(t, app, "fallback-audit", "User123456")
-	if err := app.store().ClearAuditLogs(); err != nil {
+	if _, err := app.store().ClearAuditLogs(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3194,8 +3196,10 @@ func TestAuditMaintenanceRoutesSkipFallbackAudit(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("clear audit status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if count := app.store().AuditLogCount(); count != 0 {
-		t.Fatalf("audit maintenance route should not create fallback log, count=%d logs=%#v", count, app.store().ListAuditLogs())
+	// 不写 fallback，只写一条明确的 clear_audit_logs 自保记录。
+	logs := app.store().ListAuditLogs()
+	if len(logs) != 1 || logs[0].Action != "clear_audit_logs" || logs[0].Detail["fallback"] != nil {
+		t.Fatalf("audit maintenance route should only write the protected record, logs=%#v", logs)
 	}
 }
 

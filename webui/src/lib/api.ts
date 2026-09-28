@@ -2946,7 +2946,11 @@ class ApiClient {
   }
 
   async deleteAuditLog(id: number) {
-    return this.request(`/admin/audit-logs/${id}`, { method: "DELETE" });
+    // 单条删除也需要确认短语；后端删除后会写一条不可删除的 delete_audit_log 记录。
+    return this.request(`/admin/audit-logs/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirm: confirmPhrases.deleteAuditLog }),
+    });
   }
 
   async clearAuditLogs() {

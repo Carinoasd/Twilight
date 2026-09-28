@@ -972,7 +972,9 @@
     "prunePreserveAdmin": "保留管理员操作日志（仅对天数清理生效）",
     "pruneConfirm": "确认清理",
     "pruneDone": "条件清理完成",
-    "pruneFailed": "条件清理失败"
+    "pruneFailed": "条件清理失败",
+    "deleteConfirmTitle": "删除这条审计日志？",
+    "deleteConfirmDescription": "将删除 #{id}（{action}）。删除操作本身会留下一条不可删除的记录。"
   },
   "adminLogs": {
     "unknown": "未知",

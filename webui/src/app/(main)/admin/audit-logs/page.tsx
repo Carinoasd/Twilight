@@ -117,6 +117,8 @@ export default function AdminAuditLogsPage() {
   const [pruneDays, setPruneDays] = useState("90");
   const [prunePreserveAdmin, setPrunePreserveAdmin] = useState(true);
   const [isPruning, setIsPruning] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AuditLog | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const sortQuery = SORT_MAP[sortMode] || SORT_MAP.created_desc;
 
@@ -202,17 +204,23 @@ export default function AdminAuditLogsPage() {
     setPage(1);
   };
 
-  const handleDelete = async (id: number) => {
+  // 单条删除先弹确认框，确认后才带确认短语调用后端。
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
     try {
-      const res = await api.deleteAuditLog(id);
+      const res = await api.deleteAuditLog(deleteTarget.id);
       if (res.success) {
         toast({ title: t("adminAuditLog.deleted"), variant: "success" });
+        setDeleteTarget(null);
         void reload().catch(() => undefined);
       } else {
         toast({ title: t("common.deleteFailed"), description: res.message, variant: "destructive" });
       }
     } catch (err: unknown) {
       toast({ title: t("common.deleteFailed"), description: (err as Error).message, variant: "destructive" });
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -510,7 +518,8 @@ export default function AdminAuditLogsPage() {
                       variant="ghost"
                       size="icon"
                       className="h-8 w-8"
-                      onClick={() => handleDelete(log.id)}
+                      aria-label={t("common.delete")}
+                      onClick={() => setDeleteTarget(log)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -545,6 +554,26 @@ export default function AdminAuditLogsPage() {
           </Button>
         </div>
       )}
+
+      <Dialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("adminAuditLog.deleteConfirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("adminAuditLog.deleteConfirmDescription", { id: deleteTarget?.id ?? "", action: deleteTarget?.action ?? "" })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={isDeleting}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+              {isDeleting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t("common.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={clearOpen} onOpenChange={setClearOpen}>
         <DialogContent>
