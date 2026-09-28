@@ -1113,11 +1113,15 @@ func (a *App) handleRenew(w http.ResponseWriter, r *http.Request, _ Params) {
 	if a.rejectRegcodeWriteIfStorageMismatch(w) {
 		return
 	}
+	var expiredBefore int64
+	var renewDays int
 	u, _, err := a.store().ConsumeRegCodeAndUpdateUser(regCode, p.User.UID, p.User.TelegramID, func(u *store.User, code store.RegCode) error {
 		if err := validateSelfServiceRenewalTarget(*u); err != nil {
 			return err
 		}
+		expiredBefore = u.ExpiredAt
 		days := normalizeRegCodeDays(code.Days)
+		renewDays = days
 		// 用 renewExpiryAndReactivate 而不是裸 ExpiredAt = ...：自助续费会
 		// 把曾被 check_expired 设成 Active=false 的非邀请账号同步解禁，避免
 		// "续完仍登不上"的死循环。
@@ -1136,7 +1140,10 @@ func (a *App) handleRenew(w http.ResponseWriter, r *http.Request, _ Params) {
 		failWithCode(w, http.StatusBadRequest, ErrRegcodeInvalid, "注册码无效、已用完或已过期")
 		return
 	}
-	a.audit(r, "renew_account", "user", 0, map[string]any{"code": regCode})
+	a.audit(r, "renew_account", "user", 0, map[string]any{
+		"code_hint": regcodeAuditHint(regCode), "days": renewDays,
+		"expired_at_before": publicExpiryUnix(expiredBefore), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	})
 	ok(w, "续期成功", map[string]any{"expire_status": expireStatus(u.ExpiredAt), "expired_at": publicExpiryUnix(u.ExpiredAt), "user": publicUser(u)})
 }
 

@@ -71,6 +71,16 @@ func (a *App) handleRegistration(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// 公开注册路由不走 fallback 审计（AuthPublic），这里以新用户身份显式记一笔。
+	regDetail := map[string]any{
+		"telegram_bound": result.User.TelegramID != 0, "promoted_admin": result.FirstAdmin,
+		"pending_emby": result.User.PendingEmby, "has_email": strings.TrimSpace(input.Email) != "",
+	}
+	if result.RegCode.Code != "" {
+		regDetail["code_hint"] = regcodeAuditHint(result.RegCode.Code)
+		regDetail["days"] = result.RegCode.Days
+	}
+	a.auditWithUser(r, result.User.UID, result.User.Username, "register", "user", result.User.UID, regDetail)
 	created(w, "注册成功", map[string]any{
 		"user": publicUser(result.User), "first_admin": result.FirstAdmin,
 		"reg_code_used":           result.RegCode.Code,

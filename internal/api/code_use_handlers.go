@@ -130,7 +130,9 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 			days = maxDays
 		}
 	}
+	var expiredBefore int64
 	updateUser := func(u *store.User, reg store.RegCode) error {
+		expiredBefore = u.ExpiredAt
 		if source == "regcode" && reg.Type == 2 {
 			if err := validateSelfServiceRenewalTarget(*u); err != nil {
 				return err
@@ -241,9 +243,15 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 	data["expired_at"] = publicExpiryUnix(u.ExpiredAt)
 	data["role"] = u.Role
 	data["role_name"] = roleName(u.Role)
-	a.audit(r, "use_code", "user", 0, map[string]any{
-		"code": code, "source": source,
-	})
+	detail := map[string]any{
+		"code_hint": regcodeAuditHint(code), "source": source, "type": codeType, "days": days,
+		"pending_emby":      u.PendingEmby && u.EmbyID == "",
+		"expired_at_before": publicExpiryUnix(expiredBefore), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	}
+	if source == "invite" {
+		detail["inviter_uid"] = inviteForUse.InviterUID
+	}
+	a.audit(r, "use_code", "user", 0, detail)
 	ok(w, "使用成功", data)
 }
 

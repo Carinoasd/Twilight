@@ -183,8 +183,11 @@ func (a *App) handleCreateRegcodes(w http.ResponseWriter, r *http.Request, _ Par
 			return
 		}
 	}
+	// 以 code 结尾的键会被整体遮成 [REDACTED]，改记 code_hints（每张只留前后几码）。
 	a.audit(r, "create_regcode", "admin", 0, map[string]any{
-		"count": len(codes), "type": codeType, "days": days, "codes": codes,
+		"count": len(codes), "type": codeType, "days": days, "code_hints": regcodeAuditHints(codes),
+		"use_count_limit": useLimit, "validity_time": validity, "decoy": isDecoy,
+		"has_target": targetUsername != "" || targetTelegramUsername != "" || targetTelegramID > 0 || targetUID > 0,
 	})
 	ok(w, "注册码已创建", map[string]any{"codes": codes, "count": len(codes), "decoy": boolValue(payload, "decoy", false), "target_username": targetUsername, "target_telegram_username": targetTelegramUsername, "target_telegram_id": zeroNil(targetTelegramID), "target_uid": zeroNil(targetUID)})
 }
@@ -337,7 +340,8 @@ func (a *App) handleDeleteRegcode(w http.ResponseWriter, r *http.Request, params
 		return
 	}
 	a.audit(r, "delete_regcode", "admin", 0, map[string]any{
-		"code": code, "type": reg.Type, "days": reg.Days,
+		"code_hint": regcodeAuditHint(code), "type": reg.Type, "days": reg.Days,
+		"use_count": reg.UseCount, "use_count_limit": reg.UseCountLimit,
 	})
 	ok(w, "注册码已删除", map[string]any{
 		"deleted":       1,
@@ -406,8 +410,9 @@ func (a *App) handleBatchDeleteRegcodes(w http.ResponseWriter, r *http.Request, 
 		failWithCode(w, http.StatusInternalServerError, ErrRegcodeBatchFailed, "批量删除注册码失败")
 		return
 	}
+	// 旧 detail 的 deleted 键直接写入完整码值；改为只记提示。
 	a.audit(r, "batch_delete_regcode", "admin", 0, map[string]any{
-		"count": len(deleted), "deleted": deleted, "missing": len(missing), "select_all": selectAll,
+		"count": len(deleted), "deleted_hints": regcodeAuditHints(deleted), "missing": len(missing), "select_all": selectAll,
 	})
 	ok(w, "注册码已批量删除", map[string]any{
 		"deleted":       len(deleted),
