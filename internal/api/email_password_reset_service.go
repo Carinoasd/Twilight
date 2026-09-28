@@ -164,5 +164,7 @@ func (a *App) handleEmailPasswordResetResource(w http.ResponseWriter, r *http.Re
 		statusFromError(w, err)
 		return
 	}
+	// 登出态重设密码成功也要留痕（公开路由没有 fallback 审计）。
+	a.auditWithUser(r, user.UID, user.Username, "password_reset_via_email", "user", user.UID, map[string]any{"email_masked": maskEmail(user.Email)})
 	ok(w, "密码已重置，请使用新密码登录", map[string]any{"username": user.Username})
 }
