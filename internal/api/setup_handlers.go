@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
+	"go.uber.org/zap"
 )
 
 func (a *App) handleSetupStatus(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -45,13 +46,15 @@ func (a *App) handleSetupComplete(w http.ResponseWriter, r *http.Request, _ Para
 	deviceID := firstNonEmpty(r.Header.Get("X-Twilight-Device"), r.UserAgent(), a.clientIP(r))
 	ua := firstNonEmpty(r.UserAgent(), "unknown")
 	ip := a.clientIP(r)
-	_ = a.store().UpdateDevice(result.User.UID, deviceID, func(d *store.Device) {
+	// 同登录流程：设备与登录记录一次写入，失败记日志而非静默吞掉。
+	if err := a.store().RecordLogin(result.User.UID, deviceID, func(d *store.Device) {
 		d.DeviceName = ua
 		d.Client = "web"
 		d.LastIP = ip
 		d.LastSeen = now
-	})
-	_ = a.store().AddLoginLog(store.LoginLog{UID: result.User.UID, IP: ip, DeviceID: deviceID, DeviceName: ua, Client: "web", Time: now})
+	}, store.LoginLog{UID: result.User.UID, IP: ip, DeviceID: deviceID, DeviceName: ua, Client: "web", Time: now}); err != nil {
+		zap.L().Warn("record setup login device/log failed", zap.Int64("uid", result.User.UID), zap.Error(err))
+	}
 	a.auditWithUser(r, result.User.UID, result.User.Username, "complete_setup_wizard", "system", result.User.UID, map[string]any{
 		"configured_sections": result.ConfiguredSections,
 		"ip":                  ip,

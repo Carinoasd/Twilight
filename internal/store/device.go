@@ -5,12 +5,11 @@ import (
 	"time"
 )
 
+// 设备相关写入统一走 mutateAndSaveLocked：失败整体回滚、版本冲突重放，
+// 无改动时返回 errNoChange 跳过整份落盘。
 func (s *Store) UpsertDevice(d Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
 	if d.FirstSeen == 0 {
 		d.FirstSeen = time.Now().Unix()
 	}
@@ -18,20 +17,13 @@ func (s *Store) UpsertDevice(d Device) error {
 		d.LastSeen = d.FirstSeen
 	}
 	key := deviceKey(d.UID, d.DeviceID)
-	previous, existed := s.state.Devices[key]
-	if existed && previous == d {
-		return nil
-	}
-	s.state.Devices[key] = d
-	if err := s.saveLocked(); err != nil {
-		if existed {
-			s.state.Devices[key] = previous
-		} else {
-			delete(s.state.Devices, key)
+	return s.mutateAndSaveLocked(func() error {
+		if previous, existed := s.state.Devices[key]; existed && previous == d {
+			return errNoChange
 		}
-		return err
-	}
-	return nil
+		s.state.Devices[key] = d
+		return nil
+	})
 }
 
 func (s *Store) ListDevices(uid int64) []Device {
@@ -50,9 +42,16 @@ func (s *Store) ListDevices(uid int64) []Device {
 func (s *Store) UpdateDevice(uid int64, deviceID string, fn func(*Device)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
+	return s.mutateAndSaveLocked(func() error {
+		if !s.updateDeviceLocked(uid, deviceID, fn) {
+			return errNoChange
+		}
+		return nil
+	})
+}
+
+// updateDeviceLocked 在 mutate 闭包内套用 fn，返回是否真有改动。
+func (s *Store) updateDeviceLocked(uid int64, deviceID string, fn func(*Device)) bool {
 	key := deviceKey(uid, deviceID)
 	d, existed := s.state.Devices[key]
 	if !existed {
@@ -64,37 +63,36 @@ func (s *Store) UpdateDevice(uid int64, deviceID string, fn func(*Device)) error
 	d.UID = uid
 	d.DeviceID = deviceID
 	if existed && previous == d {
-		return nil
+		return false
 	}
 	s.state.Devices[key] = d
-	if err := s.saveLocked(); err != nil {
-		if existed {
-			s.state.Devices[key] = previous
-		} else {
-			delete(s.state.Devices, key)
-		}
-		return err
-	}
-	return nil
+	return true
+}
+
+// RecordLogin 把登录时的「更新设备」与「追加登录记录」合并成一次整份写入：
+// 旧流程 UpdateDevice + AddLoginLog 每次登录要序列化并写两次整份 state，
+// 其他进程也要整份重载两次。
+func (s *Store) RecordLogin(uid int64, deviceID string, fn func(*Device), log LoginLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mutateAndSaveLocked(func() error {
+		s.updateDeviceLocked(uid, deviceID, fn)
+		s.appendLoginLogLocked(log)
+		return nil
+	})
 }
 
 func (s *Store) DeleteDevice(uid int64, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
 	key := deviceKey(uid, deviceID)
-	previous, existed := s.state.Devices[key]
-	if !existed {
+	return s.mutateAndSaveLocked(func() error {
+		if _, existed := s.state.Devices[key]; !existed {
+			return errNoChange
+		}
+		delete(s.state.Devices, key)
 		return nil
-	}
-	delete(s.state.Devices, key)
-	if err := s.saveLocked(); err != nil {
-		s.state.Devices[key] = previous
-		return err
-	}
-	return nil
+	})
 }
 
 // EnforceDeviceLimit 仅保留某用户最近活跃的 max 台设备（按 LastSeen 倒序），淘汰
@@ -111,46 +109,34 @@ func (s *Store) EnforceDeviceLimit(uid int64, max int) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
-	type keyed struct {
-		key string
-		dev Device
-	}
-	active := make([]keyed, 0)
-	for key, d := range s.state.Devices {
-		if d.UID == uid && !d.Blocked {
-			active = append(active, keyed{key, d})
+	return s.mutateAndSaveLocked(func() error {
+		type keyed struct {
+			key string
+			dev Device
 		}
-	}
-	if len(active) <= max {
+		active := make([]keyed, 0)
+		for key, d := range s.state.Devices {
+			if d.UID == uid && !d.Blocked {
+				active = append(active, keyed{key, d})
+			}
+		}
+		if len(active) <= max {
+			return errNoChange
+		}
+		sort.Slice(active, func(i, j int) bool { return active[i].dev.LastSeen > active[j].dev.LastSeen })
+		changed := false
+		for i, item := range active {
+			if i < max || item.dev.Trusted {
+				continue // 在名额内，或受信任 → 保留
+			}
+			delete(s.state.Devices, item.key)
+			changed = true
+		}
+		if !changed {
+			return errNoChange
+		}
 		return nil
-	}
-	sort.Slice(active, func(i, j int) bool { return active[i].dev.LastSeen > active[j].dev.LastSeen })
-	var previous map[string]Device
-	changed := false
-	for i, item := range active {
-		if i < max || item.dev.Trusted {
-			continue // 在名额内，或受信任 → 保留
-		}
-		if previous == nil {
-			previous = make(map[string]Device)
-		}
-		previous[item.key] = item.dev
-		delete(s.state.Devices, item.key)
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if err := s.saveLocked(); err != nil {
-		for key, dev := range previous {
-			s.state.Devices[key] = dev
-		}
-		return err
-	}
-	return nil
+	})
 }
 
 func deviceKey(uid int64, deviceID string) string {

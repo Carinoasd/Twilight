@@ -31,22 +31,29 @@ func (s *Store) AddSchedulerRun(run SchedulerRun) error {
 func (s *Store) AddSchedulerRunReturning(run SchedulerRun) (SchedulerRun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
+	// 走 mutateAndSaveLocked：失败回滚、冲突重放。input 保持原值，每次重放都以
+	// 调用方传入的 run 为起点重新分配 ID，避免沿用上一轮分配出去的 ID。
+	input := run
+	err := s.mutateAndSaveLocked(func() error {
+		run = input
+		if run.ID == 0 {
+			run.ID = s.state.NextSchedulerRunID
+			s.state.NextSchedulerRunID++
+		}
+		if run.Type == "" {
+			run.Type = "manual"
+		}
+		if run.Trigger == "" {
+			run.Trigger = "manual"
+		}
+		normalizeSchedulerRunTimestamps(&run)
+		s.state.SchedulerRuns = prependBoundedHead(s.state.SchedulerRuns, run, maxStoredSchedulerRuns)
+		return nil
+	})
+	if err != nil {
 		return SchedulerRun{}, err
 	}
-	if run.ID == 0 {
-		run.ID = s.state.NextSchedulerRunID
-		s.state.NextSchedulerRunID++
-	}
-	if run.Type == "" {
-		run.Type = "manual"
-	}
-	if run.Trigger == "" {
-		run.Trigger = "manual"
-	}
-	normalizeSchedulerRunTimestamps(&run)
-	s.state.SchedulerRuns = prependBoundedHead(s.state.SchedulerRuns, run, maxStoredSchedulerRuns)
-	return run, s.saveLocked()
+	return run, nil
 }
 
 // TryStartSchedulerRun persists a running row only when the same job has no
@@ -70,66 +77,73 @@ func (s *Store) TryStartSchedulerRun(run SchedulerRun, staleBeforeUnix, nowUnix 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return SchedulerRun{}, false, err
-	}
-	for _, current := range s.state.SchedulerRuns {
-		if current.JobID == run.JobID && current.Status == "running" && current.StartedAt > staleBeforeUnix {
-			return SchedulerRun{}, false, nil
+	// 检查与插入放进同一个 mutate 闭包：版本冲突重放时会基于他进程的最新写重新检查，
+	// 旧实现冲突即直接报错，也不会重新判断是否已有新鲜的 running 行。
+	input := run
+	started := false
+	err := s.mutateAndSaveLocked(func() error {
+		run, started = input, false
+		for _, current := range s.state.SchedulerRuns {
+			if current.JobID == run.JobID && current.Status == "running" && current.StartedAt > staleBeforeUnix {
+				return errNoChange
+			}
 		}
-	}
-
-	prev, err := s.snapshotStateLocked()
-	if err != nil {
-		return SchedulerRun{}, false, err
-	}
-	for i := range s.state.SchedulerRuns {
-		current := &s.state.SchedulerRuns[i]
-		if current.JobID == run.JobID && current.Status == "running" && current.StartedAt <= staleBeforeUnix {
-			markSchedulerRunInterrupted(current, nowUnix)
+		for i := range s.state.SchedulerRuns {
+			current := &s.state.SchedulerRuns[i]
+			if current.JobID == run.JobID && current.Status == "running" && current.StartedAt <= staleBeforeUnix {
+				markSchedulerRunInterrupted(current, nowUnix)
+			}
 		}
-	}
-	if run.ID == 0 {
-		run.ID = s.state.NextSchedulerRunID
-		s.state.NextSchedulerRunID++
-	}
-	if run.Type == "" {
-		run.Type = "manual"
-	}
-	if run.Trigger == "" {
-		run.Trigger = "manual"
-	}
-	normalizeSchedulerRunTimestamps(&run)
-	s.state.SchedulerRuns = prependBoundedHead(s.state.SchedulerRuns, run, maxStoredSchedulerRuns)
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
+		if run.ID == 0 {
+			run.ID = s.state.NextSchedulerRunID
+			s.state.NextSchedulerRunID++
+		}
+		if run.Type == "" {
+			run.Type = "manual"
+		}
+		if run.Trigger == "" {
+			run.Trigger = "manual"
+		}
+		normalizeSchedulerRunTimestamps(&run)
+		s.state.SchedulerRuns = prependBoundedHead(s.state.SchedulerRuns, run, maxStoredSchedulerRuns)
+		started = true
+		return nil
+	})
+	if err != nil || !started {
 		return SchedulerRun{}, false, err
 	}
 	return run, true, nil
 }
 
 func (s *Store) UpdateSchedulerRun(id int64, fn func(*SchedulerRun) error) (SchedulerRun, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return SchedulerRun{}, err
-	}
 	if id == 0 {
 		return SchedulerRun{}, ErrNotFound
 	}
-	for i := range s.state.SchedulerRuns {
-		if s.state.SchedulerRuns[i].ID != id {
-			continue
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 走 mutateAndSaveLocked：存档失败回滚内存，冲突时基于最新 run 重放 fn。
+	var result SchedulerRun
+	err := s.mutateAndSaveLocked(func() error {
+		result = SchedulerRun{}
+		for i := range s.state.SchedulerRuns {
+			if s.state.SchedulerRuns[i].ID != id {
+				continue
+			}
+			run := s.state.SchedulerRuns[i]
+			if err := fn(&run); err != nil {
+				return err
+			}
+			normalizeSchedulerRunTimestamps(&run)
+			s.state.SchedulerRuns[i] = run
+			result = run
+			return nil
 		}
-		run := s.state.SchedulerRuns[i]
-		if err := fn(&run); err != nil {
-			return SchedulerRun{}, err
-		}
-		normalizeSchedulerRunTimestamps(&run)
-		s.state.SchedulerRuns[i] = run
-		return run, s.saveLocked()
+		return ErrNotFound
+	})
+	if err != nil {
+		return SchedulerRun{}, err
 	}
-	return SchedulerRun{}, ErrNotFound
+	return result, nil
 }
 
 func (s *Store) SchedulerRuns(jobID string, limit int) []SchedulerRun {
@@ -240,40 +254,37 @@ func schedulerRunSnapshots(runs []SchedulerRun, jobIDs []string, limit int) map[
 func (s *Store) SchedulerStateOverview(jobIDs []string, limit int, activeJobIDs map[string]bool, staleBeforeUnix, nowUnix int64) (SchedulerOverview, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return SchedulerOverview{}, err
-	}
 	needed := make(map[string]bool, len(jobIDs))
 	for _, jobID := range jobIDs {
 		if jobID != "" {
 			needed[jobID] = true
 		}
 	}
-	stale := make([]int, 0)
-	for i, run := range s.state.SchedulerRuns {
-		if !needed[run.JobID] || activeJobIDs[run.JobID] || run.Status != "running" || run.StartedAt > staleBeforeUnix {
-			continue
-		}
-		stale = append(stale, i)
-	}
-	if len(stale) > 0 {
-		prev, err := s.snapshotStateLocked()
-		if err != nil {
-			return SchedulerOverview{}, err
-		}
-		for _, i := range stale {
+	// 标记中断走 mutateAndSaveLocked：失败回滚、冲突重放；没有过期 running 行时
+	// errNoChange 跳过落盘（refresh 仍由 helper 完成，读到他进程的最新写）。
+	interrupted := 0
+	err := s.mutateAndSaveLocked(func() error {
+		interrupted = 0
+		for i, run := range s.state.SchedulerRuns {
+			if !needed[run.JobID] || activeJobIDs[run.JobID] || run.Status != "running" || run.StartedAt > staleBeforeUnix {
+				continue
+			}
 			markSchedulerRunInterrupted(&s.state.SchedulerRuns[i], nowUnix)
+			interrupted++
 		}
-		if err := s.saveLocked(); err != nil {
-			s.restoreStateLocked(prev)
-			return SchedulerOverview{}, err
+		if interrupted == 0 {
+			return errNoChange
 		}
+		return nil
+	})
+	if err != nil {
+		return SchedulerOverview{}, err
 	}
 
 	overview := SchedulerOverview{
 		Runs:        schedulerRunSnapshots(s.state.SchedulerRuns, jobIDs, limit),
 		Schedules:   make(map[string]SchedulerSchedule, len(jobIDs)),
-		Interrupted: len(stale),
+		Interrupted: interrupted,
 	}
 	for _, jobID := range jobIDs {
 		if schedule, ok := s.state.SchedulerSchedules[jobID]; ok {
@@ -370,37 +381,26 @@ func (s *Store) SetSchedulerScheduleRevision(jobID string, spec, params map[stri
 func (s *Store) MarkInterruptedSchedulerRuns(jobID string, beforeUnix int64, nowUnix int64) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return 0, err
-	}
 	changed := 0
-	for _, run := range s.state.SchedulerRuns {
-		if jobID != "" && run.JobID != jobID {
-			continue
-		}
-		if run.Status == "running" && run.StartedAt <= beforeUnix {
+	err := s.mutateAndSaveLocked(func() error {
+		changed = 0 // 冲突重放时重新计数
+		for i := range s.state.SchedulerRuns {
+			run := &s.state.SchedulerRuns[i]
+			if jobID != "" && run.JobID != jobID {
+				continue
+			}
+			if run.Status != "running" || run.StartedAt > beforeUnix {
+				continue
+			}
+			markSchedulerRunInterrupted(run, nowUnix)
 			changed++
 		}
-	}
-	if changed == 0 {
-		return 0, nil
-	}
-	prev, err := s.snapshotStateLocked()
+		if changed == 0 {
+			return errNoChange
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, err
-	}
-	for i := range s.state.SchedulerRuns {
-		run := &s.state.SchedulerRuns[i]
-		if jobID != "" && run.JobID != jobID {
-			continue
-		}
-		if run.Status != "running" || run.StartedAt > beforeUnix {
-			continue
-		}
-		markSchedulerRunInterrupted(run, nowUnix)
-	}
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
 		return 0, err
 	}
 	return changed, nil

@@ -2170,44 +2170,42 @@ func (s *Store) UpdateUsers(uids []int64, fn func(*User) error) (map[int64]error
 	if len(uids) == 0 {
 		return results, nil
 	}
-	if err := s.refreshLocked(); err != nil {
-		return nil, err
-	}
-	prev, err := s.snapshotStateLocked()
+	// 走 mutateAndSaveLocked：版本冲突时基于最新 state 重放整批（旧实现冲突即报错），
+	// results 在闭包开头重建，避免重放残留上一轮的结果。
+	err := s.mutateAndSaveLocked(func() error {
+		results = make(map[int64]error, len(uids))
+		seen := make(map[int64]struct{}, len(uids))
+		changed := false
+		for _, uid := range uids {
+			if _, dup := seen[uid]; dup {
+				continue
+			}
+			seen[uid] = struct{}{}
+			u, ok := s.state.Users[uid]
+			if !ok {
+				results[uid] = ErrNotFound
+				continue
+			}
+			old := u
+			if ferr := fn(&u); ferr != nil {
+				results[uid] = ferr
+				continue
+			}
+			if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
+				results[uid] = ErrConflict
+				continue
+			}
+			s.state.Users[uid] = u
+			s.maintainUserIndexes(old, u, uid)
+			results[uid] = nil
+			changed = true
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int64]struct{}, len(uids))
-	changed := false
-	for _, uid := range uids {
-		if _, dup := seen[uid]; dup {
-			continue
-		}
-		seen[uid] = struct{}{}
-		u, ok := s.state.Users[uid]
-		if !ok {
-			results[uid] = ErrNotFound
-			continue
-		}
-		old := u
-		if ferr := fn(&u); ferr != nil {
-			results[uid] = ferr
-			continue
-		}
-		if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
-			results[uid] = ErrConflict
-			continue
-		}
-		s.state.Users[uid] = u
-		s.maintainUserIndexes(old, u, uid)
-		results[uid] = nil
-		changed = true
-	}
-	if !changed {
-		return results, nil
-	}
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
 		return nil, err
 	}
 	return results, nil
@@ -2242,41 +2240,38 @@ func (s *Store) ClearUserEmails() (total int, cleared int, err error) {
 func (s *Store) LockEmbyGrantForBoundUsers(uids []int64) (updated []int64, missing []int64, skippedNoEmby []int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return nil, nil, nil, err
-	}
-	prev, err := s.snapshotStateLocked()
+	// 走 mutateAndSaveLocked；三个结果切片在闭包开头重置，冲突重放不会重复追加。
+	err = s.mutateAndSaveLocked(func() error {
+		updated, missing, skippedNoEmby = nil, nil, nil
+		seen := map[int64]bool{}
+		changed := false
+		for _, uid := range uids {
+			if seen[uid] {
+				continue
+			}
+			seen[uid] = true
+			u, ok := s.state.Users[uid]
+			if !ok {
+				missing = append(missing, uid)
+				continue
+			}
+			if strings.TrimSpace(u.EmbyID) == "" {
+				skippedNoEmby = append(skippedNoEmby, uid)
+				continue
+			}
+			if !u.EmbyGrantLocked {
+				u.EmbyGrantLocked = true
+				s.state.Users[uid] = u
+				changed = true
+			}
+			updated = append(updated, uid)
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	seen := map[int64]bool{}
-	changed := false
-	for _, uid := range uids {
-		if seen[uid] {
-			continue
-		}
-		seen[uid] = true
-		u, ok := s.state.Users[uid]
-		if !ok {
-			missing = append(missing, uid)
-			continue
-		}
-		if strings.TrimSpace(u.EmbyID) == "" {
-			skippedNoEmby = append(skippedNoEmby, uid)
-			continue
-		}
-		if !u.EmbyGrantLocked {
-			u.EmbyGrantLocked = true
-			s.state.Users[uid] = u
-			changed = true
-		}
-		updated = append(updated, uid)
-	}
-	if !changed {
-		return updated, missing, skippedNoEmby, nil
-	}
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
 		return nil, nil, nil, err
 	}
 	return updated, missing, skippedNoEmby, nil

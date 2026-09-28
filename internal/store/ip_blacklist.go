@@ -8,21 +8,23 @@ import (
 func (s *Store) AddIPBlacklist(ip, reason string, expireAt int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
-	s.state.IPBlacklist[ip] = IPBlacklistEntry{IP: ip, Reason: reason, CreatedAt: time.Now().Unix(), ExpireAt: expireAt}
-	return s.saveLocked()
+	// 走 mutateAndSaveLocked：存档失败时回滚内存，避免未落盘的封禁残留在本进程生效。
+	return s.mutateAndSaveLocked(func() error {
+		s.state.IPBlacklist[ip] = IPBlacklistEntry{IP: ip, Reason: reason, CreatedAt: time.Now().Unix(), ExpireAt: expireAt}
+		return nil
+	})
 }
 
 func (s *Store) RemoveIPBlacklist(ip string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
-	delete(s.state.IPBlacklist, ip)
-	return s.saveLocked()
+	return s.mutateAndSaveLocked(func() error {
+		if _, ok := s.state.IPBlacklist[ip]; !ok {
+			return errNoChange
+		}
+		delete(s.state.IPBlacklist, ip)
+		return nil
+	})
 }
 
 func (s *Store) ListIPBlacklist() []IPBlacklistEntry {
