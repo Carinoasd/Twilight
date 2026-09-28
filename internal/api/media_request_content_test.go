@@ -128,3 +128,21 @@ func TestInventorySearchRestrictsTypesAndHonorsGuards(t *testing.T) {
 		t.Fatal("inventory search should be rate limited per user")
 	}
 }
+
+// 库存检查失败不能把内部 Emby 地址回给用户。
+func TestInventoryCheckFailureHidesInternalEmbyURL(t *testing.T) {
+	app := newTestApp(t)
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	internalURL := emby.URL
+	emby.Close() // 连接被拒，错误里会带上内部地址
+	app.cfg().EmbyURL = internalURL
+	app.cfg().EmbyToken = "test-token"
+	_ = registerAndLogin(t, app, "admin", "Admin123456")
+	user := registerAndLogin(t, app, "inventory-user", "User123456")
+
+	rr := doJSON(app, http.MethodPost, "/api/v2/media/inventory/check", `{"source":"tmdb","media_id":"550","title":"x","media_type":"movie"}`, user)
+	host := strings.TrimPrefix(internalURL, "http://")
+	if strings.Contains(rr.Body.String(), host) || !strings.Contains(rr.Body.String(), inventoryCheckFailedMessage) {
+		t.Fatalf("inventory failure leaked internal address or missing fixed message: %s", rr.Body.String())
+	}
+}

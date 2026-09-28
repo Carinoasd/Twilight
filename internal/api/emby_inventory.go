@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 func (a *App) embySearchItems(ctx context.Context, searchTerm string, includeTypes []string, year int, limit int) ([]map[string]any, error) {
@@ -95,6 +97,16 @@ func (a *App) embySeriesSeasons(ctx context.Context, seriesID string) ([]int, er
 	return seasons, nil
 }
 
+// inventoryCheckFailedMessage 是库存检查失败时给用户看的固定文案。原实现把
+// err.Error() 拼进消息，会把内部 Emby 地址（如 http://10.0.0.5:8096/...）回给用户，
+// 还会被存进求片记录的 inventory_message。细节只写运行日志。
+const inventoryCheckFailedMessage = "库存检查失败，请稍后再试"
+
+func inventoryCheckFailed(err error, item map[string]any, season int) map[string]any {
+	zap.L().Warn("emby inventory check failed", zap.String("error", redactSensitiveText(err.Error())))
+	return inventoryResult(false, inventoryCheckFailedMessage, item, nil, season)
+}
+
 func (a *App) embyCheckInventory(ctx context.Context, payload map[string]any) map[string]any {
 	season := intValue(payload, "season", 0)
 	source := normalizeSource(stringValue(payload, "source"))
@@ -122,13 +134,13 @@ func (a *App) embyCheckInventory(ctx context.Context, payload map[string]any) ma
 	if source == "tmdb" && mediaID != "" {
 		item, found, err = a.embyFindByProviderID(ctx, "Tmdb", mediaID, mediaType)
 		if err != nil {
-			return inventoryResult(false, "库存检查失败："+err.Error(), nil, nil, season)
+			return inventoryCheckFailed(err, nil, season)
 		}
 	}
 	if !found && title != "" {
 		item, found, err = a.embyFindByTitle(ctx, title, originalTitle, mediaType, year)
 		if err != nil {
-			return inventoryResult(false, "库存检查失败："+err.Error(), nil, nil, season)
+			return inventoryCheckFailed(err, nil, season)
 		}
 	}
 	if !found || item == nil {
@@ -147,7 +159,7 @@ func (a *App) embyCheckInventory(ctx context.Context, payload map[string]any) ma
 	}
 	seasons, err := a.embySeriesSeasons(ctx, asString(item["Id"]))
 	if err != nil {
-		return inventoryResult(false, "库存检查失败："+err.Error(), item, nil, season)
+		return inventoryCheckFailed(err, item, season)
 	}
 	name := firstNonEmpty(asString(item["Name"]), title)
 	if season > 0 {
