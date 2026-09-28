@@ -135,7 +135,6 @@
       "siteBot": "本站 Bot：",
       "gettingBindCode": "正在取得綁定碼…",
       "bindCodeInstruction": "傳送 /bind <code>",
-      "remainingTime": "剩餘 {minutes} 分鐘",
       "verified": "已驗證",
       "afterBindingTip": "註冊後將自動綁定 Telegram",
       "forceBindTip": "本網站要求註冊前綁定 Telegram 帳號",
@@ -610,7 +609,10 @@
     "libraryStatsUnavailable": "媒體庫統計未啟用或暫不可用。",
     "serverNetworkStatus": "按需線路探測，不會自動測速",
     "retest": "測速線路",
-    "notApplicable": "未對應"
+    "notApplicable": "未對應",
+    "viewLines": "查看線路（{count}）",
+    "publicLinesCount": "公共線路 {count} 條",
+    "dedicatedLinesCount": "專屬線路 {count} 條"
   },
   "playRank": {
     "title": "觀看排行",
@@ -805,9 +807,6 @@
     "latencyLabel": "延遲：{value}",
     "noLines": "暫無可用線路",
     "lineCopiedDescription": "線路地址已複製到剪貼簿",
-    "viewLines": "查看線路（{count}）",
-    "publicLinesCount": "公共線路 {count} 條",
-    "dedicatedLinesCount": "專屬線路 {count} 條",
     "linesHiddenUntilOpened": "點擊後查看具體線路和測速結果",
     "lineDetailsDescription": "查看目前帳號可用的線路，並按需進行測速。",
     "lineAddressShownHere": "線路地址僅在打開詳情後顯示",
@@ -2727,5 +2726,43 @@
   },
   "deviceAuditPatch": {
     "refreshedAt": "更新於 {time}"
+  },
+  "passwordStrength": {
+    "defaultLabel": "新密碼",
+    "required": "請提供{label}",
+    "tooLong": "{label}過長，最多 128 個字元",
+    "tooShort": "{label}強度不足：至少 8 個字元，且包含大小寫字母和數字",
+    "needLower": "{label}強度不足：至少包含一個小寫字母",
+    "needUpper": "{label}強度不足：至少包含一個大寫字母",
+    "needDigit": "{label}強度不足：至少包含一個數字",
+    "ok": "強度合格",
+    "levelWeak": "弱",
+    "levelFair": "普通",
+    "levelGood": "良好",
+    "levelStrong": "強"
+  },
+  "asyncHandler": {
+    "status401": "登入狀態已失效，請重新登入",
+    "status403": "權限不足",
+    "status404": "請求的資源不存在",
+    "status409": "操作衝突，請重新整理後再試",
+    "status413": "上傳內容過大",
+    "status429": "請求過於頻繁，請稍後再試",
+    "status5xx": "伺服器暫時出了點問題，請稍後再試",
+    "defaultErrorTitle": "操作失敗",
+    "requestFailed": "請求失敗",
+    "networkError": "網路異常"
+  },
+  "errorPage": {
+    "title": "頁面發生錯誤",
+    "description": "抱歉，頁面遇到未預期的錯誤。可以先重試；如果反覆失敗，請重新整理或回到首頁。",
+    "errorId": "錯誤 ID：",
+    "retry": "重試",
+    "home": "回到首頁"
+  },
+  "authStore": {
+    "sessionChanged": "登入狀態已變更，請重新確認",
+    "userPayloadInvalid": "伺服器回傳的使用者資訊格式異常",
+    "defaultRoleName": "一般使用者"
   }
 }

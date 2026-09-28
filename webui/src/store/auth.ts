@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { api, type UserInfo } from "@/lib/api";
 import { ApiError, clearApiRequestCaches } from "@/lib/api-request";
+import { translate } from "@/lib/i18n";
 import {
   AUTH_CHANNEL_NAME,
   decideCrossTabAction,
@@ -215,7 +216,7 @@ export const useAuthStore = create<AuthState>()(
         try {
           const res = await api.login(username, password, controller.signal);
           if (generation !== inFlight.generation) {
-            return { ok: false, message: "登录状态已变化，请重新确认", errorCode: "AUTH_SESSION_CHANGED" };
+            return { ok: false, message: translate("authStore.sessionChanged"), errorCode: "AUTH_SESSION_CHANGED" };
           }
           if (res.success && res.data) {
             // 校验后端 user payload 的最小形状，
@@ -224,7 +225,7 @@ export const useAuthStore = create<AuthState>()(
             if (!baseUser) {
               return {
                 ok: false,
-                message: "服务器返回的用户信息格式异常",
+                message: translate("authStore.userPayloadInvalid"),
                 errorCode: "AUTH_USER_PAYLOAD_INVALID",
               };
             }
@@ -233,7 +234,7 @@ export const useAuthStore = create<AuthState>()(
               username: baseUser.username as string,
               email: baseUser.email,
               role: baseUser.role ?? 1,
-              role_name: baseUser.role_name || "普通用户",
+              role_name: baseUser.role_name || translate("authStore.defaultRoleName"),
               active: baseUser.active ?? true,
               expired_at: baseUser.expired_at,
               emby_id: baseUser.emby_id,
@@ -255,7 +256,7 @@ export const useAuthStore = create<AuthState>()(
           return { ok: false, message: res.message, errorCode: res.error_code };
         } catch (error: any) {
           if (generation !== inFlight.generation) {
-            return { ok: false, message: "登录状态已变化，请重新确认", errorCode: "AUTH_SESSION_CHANGED" };
+            return { ok: false, message: translate("authStore.sessionChanged"), errorCode: "AUTH_SESSION_CHANGED" };
           }
           // ApiError 经 lib/api-request.ts 抛出，携带 errorCode/backendMessage。
           return {

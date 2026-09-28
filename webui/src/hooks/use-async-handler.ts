@@ -6,6 +6,7 @@ import type { ApiResponse } from "@/lib/api-types";
 import { ApiError } from "@/lib/api-request";
 import { friendlyError } from "@/lib/validators";
 import { isKnownErrCode, type ErrCode } from "@/lib/errcode";
+import { translate } from "@/lib/i18n";
 
 /**
  * useAsyncHandler 用于把"调用 API → 错误处理 → toast → 成功回调"这一三段式样板
@@ -53,14 +54,14 @@ export interface AsyncHandlerOptions<T> {
 
 /** 把 ApiError.status 归类为用户友好的 fallback 文案。 */
 function statusFallback(status: number | undefined): string | null {
-  if (status === 401) return "登录态已失效，请重新登录";
-  if (status === 403) return "权限不足";
-  if (status === 404) return "请求的资源不存在";
-  if (status === 409) return "操作冲突，请刷新后重试";
-  if (status === 413) return "上传内容过大";
-  if (status === 429) return "请求过于频繁，请稍后再试";
+  if (status === 401) return translate("asyncHandler.status401");
+  if (status === 403) return translate("asyncHandler.status403");
+  if (status === 404) return translate("asyncHandler.status404");
+  if (status === 409) return translate("asyncHandler.status409");
+  if (status === 413) return translate("asyncHandler.status413");
+  if (status === 429) return translate("asyncHandler.status429");
   if (typeof status === "number" && status >= 500) {
-    return "服务器开小差了，请稍后再试";
+    return translate("asyncHandler.status5xx");
   }
   return null;
 }
@@ -119,7 +120,7 @@ export function useAsyncHandler() {
       const {
         successTitle,
         successDescription,
-        errorTitle = "操作失败",
+        errorTitle = translate("asyncHandler.defaultErrorTitle"),
         silent = false,
         silentSuccess = false,
         onSuccess,
@@ -139,7 +140,7 @@ export function useAsyncHandler() {
         if (!silent) {
           toast({
             title: errorTitle,
-            description: describeError(res, options as AsyncHandlerOptions<unknown>, "请求失败"),
+            description: describeError(res, options as AsyncHandlerOptions<unknown>, translate("asyncHandler.requestFailed")),
             variant: "destructive",
           });
         }
@@ -150,7 +151,7 @@ export function useAsyncHandler() {
         if (!silent) {
           toast({
             title: errorTitle,
-            description: describeError(error, options as AsyncHandlerOptions<unknown>, "网络异常"),
+            description: describeError(error, options as AsyncHandlerOptions<unknown>, translate("asyncHandler.networkError")),
             variant: "destructive",
           });
         }
