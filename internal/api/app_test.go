@@ -993,7 +993,8 @@ func TestUploadAssetPathAndFilenameSafety(t *testing.T) {
 	}
 	for _, path := range invalids {
 		resp := doJSON(app, http.MethodGet, path, ``, []*http.Cookie{cookie})
-		if resp.Code != http.StatusNotFound {
+		// “%2e%2e” 解码后是 “..” 段，入口的非规范路径检查会先以 400 拒绝；其余在资源层回 404。
+		if resp.Code != http.StatusNotFound && !(strings.Contains(path, "%2e%2e") && resp.Code == http.StatusBadRequest) {
 			t.Fatalf("invalid asset %s status=%d body=%s", path, resp.Code, resp.Body.String())
 		}
 	}
@@ -1950,7 +1951,8 @@ func TestBangumiSearchErrorIsVisibleForBangumiSource(t *testing.T) {
 	login := doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"Admin123456"}`, nil)
 	cookie := findCookie(login.Result().Cookies(), "twilight_session")
 	resp := doJSON(app, http.MethodGet, "/api/v1/media/search?q=test&source=bangumi", ``, []*http.Cookie{cookie})
-	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "Bangumi 搜索失败") {
+	// 上游错误细节只写日志，回给前端的是固定文案（避免泄露上游 URL / 密钥）。
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "Bangumi 搜索暂时不可用") || strings.Contains(resp.Body.String(), "bad bangumi request") {
 		t.Fatalf("bangumi failure status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
