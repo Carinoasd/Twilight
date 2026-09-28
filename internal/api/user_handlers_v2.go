@@ -34,14 +34,14 @@ func (a *App) handleV2RebindComplete(w http.ResponseWriter, r *http.Request, p P
 	a.handleRebindComplete(w, r, p)
 }
 
-func (a *App) handleV2UserBindCode(w http.ResponseWriter, r *http.Request, p Params) {
+func (a *App) handleV2UserTelegramLink(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
-	a.handleUserBindCode(w, r, p)
+	a.handleUserTelegramLink(w, r, p)
 }
 
-func (a *App) handleV2UserBindCodeStatus(w http.ResponseWriter, r *http.Request, p Params) {
+func (a *App) handleV2UserTelegramLinkStatus(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
-	a.handleUserBindCodeStatus(w, r, p)
+	a.handleUserTelegramLinkStatus(w, r, p)
 }
 
 func (a *App) handleV2QueueStatus(w http.ResponseWriter, r *http.Request, p Params) {
@@ -177,14 +177,9 @@ func (a *App) handleV2RegcodeCheck(w http.ResponseWriter, r *http.Request, p Par
 	a.handleRegcodeCheck(w, r, p)
 }
 
-func (a *App) handleV2BindCodeStatus(w http.ResponseWriter, r *http.Request, p Params) {
+func (a *App) handleV2RegistrationTelegramLinkStatus(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
-	a.handleBindCodeStatus(w, r, p)
-}
-
-func (a *App) handleV2BindConfirmSecure(w http.ResponseWriter, r *http.Request, p Params) {
-	w.Header().Set("Cache-Control", "no-store")
-	a.handleBindConfirmSecure(w, r, p)
+	a.handleRegisterTelegramLinkStatus(w, r, p)
 }
 
 func (a *App) handleV2AdminBulkExpire(w http.ResponseWriter, r *http.Request, p Params) {

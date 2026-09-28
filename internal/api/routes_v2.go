@@ -75,7 +75,7 @@ func (a *App) registerV2Routes() {
 	// The product client posts the registration code instead of using a query
 	// string, so both verbs must resolve to the same bounded check.
 	a.add(http.MethodPost, "/api/v2/registration/availability", AuthPublic, a.handleV2RegistrationAvailability)
-	a.add(http.MethodPost, "/api/v2/registration/telegram/bind-code", AuthPublic, a.handleV2CreateRegistrationBindCode)
+	a.add(http.MethodPost, "/api/v2/registration/telegram/link", AuthPublic, a.handleV2CreateRegistrationTelegramLink)
 	a.add(http.MethodGet, "/api/v2/dashboard/summary", AuthUser, a.handleV2DashboardSummary)
 	a.add(http.MethodGet, "/api/v2/settings", AuthUser, a.handleV2UserSettings)
 	a.add(http.MethodPut, "/api/v2/settings/preferences", AuthUser, a.handleV2UpdateUserSettings)
@@ -318,13 +318,12 @@ func (a *App) registerV2Routes() {
 	a.add(http.MethodGet, "/api/v2/me/use-code/status", AuthUser, a.handleV2QueueStatus)
 	a.add(http.MethodGet, "/api/v2/me/sessions", AuthUser, a.handleV2Sessions)
 	a.add(http.MethodPost, "/api/v2/me/telegram/rebind-complete", AuthUser, a.handleV2RebindComplete)
-	a.add(http.MethodGet, "/api/v2/me/telegram/bind-code", AuthUser, a.handleV2UserBindCode)
-	a.add(http.MethodGet, "/api/v2/me/telegram/bind-code/status", AuthUser, a.handleV2UserBindCodeStatus)
+	a.add(http.MethodPost, "/api/v2/me/telegram/link", AuthUser, a.handleV2UserTelegramLink)
+	a.add(http.MethodGet, "/api/v2/me/telegram/link/:id/status", AuthUser, a.handleV2UserTelegramLinkStatus)
 
 	// Registration flow polling endpoints
 	a.add(http.MethodGet, "/api/v2/registration/regcode/check", AuthPublic, a.handleV2RegcodeCheck)
-	a.add(http.MethodGet, "/api/v2/registration/telegram/bind-code/status", AuthPublic, a.handleV2BindCodeStatus)
-	a.add(http.MethodPost, "/api/v2/registration/telegram/bind-confirm", AuthPublic, a.handleV2BindConfirmSecure)
+	a.add(http.MethodGet, "/api/v2/registration/telegram/link/:id/status", AuthPublic, a.handleV2RegistrationTelegramLinkStatus)
 	a.add(http.MethodGet, "/api/v2/registration/emby/queue-status", AuthPublic, a.handleV2QueueStatus)
 
 	// Public system resources: config, icons, backgrounds, emby-urls
@@ -430,11 +429,6 @@ func (a *App) registerV2CompletionRoutes() {
 	a.add(http.MethodPost, "/api/v2/auth/apikey/enable", AuthUser, a.handleLegacyAPIKeyEnable)
 	a.add(http.MethodGet, "/api/v2/auth/apikey/permissions", AuthUser, a.handleLegacyAPIKeyPermissions)
 	a.add(http.MethodPut, "/api/v2/auth/apikey/permissions", AuthUser, a.handleLegacyAPIKeyPermissionsUpdate)
-
-	// Telegram bind-code websocket transports. V1 exposes them for both the
-	// public registration flow and the authenticated account page.
-	a.add(http.MethodGet, "/api/v2/users/telegram/register/bind-code/ws", AuthPublic, a.handleBindCodeStatusWS)
-	a.add(http.MethodGet, "/api/v2/me/telegram/bind-code/ws", AuthUser, a.handleUserBindCodeStatusWS)
 
 	// Personalised announcement feed. The public /api/v2/announcements route
 	// is anonymous and cannot carry per-user force-read state.

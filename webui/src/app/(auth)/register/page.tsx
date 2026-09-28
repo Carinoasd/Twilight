@@ -17,9 +17,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useBindCodeStatus } from "@/hooks/use-bind-code-status";
+import { useTelegramLinkStatus } from "@/hooks/use-telegram-link-status";
 import { useToast } from "@/hooks/use-toast";
 import { api, type RegisterAvailability, type RegisterData } from "@/lib/api";
+import type { TelegramLinkIssue } from "@/lib/api-types-v2";
 import { ApiError } from "@/lib/api-request";
 import { ErrCodes } from "@/lib/errcode";
 import { useSystemStore } from "@/store/system";
@@ -48,9 +49,7 @@ export default function RegisterPage() {
     useState<RegisterAvailability | null>(null);
 
   // --- Telegram binding state ---
-  const [bindCode, setBindCode] = useState("");
-  const [challengeId, setChallengeId] = useState("");
-  const [bindCodeExpiry, setBindCodeExpiry] = useState(0);
+  const [telegramLink, setTelegramLink] = useState<TelegramLinkIssue | null>(null);
   const [bindConfirmed, setBindConfirmed] = useState(false);
   const [isBindCodeLoading, setIsBindCodeLoading] = useState(false);
 
@@ -109,15 +108,16 @@ export default function RegisterPage() {
     }
   };
 
-  // ---- Telegram binding (unchanged logic from original) ----
+  // ---- Telegram binding: deep link + secret-backed status polling ----
 
-  const handleGetTelegramBindCode = async () => {
+  const handleCreateTelegramLink = async () => {
     setIsBindCodeLoading(true);
     try {
-      const res = await api.getRegisterBindCode();
-      setBindCode(res.data?.bind_code || "");
-      setChallengeId(res.data?.challenge_id || "");
-      setBindCodeExpiry(res.data?.expires_in ?? 0);
+      const res = await api.createRegisterTelegramLink();
+      if (!res.success || !res.data?.link_id) {
+        throw new Error(res.message || t("auth.register.bindCodeFailedDescription"));
+      }
+      setTelegramLink(res.data);
       setBindConfirmed(false);
       toast({
         title: t("auth.register.bindCodeGenerated"),
@@ -135,31 +135,32 @@ export default function RegisterPage() {
     }
   };
 
-  useBindCodeStatus({
-    code: bindCode ? challengeId : null,
+  useTelegramLinkStatus({
+    linkId: telegramLink?.link_id ?? null,
+    secret: telegramLink?.link_secret ?? "",
     scene: "register",
-    expiresIn: bindCodeExpiry,
-    enabled: !bindConfirmed,
+    expiresIn: telegramLink?.expires_in,
+    enabled: Boolean(telegramLink) && !bindConfirmed,
     onBound: () => {
       setBindConfirmed(true);
       toast({ title: t("auth.register.telegramBound"), variant: "success" });
     },
     onTerminalError: (data) => {
-      setBindCode("");
+      setTelegramLink(null);
       setBindConfirmed(false);
       toast({ title: t("auth.register.telegramIncomplete"), description: friendlyError(data.error_code, data.message) || t("auth.register.retryBindCode"), variant: "destructive" });
     },
     onTimeout: () => {
-      setBindCode("");
+      setTelegramLink(null);
       setBindConfirmed(false);
       toast({ title: t("auth.register.telegramIncomplete"), description: t("auth.register.retryBindCode"), variant: "destructive" });
     },
   });
 
   const refreshBindConfirmedBeforeSubmit = async (): Promise<boolean> => {
-    if (!bindCode) return false;
+    if (!telegramLink) return false;
     try {
-      const res = await api.getRegisterBindCodeStatus(challengeId);
+      const res = await api.getRegisterTelegramLinkStatus(telegramLink.link_id, telegramLink.link_secret ?? "");
       if (!res.data?.invalid && (res.data?.status === "confirmed" || res.data?.confirmed)) {
         setBindConfirmed(true);
         return true;
@@ -169,8 +170,7 @@ export default function RegisterPage() {
           friendlyError(res.data.error_code, res.data.message) ||
           res.data.message ||
           t("auth.register.retryGetBindCode");
-        setBindCode("");
-        setBindCodeExpiry(0);
+        setTelegramLink(null);
         toast({ title: t("auth.register.telegramIncomplete"), description, variant: "destructive" });
       }
     } catch {
@@ -180,13 +180,12 @@ export default function RegisterPage() {
   };
 
   const reconcileBindCodeAfterRegisterFailure = async () => {
-    if (!bindCode) return;
+    if (!telegramLink) return;
     try {
-      const res = await api.getRegisterBindCodeStatus(challengeId);
+      const res = await api.getRegisterTelegramLinkStatus(telegramLink.link_id, telegramLink.link_secret ?? "");
       const data = res.data;
       if (data?.terminal && data.invalid) {
-        setBindCode("");
-        setBindCodeExpiry(0);
+        setTelegramLink(null);
         setBindConfirmed(false);
       }
     } catch {
@@ -257,12 +256,12 @@ export default function RegisterPage() {
   };
 
   const handleFinalSubmit = async () => {
-    if (bindCode && !bindConfirmed) {
+    if (telegramLink && !bindConfirmed) {
       const confirmed = await refreshBindConfirmedBeforeSubmit();
       if (!confirmed) {
         toast({
           title: t("auth.register.telegramCompleteBeforeSubmit"),
-          description: t("auth.register.sendBindCommand", { code: bindCode }),
+          description: t("auth.register.sendBindCommand"),
           variant: "destructive",
         });
         return;
@@ -277,7 +276,8 @@ export default function RegisterPage() {
       const payload: RegisterData = {
         username: formData.username.trim(),
         email: formData.email || undefined,
-        telegram_bind_code: bindCode ? challengeId : undefined,
+        telegram_link_id: telegramLink ? telegramLink.link_id : undefined,
+        telegram_link_secret: telegramLink ? telegramLink.link_secret : undefined,
         password: formData.password,
         reg_code: registerRequiresCode ? formData.regCode.trim() : undefined,
       };
@@ -504,8 +504,8 @@ export default function RegisterPage() {
         <Button
           type="button"
           className={AUTH_PRIMARY_BTN}
-          onClick={handleGetTelegramBindCode}
-          disabled={isBindCodeLoading}
+          onClick={handleCreateTelegramLink}
+          disabled={isBindCodeLoading || (Boolean(telegramLink) && !bindConfirmed)}
         >
           {isBindCodeLoading ? (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -524,19 +524,27 @@ export default function RegisterPage() {
         ) : null}
       </div>
 
-      {bindCode && !bindConfirmed ? (
-        <div className="space-y-2 rounded-lg border border-border/70 bg-muted/50 px-3 py-3 text-sm">
-          <p>{t("auth.register.sendCommandBelow")}</p>
+      {telegramLink && !bindConfirmed ? (
+        <div className="space-y-3 rounded-lg border border-border/70 bg-muted/50 px-3 py-3 text-sm">
+          {telegramLink.deep_link ? (
+            <Button asChild type="button" className={AUTH_PRIMARY_BTN}>
+              <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">
+                <Send className="mr-2 h-4 w-4" />
+                {t("auth.register.openTelegramLink", { username: telegramLink.bot_username })}
+              </a>
+            </Button>
+          ) : null}
+          <p className="text-xs text-muted-foreground">{t("auth.register.manualCommandHint")}</p>
           <div className="flex flex-wrap items-center gap-2">
-            <code className="min-w-0 max-w-full select-all break-all rounded bg-background px-2 py-1 font-mono text-base">
-              /bind {bindCode}
+            <code className="min-w-0 max-w-full select-all break-all rounded bg-background px-2 py-1 font-mono text-sm">
+              {telegramLink.manual_command}
             </code>
             <Button
               type="button"
               size="sm"
               variant="outline"
               onClick={() => {
-                navigator.clipboard.writeText(`/bind ${bindCode}`).then(
+                navigator.clipboard.writeText(telegramLink.manual_command).then(
                   () => toast({ title: t("common.copiedToClipboard"), variant: "success" }),
                   () => toast({ title: t("common.copyFailed"), variant: "destructive" }),
                 );
@@ -544,7 +552,7 @@ export default function RegisterPage() {
             >
               {t("auth.register.copyCommand")}
             </Button>
-            {botUrl ? (
+            {botUrl && !telegramLink.deep_link ? (
               <Button asChild type="button" size="sm" variant="outline">
                 <a href={botUrl} target="_blank" rel="noopener noreferrer">
                   <Bot className="mr-2 h-4 w-4" />
@@ -556,13 +564,13 @@ export default function RegisterPage() {
           <p className="flex items-center gap-1 text-xs">
             <Loader2 className="h-3 w-3 animate-spin" />
             {t("auth.register.waitingVerification", {
-              minutes: Math.max(0, Math.floor(bindCodeExpiry / 60)),
+              minutes: Math.max(0, Math.floor((telegramLink.expires_in ?? 0) / 60)),
             })}
           </p>
         </div>
       ) : null}
 
-      {bindCode && bindConfirmed ? (
+      {telegramLink && bindConfirmed ? (
         <div className="rounded-lg border border-emerald-300/60 bg-emerald-50 px-3 py-2 text-sm dark:border-emerald-700/60 dark:bg-emerald-900/30">
           <p className="font-semibold text-emerald-700 dark:text-emerald-300">
             {t("auth.register.telegramBound")}

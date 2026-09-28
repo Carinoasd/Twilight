@@ -11,7 +11,7 @@
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "test:ticket-conversation": "node --test scripts/test-ticket-conversation.cjs",
-    "test:bind-code-status": "node --test scripts/test-bind-code-status.cjs",
+    "test:telegram-link-status": "node --test scripts/test-telegram-link-status.cjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",

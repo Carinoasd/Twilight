@@ -3,11 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,20 +24,17 @@ func TestTelegramBindingCannotBypassApprovedUnbind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/api/v1/users/me/telegram/bind-code", "/api/v2/me/telegram/bind-code"} {
-		rr := doJSONWithHeaders(app, http.MethodGet, path, "", cookies, bindCodeCreateTestHeaders())
+	for _, path := range []string{"/api/v1/users/me/telegram/link", "/api/v2/me/telegram/link"} {
+		rr := doJSONWithHeaders(app, http.MethodPost, path, "", cookies, telegramLinkCreateTestHeaders())
 		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), ErrTGAlreadyBound) {
 			t.Fatalf("%s: %d %s", path, rr.Code, rr.Body.String())
 		}
 	}
-	// A previously issued code must not overwrite an identity bound in the meantime.
-	code := "STALEBIND12"
-	if err := app.upsertBindCode(store.BindCode{Code: code, UID: u.UID, Scene: "user", ExpiresAt: time.Now().Unix() + 60}); err != nil {
-		t.Fatal(err)
-	}
-	rr := doLoopbackJSON(app, http.MethodPost, "/api/v1/users/me/telegram/bind-confirm", fmt.Sprintf(`{"code":%q,"telegram_id":222}`, code))
-	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), ErrTGAlreadyBound) {
-		t.Fatalf("confirm: %d %s", rr.Code, rr.Body.String())
+	// A previously issued link must not overwrite an identity bound in the meantime.
+	id := linkIDFor("stalebind")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, UID: u.UID, Scene: "user", ExpiresAt: time.Now().Unix() + 60})
+	if result := app.confirmTelegramLink(context.Background(), id, 222, ""); result.Success || result.ErrorCode != ErrTGAlreadyBound {
+		t.Fatalf("confirm: %+v", result)
 	}
 	got, _ := app.store().User(u.UID)
 	if got.TelegramID != 111 {
@@ -81,89 +75,6 @@ func TestTelegramUnbindV1V2ReturnCommittedStateAndHistory(t *testing.T) {
 			history, err := app.store().GetTelegramIdentityHistory(context.Background(), u.UID, 10)
 			if err != nil || len(history) != 1 || history[0].ChangeType != "unbind" {
 				t.Fatalf("history=%#v err=%v", history, err)
-			}
-		})
-	}
-}
-
-func TestTelegramBindFallbackUsesSignedHTTPAndDeliversBusinessError(t *testing.T) {
-	app := newTestApp(t)
-	app.cfg().TelegramBotToken = "123:test-token"
-	app.cfg().TelegramMode = true
-	app.cfg().BotInternalSecret = "shared-test-key"
-	var confirmed atomic.Bool
-	confirmationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !authenticateTelegramBindRequest(r, app.telegramBindSigningKey(), time.Now()) {
-			t.Error("Bot did not authenticate its confirmation")
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		confirmed.Store(true)
-		failWithCode(w, http.StatusNotFound, ErrTGBindCodeExpired, "expired")
-	}))
-	defer confirmationServer.Close()
-	parsed, _ := url.Parse(confirmationServer.URL)
-	app.cfg().Port, _ = strconv.Atoi(parsed.Port())
-	messages := make(chan string, 2)
-	telegramServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			Text string `json:"text"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Error(err)
-		}
-		messages <- payload.Text
-		_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
-	}))
-	defer telegramServer.Close()
-	app.cfg().TelegramAPIURL = telegramServer.URL
-	app.confirmBindCodeViaHTTP(context.Background(), 42, "ABCDEF12", 42, "user")
-	if !confirmed.Load() {
-		t.Fatal("confirmation endpoint not called")
-	}
-	select {
-	case message := <-messages:
-		if !strings.Contains(message, "无效或已过期") || strings.Contains(message, "ABCDEF12") {
-			t.Fatalf("message=%q", message)
-		}
-	default:
-		t.Fatal("no Telegram reply")
-	}
-}
-
-func TestTelegramBindConfirmationRequiresSignatureOnBothRoutes(t *testing.T) {
-	app := newTestApp(t)
-	app.cfg().TelegramBotToken = "123:test-token"
-	app.cfg().BotInternalSecret = ""
-	const code = "SIGNTEST12"
-	body := []byte(`{"code":"SIGNTEST12","telegram_id":42}`)
-	for _, path := range []string{
-		"/api/v1/users/me/telegram/bind-confirm",
-		"/api/v2/registration/telegram/bind-confirm",
-	} {
-		t.Run(path, func(t *testing.T) {
-			if err := app.upsertBindCode(store.BindCode{Code: code, Scene: "register", ExpiresAt: time.Now().Unix() + 60}); err != nil {
-				t.Fatal(err)
-			}
-			for _, signed := range []bool{false, true} {
-				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
-				req.RemoteAddr = "127.0.0.1:54321"
-				req.Header.Set("Content-Type", "application/json")
-				if signed {
-					signTelegramBindRequest(req, body, app.cfg().TelegramBotToken, time.Now())
-				}
-				rr := httptest.NewRecorder()
-				app.ServeHTTP(rr, req)
-				if !signed {
-					if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), ErrInternalSecretInvalid) {
-						t.Fatalf("unsigned request: %d %s", rr.Code, rr.Body.String())
-					}
-					if bind, _ := app.bindCode(code); bind.Confirmed {
-						t.Fatal("unsigned request changed binding state")
-					}
-				} else if rr.Code != http.StatusOK {
-					t.Fatalf("signed request with shared Bot token: %d %s", rr.Code, rr.Body.String())
-				}
 			}
 		})
 	}

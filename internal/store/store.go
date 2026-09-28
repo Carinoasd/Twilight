@@ -1407,7 +1407,7 @@ func (s *Store) LoadSnapshot(data []byte) error {
 	}
 	raw, version, err := s.saveStateInTxLocked(ctx, tx, true)
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges`)
+		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links`)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -2781,7 +2781,7 @@ func (s *Store) DeleteUser(uid int64) error {
 				}
 			}
 			if err == nil {
-				_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges WHERE uid=$1 OR ($2::bigint>0 AND telegram_id=$2)`, uid, deletedUser.TelegramID)
+				_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links WHERE uid=$1 OR ($2::bigint>0 AND telegram_id=$2)`, uid, deletedUser.TelegramID)
 			}
 			if err == nil {
 				err = tx.Commit()

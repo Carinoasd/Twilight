@@ -813,7 +813,9 @@ export interface PlayRankResponse {
 
 
 export interface RegisterData {
-  telegram_bind_code?: string;
+  /** 注册场景 Telegram 绑定链接的资源 ID 与浏览器 secret，两者必须成对提交。 */
+  telegram_link_id?: string;
+  telegram_link_secret?: string;
   username: string;
   password?: string;
   email?: string;

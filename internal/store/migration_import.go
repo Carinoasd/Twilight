@@ -305,7 +305,7 @@ func validateMigrationData(data parsedMigrationData) error {
 }
 
 func truncateMigrationTables(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `TRUNCATE TABLE twilight_telegram_challenges, twilight_runtime_logs, twilight_audit_logs, twilight_telegram_roster, twilight_telegram_runtime, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily RESTART IDENTITY`)
+	_, err := tx.ExecContext(ctx, `TRUNCATE TABLE twilight_telegram_links, twilight_runtime_logs, twilight_audit_logs, twilight_telegram_roster, twilight_telegram_runtime, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily RESTART IDENTITY`)
 	return err
 }
 

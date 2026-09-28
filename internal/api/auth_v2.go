@@ -79,7 +79,7 @@ func (a *App) handleV2RegistrationAvailability(w http.ResponseWriter, r *http.Re
 	a.handleRegistrationAvailability(w, r)
 }
 
-func (a *App) handleV2CreateRegistrationBindCode(w http.ResponseWriter, r *http.Request, p Params) {
+func (a *App) handleV2CreateRegistrationTelegramLink(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
-	a.handleRegisterBindCode(w, r, p)
+	a.handleRegisterTelegramLink(w, r, p)
 }

@@ -57,7 +57,7 @@ func (s *Store) UnbindUserTelegram(uid, expectedTelegramID int64) (User, error) 
 		updated = u
 		return nil
 	}, func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM twilight_telegram_challenges WHERE uid=$1`, uid); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links WHERE uid=$1`, uid); err != nil {
 			return err
 		}
 		if previous.TelegramID == 0 {
