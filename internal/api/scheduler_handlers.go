@@ -20,7 +20,7 @@ var schedulerJobs = []map[string]any{
 	{"id": "emby_sync", "name": "同步 Emby 用户", "description": "将本地用户与 Emby 远程用户的 ID、名称、禁用状态同步，修复占位 ID。用户多于 max_users 时分批执行，下一次手动执行会接着上一批继续。", "manual_only": true, "enabled": true, "runtime_params": []string{"max_users", "after_uid"}},
 	{"id": "emby_state_reconcile", "name": "Emby 状态对账", "description": "按 Web 账号状态收敛 Emby 启停：停用应停用却仍启用的账号，重新启用本系统自动停用、Web 已恢复的账号；不做名称认领，不启用管理员单独封禁的 Emby。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "max_changes"}},
 	{"id": "cleanup_no_emby", "name": "清理无 Emby 账号", "description": "删除注册后长期未绑定 Emby 且无开通资格的 Web 账号。", "manual_only": false, "enabled": true},
-	{"id": "cleanup_pending_emby_entitlements", "name": "清理未使用的 Emby 开通资格", "description": "收回长期未创建 Emby 的开通资格，保留 Web 账号。", "manual_only": false, "enabled": true},
+	{"id": "cleanup_pending_emby_entitlements", "name": "清理未使用的 Emby 开通资格", "description": "收回发放超过指定天数仍未创建 Emby 的开通资格，保留 Web 账号。", "manual_only": false, "enabled": true, "runtime_params": []string{"enabled", "days", "dry_run"}},
 	{"id": "enforce_group_membership", "name": "Telegram 群成员校验", "description": "校验用户是否仍在要求的群组内，按配置处理退群（禁用/封禁/自动解禁）。群组层级错误或拟停用人数超过熔断阈值时整轮中止；支持仅预览。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "auto_enable_rejoined", "breaker_percent", "breaker_max"}},
 	{"id": "check_telegram_bindings", "name": "Telegram 绑定检查", "description": "扫描重复或异常的 Telegram 绑定关系。", "manual_only": false, "enabled": true},
 	{"id": "system_auto_update", "name": "系统自动更新", "description": "从 Git 拉取更新并选择性重启服务。", "manual_only": false, "enabled": false},
@@ -220,7 +220,7 @@ func (a *App) schedulerDefaultRuntimeParams(jobID string) map[string]any {
 		}
 		return map[string]any{"enabled": a.cfg().AutoCleanupNoEmby, "auto_enabled": a.cfg().AutoCleanupNoEmby, "days": days, "preserve_tg_bound": a.cfg().EmbyDirectRegisterEnabled}
 	case "cleanup_pending_emby_entitlements":
-		return map[string]any{"enabled": a.cfg().AutoCleanupPendingEmby, "auto_enabled": a.cfg().AutoCleanupPendingEmby, "scope": "all"}
+		return map[string]any{"enabled": a.cfg().AutoCleanupPendingEmby, "auto_enabled": a.cfg().AutoCleanupPendingEmby, "days": pendingEmbyCleanupDays(a.cfg().AutoCleanupPendingEmbyDays)}
 	case "cleanup_audit_logs":
 		return map[string]any{"enabled": a.cfg().AuditLogAutoCleanupEnabled, "auto_enabled": a.cfg().AuditLogAutoCleanupEnabled, "retention_days": a.cfg().AuditLogRetentionDays, "max_entries": a.cfg().AuditLogMaxEntries, "preserve_admin": a.cfg().AuditLogPreserveAdmin}
 	case "cleanup_ticket_images":
@@ -278,7 +278,7 @@ func (a *App) normalizeSchedulerRuntimeParams(jobID string, params map[string]an
 		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "days": days, "preserve_tg_bound": boolValue(params, "preserve_tg_bound", a.cfg().EmbyDirectRegisterEnabled)}
 	case "cleanup_pending_emby_entitlements":
 		enabled := boolValue(params, "enabled", boolValue(params, "auto_enabled", a.cfg().AutoCleanupPendingEmby))
-		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "scope": "all"}
+		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "days": clamp(intValue(params, "days", pendingEmbyCleanupDays(a.cfg().AutoCleanupPendingEmbyDays)), 1, 3650)}
 	case "cleanup_audit_logs":
 		enabled := boolValue(params, "enabled", boolValue(params, "auto_enabled", a.cfg().AuditLogAutoCleanupEnabled))
 		// 前端可能发送 "days" 作为 "retention_days" 的别名
@@ -352,4 +352,12 @@ func (a *App) schedulerRunsForRead(r *http.Request, jobID string, limit int) ([]
 func schedulerRunListView(run store.SchedulerRun) store.SchedulerRun {
 	run.Logs = nil
 	return run
+}
+
+// pendingEmbyCleanupDays 给未使用开通资格清理一个下限，配置为 0 或负数时回退 7 天。
+func pendingEmbyCleanupDays(days int) int {
+	if days <= 0 {
+		return 7
+	}
+	return days
 }

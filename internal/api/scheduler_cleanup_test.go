@@ -73,3 +73,35 @@ func TestCleanupSessionsPartialWhenEmbyUnavailable(t *testing.T) {
 		t.Fatalf("Telegram bind links must be cleaned up routinely: %#v", summary)
 	}
 }
+
+// TestCleanupPendingEmbyEntitlementsRespectsAge 回归排程缺口：cleanup_pending_emby_entitlements
+// 旧实现没有年龄门槛，刚发放的资格下一分钟就会被收回。
+func TestCleanupPendingEmbyEntitlementsRespectsAge(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().AutoCleanupPendingEmby = true
+	app.cfg().AutoCleanupPendingEmbyDays = 7
+	old := time.Now().AddDate(0, 0, -30).Unix()
+	fresh, err := app.store().CreateUser(store.User{Username: "fresh-grant", Role: store.RoleNormal, Active: true, RegisterTime: old, CreatedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	days := 30
+	// 老用户今天才被发放资格：发放时间由 store 自动记录为现在。
+	if _, err := app.store().UpdateUser(fresh.UID, func(u *store.User) error { u.PendingEmby = true; u.PendingEmbyDays = &days; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := app.store().CreateUser(store.User{Username: "stale-grant", Role: store.RoleNormal, Active: true, PendingEmby: true, PendingEmbyDays: &days, RegisterTime: old, CreatedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, _, err := app.runSchedulerJob(httptest.NewRequest(http.MethodPost, "/scheduler", nil), "cleanup_pending_emby_entitlements")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := app.store().User(fresh.UID); !cur.PendingEmby {
+		t.Fatalf("fresh grant was revoked: %#v", summary)
+	}
+	if cur, _ := app.store().User(stale.UID); cur.PendingEmby {
+		t.Fatalf("stale grant should be revoked: %#v", summary)
+	}
+}

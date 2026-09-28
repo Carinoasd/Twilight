@@ -652,14 +652,34 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "enabled": false, "cleared": 0}, []string{"auto cleanup pending-Emby entitlement disabled"}, nil
 		}
 		dryRun := jobParamBool(params, "dry_run", false)
+		// 旧实现没有年龄门槛，scope=all 会把刚发放的资格也一次收回。现在只收回发放
+		// 超过 days 天仍未开通的资格（SAR.auto_cleanup_pending_emby_days，默认 7）。
+		days := jobParamInt(params, "days", a.cfg().AutoCleanupPendingEmbyDays)
+		if days <= 0 {
+			days = 7
+		}
+		threshold := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 		candidates := 0
 		cleared := 0
 		failed := 0
+		skippedRecent := 0
+		clearedUIDs := []int64{}
 		for _, u := range a.store().ListUsers() {
 			if err := r.Context().Err(); err != nil {
 				return map[string]any{"success": false, "terminated": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun}, []string{"job terminated"}, err
 			}
 			if a.userIsProtected(u) || u.EmbyID != "" || !u.PendingEmby {
+				continue
+			}
+			grantedAt := u.PendingEmbyGrantedAt
+			if grantedAt == 0 {
+				grantedAt = u.RegisterTime
+				if u.CreatedAt > grantedAt {
+					grantedAt = u.CreatedAt
+				}
+			}
+			if grantedAt > threshold {
+				skippedRecent++
 				continue
 			}
 			candidates++
@@ -674,9 +694,13 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				failed++
 			} else {
 				cleared++
+				clearedUIDs = appendLimitedUID(clearedUIDs, u.UID)
 			}
 		}
-		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun, "scope": "all"}, []string{fmt.Sprintf("cleared %d pending Emby entitlements", cleared)}, nil
+		if cleared > 0 {
+			a.auditSystem("scheduler", "clear_pending_emby_entitlements", 0, map[string]any{"cleared": cleared, "failed": failed, "days": days, "uids": clearedUIDs})
+		}
+		return map[string]any{"success": failed == 0, "enabled": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun, "days": days, "skipped_recent": skippedRecent, "cleared_uids": clearedUIDs}, []string{fmt.Sprintf("cleared %d pending Emby entitlements older than %d days", cleared, days)}, nil
 	case "enforce_group_membership":
 		// dry_run 只列出会停用 / 会启用的名单；breaker_* 允许管理员临时调整熔断阈值。
 		result, logs, err := a.enforceTelegramMembershipWithOptions(r.Context(), telegramMembershipOptions{

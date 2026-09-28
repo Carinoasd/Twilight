@@ -2724,7 +2724,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(numeric(summary["cleared"])) != 2 || int(numeric(summary["deleted"])) != 0 || asString(summary["scope"]) != "all" {
+	// 只收回发放超过 AutoCleanupPendingEmbyDays 天的资格；刚发放的保留。
+	if int(numeric(summary["cleared"])) != 1 || int(numeric(summary["deleted"])) != 0 || int(numeric(summary["skipped_recent"])) != 1 {
 		t.Fatalf("unexpected entitlement cleanup summary: %#v", summary)
 	}
 	updated, ok := app.store().User(user.UID)
@@ -2735,8 +2736,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 		t.Fatalf("pending entitlement was not cleared cleanly: %#v", updated)
 	}
 	updatedRecent, ok := app.store().User(recentUser.UID)
-	if !ok || updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays != nil || !updatedRecent.Active {
-		t.Fatalf("recent pending entitlement was not cleared cleanly: ok=%v user=%#v", ok, updatedRecent)
+	if !ok || !updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays == nil || !updatedRecent.Active {
+		t.Fatalf("recent pending entitlement must be kept: ok=%v user=%#v", ok, updatedRecent)
 	}
 }
 
@@ -4929,7 +4930,7 @@ func TestSchedulerRuntimeParamsPersistInStoreAndDriveRunner(t *testing.T) {
 		}
 		found = true
 		params, _ := job["runtime_params"].(map[string]any)
-		if boolish(params["enabled"]) || asString(params["scope"]) != "all" {
+		if boolish(params["enabled"]) || int(numeric(params["days"])) <= 0 {
 			t.Fatalf("runtime params did not come from backend store: %#v", params)
 		}
 	}

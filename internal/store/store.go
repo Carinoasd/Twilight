@@ -203,9 +203,12 @@ type User struct {
 	RegistrationCode   string `json:"registration_code,omitempty"`
 	// EmbyUnboundAt 是最近一次解除 Emby 绑定的时间。cleanup_no_emby 以
 	// max(注册时间, EmbyUnboundAt) 计算「多久没有 Emby」，避免把刚解绑的老用户直接删掉。
-	EmbyUnboundAt                           int64    `json:"emby_unbound_at,omitempty"`
-	PendingEmby                             bool     `json:"pending_emby"`
-	PendingEmbyDays                         *int     `json:"pending_emby_days,omitempty"`
+	EmbyUnboundAt   int64 `json:"emby_unbound_at,omitempty"`
+	PendingEmby     bool  `json:"pending_emby"`
+	PendingEmbyDays *int  `json:"pending_emby_days,omitempty"`
+	// PendingEmbyGrantedAt 是最近一次发放（或改动）Emby 开通资格的时间。
+	// cleanup_pending_emby_entitlements 只收回发放超过 N 天的资格；为 0 的旧数据按注册时间算。
+	PendingEmbyGrantedAt                    int64    `json:"pending_emby_granted_at,omitempty"`
 	NotifyOnLoginTelegram                   bool     `json:"notify_on_login_telegram,omitempty"`
 	NotifyOnLoginEmail                      bool     `json:"notify_on_login_email,omitempty"`
 	NotifyOnTicketTelegram                  bool     `json:"notify_on_ticket_telegram,omitempty"`
@@ -248,6 +251,19 @@ func normalizeUserStateMarkers(old User, u *User) {
 	if old.EmbyID != "" && u.EmbyID == "" {
 		u.EmbyUnboundAt = time.Now().Unix()
 	}
+	switch {
+	case !u.PendingEmby:
+		u.PendingEmbyGrantedAt = 0
+	case !old.PendingEmby || !sameOptionalInt(old.PendingEmbyDays, u.PendingEmbyDays):
+		u.PendingEmbyGrantedAt = time.Now().Unix()
+	}
+}
+
+func sameOptionalInt(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 type UserSummaryCounts struct {
@@ -2745,6 +2761,7 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 				other.EmbyUsername = ""
 				other.EmbyUnboundAt = time.Now().Unix()
 				other.PendingEmby = true
+				other.PendingEmbyGrantedAt = time.Now().Unix()
 				s.state.Users[other.UID] = other
 				s.maintainEmbyIDIndex(oldOtherEmbyID, other.EmbyID, other.UID)
 				displaced = other.UID

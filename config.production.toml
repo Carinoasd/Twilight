@@ -247,7 +247,11 @@ invite_code_random_algorithm = "hex10"
 
 # —— 长期无 Emby 的悬空用户自动清理
 auto_cleanup_no_emby = false
+# 天数从注册时间与最近一次解绑 Emby 的时间中较晚者算起
 auto_cleanup_no_emby_days = 7
+# —— 收回长期未使用的 Emby 开通资格（只收回发放超过下面天数仍未创建 Emby 的资格）
+auto_cleanup_pending_emby = false
+auto_cleanup_pending_emby_days = 7
 
 # —— 签到 / 积分（原 [Signin] 节并入此处。可选启用积分续期，无排行榜）
 # 命名说明：原 [Signin].enabled 改为 signin_enabled 避免与 SAR 整体开关混淆；
