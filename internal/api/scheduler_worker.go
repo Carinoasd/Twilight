@@ -150,6 +150,13 @@ func (a *App) executeClaimedSchedulerRun(ctx context.Context, process *scheduler
 		}
 		if err := st.FinishSchedulerRun(context.Background(), result, run.Owner); err != nil {
 			zap.L().Warn("scheduler completion rejected or unavailable", zap.Int64("run_id", run.ID))
+		} else {
+			// 失败 / 恢复通知走独立协程，不拖慢调度槽位释放。
+			a.schedulerWorkers.Add(1)
+			go func() {
+				defer a.schedulerWorkers.Done()
+				a.notifySchedulerOutcome(st, result)
+			}()
 		}
 	}()
 	if err := st.RecordSchedulerConfigRevision(ctx, run.ID, run.Owner, run.ConfigRevision); err != nil {

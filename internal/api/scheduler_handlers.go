@@ -17,25 +17,28 @@ var schedulerJobs = []map[string]any{
 	{"id": "expiry_reminders", "name": "发送到期提醒", "description": "向即将到期且已绑定 Telegram 的用户发送续期通知。", "manual_only": false, "enabled": true},
 	{"id": "daily_stats", "name": "每日统计", "description": "记录每日用户总数与活跃用户数。", "manual_only": false, "enabled": true},
 	{"id": "cleanup_sessions", "name": "会话巡检与清理", "description": "清理过期会话与邮箱验证码，并读取 Emby 当前活跃会话数。", "manual_only": false, "enabled": true},
-	{"id": "emby_sync", "name": "同步 Emby 用户", "description": "将本地用户与 Emby 远程用户的 ID、名称、禁用状态同步，修复占位 ID。", "manual_only": true, "enabled": true},
+	{"id": "emby_sync", "name": "同步 Emby 用户", "description": "将本地用户与 Emby 远程用户的 ID、名称、禁用状态同步，修复占位 ID。用户多于 max_users 时分批执行，下一次手动执行会接着上一批继续。", "manual_only": true, "enabled": true, "runtime_params": []string{"max_users", "after_uid"}},
+	{"id": "emby_state_reconcile", "name": "Emby 状态对账", "description": "按 Web 账号状态收敛 Emby 启停：停用应停用却仍启用的账号，重新启用本系统自动停用、Web 已恢复的账号；不做名称认领，不启用管理员单独封禁的 Emby。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "max_changes"}},
 	{"id": "cleanup_no_emby", "name": "清理无 Emby 账号", "description": "删除注册后长期未绑定 Emby 且无开通资格的 Web 账号。", "manual_only": false, "enabled": true},
-	{"id": "cleanup_pending_emby_entitlements", "name": "清理未使用的 Emby 开通资格", "description": "收回长期未创建 Emby 的开通资格，保留 Web 账号。", "manual_only": false, "enabled": true},
-	{"id": "enforce_group_membership", "name": "Telegram 群成员校验", "description": "校验用户是否仍在要求的群组内，按配置处理退群（禁用/封禁/自动解禁）。", "manual_only": false, "enabled": true},
+	{"id": "cleanup_pending_emby_entitlements", "name": "清理未使用的 Emby 开通资格", "description": "收回发放超过指定天数仍未创建 Emby 的开通资格，保留 Web 账号。", "manual_only": false, "enabled": true, "runtime_params": []string{"enabled", "days", "dry_run"}},
+	{"id": "enforce_group_membership", "name": "Telegram 群成员校验", "description": "校验用户是否仍在要求的群组内，按配置处理退群（禁用/封禁/自动解禁）。群组层级错误或拟停用人数超过熔断阈值时整轮中止；支持仅预览。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "auto_enable_rejoined", "breaker_percent", "breaker_max"}},
 	{"id": "check_telegram_bindings", "name": "Telegram 绑定检查", "description": "扫描重复或异常的 Telegram 绑定关系。", "manual_only": false, "enabled": true},
 	{"id": "system_auto_update", "name": "系统自动更新", "description": "从 Git 拉取更新并选择性重启服务。", "manual_only": false, "enabled": false},
+	{"id": "auto_backup_database", "name": "定期数据库备份", "description": "每天备份一次数据库，只保留最近 N 份自动备份（手动备份不受影响）。需在配置中开启或保存运行参数启用。", "manual_only": false, "enabled": true, "runtime_params": []string{"enabled", "keep"}},
 	{"id": "cleanup_unused_uploads", "name": "清理未使用上传文件", "description": "删除未被引用的过期间接上传文件。", "manual_only": false, "enabled": true},
 	{"id": "cleanup_audit_logs", "name": "审计日志自动清理", "description": "按保留天数/条数策略清理过期操作日志，可保留管理员记录。", "manual_only": false, "enabled": true},
 	{"id": "cleanup_ticket_images", "name": "清理过期工单图片", "description": "按保留天数清理已关闭工单的图片附件及元数据。", "manual_only": false, "enabled": true},
 	{"id": "refresh_bangumi_collections", "name": "刷新 Bangumi 收藏缓存", "description": "每小时为开启 BGM 管理且配置 Token 的用户缓存在看、想看、看过收藏列表。", "manual_only": false, "enabled": true},
 	{"id": "sync_emby_activity_logs", "name": "同步 Emby 活动日志", "description": "每 10 分钟从 Emby 拉取活动日志并存入本地，用于活动审计与播放记录入库。", "manual_only": false, "enabled": true, "runtime_params": []string{"since_hours"}},
-	{"id": "cleanup_unlinked_emby", "name": "清理孤立 Emby 账号", "description": "扫描 Emby 中未绑定任何 Web 账号的孤立用户，支持仅扫描与删除模式。", "manual_only": false, "enabled": false, "runtime_params": []string{"dry_run", "delete"}},
+	{"id": "cleanup_unlinked_emby", "name": "清理孤立 Emby 账号", "description": "扫描 Emby 中未绑定任何 Web 账号的孤立用户，支持仅扫描与删除模式。默认不自动执行，保存自定义排程后才会自动运行。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "delete"}},
 	{"id": "cleanup_emby_devices", "name": "清理 Emby 设备记录", "description": "通过 Emby 管理员接口删除历史设备记录，自动跳过 Twilight 自身设备与受保护用户。", "manual_only": true, "enabled": true, "runtime_params": []string{"dry_run", "max_workers", "skip_usernames"}},
 	{"id": "kick_unknown_group_members", "name": "踢出未知 Telegram 群成员", "description": "根据观察到的群成员名册，踢出无账号/未绑定 Emby/已禁用的成员。", "manual_only": true, "enabled": true, "runtime_params": []string{"dry_run", "max_per_run"}},
 }
 
 func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Params) {
 	jobs := make([]map[string]any, 0, len(schedulerJobs))
-	now := time.Now()
+	loc := a.schedulerLocation()
+	now := time.Now().In(loc)
 
 	// Batch-fetch all snapshots in a single lock acquisition instead of
 	// N separate SchedulerRunSnapshot calls (one per job). This reduces
@@ -80,8 +83,15 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		item["last_run"] = nil
 		snapshot := overview.Runs[jobID]
 		running := activeJobIDs[jobID] || schedulerSnapshotRecentlyRunning(snapshot, now)
-		item["next_run_at"] = zeroNil(schedulerNextRunAtFromSnapshot(spec, now, snapshot))
-		item["auto_disabled"] = schedulerTriggerDisabled(spec)
+		// 被配置关闭的任务（如未开启的 system_auto_update）永远不会自动入队，
+		// 不能再显示「下次运行时间」误导管理员。
+		enabledByConfig := schedulerJobEnabledByConfig(a.cfg().SystemUpdateEnabled, job)
+		if enabledByConfig {
+			item["next_run_at"] = zeroNil(schedulerNextRunAtFromSnapshot(spec, now, snapshot))
+		} else {
+			item["next_run_at"] = nil
+		}
+		item["auto_disabled"] = schedulerTriggerDisabled(spec) || !enabledByConfig
 		if runs := snapshot.Runs; len(runs) > 0 {
 			item["last_run"] = schedulerRunListView(runs[0])
 			if snapshot.HasLatestAuto {
@@ -94,7 +104,8 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		item["is_running"] = running
 		jobs = append(jobs, item)
 	}
-	ok(w, "OK", map[string]any{"jobs": jobs})
+	_, offset := now.Zone()
+	ok(w, "OK", map[string]any{"jobs": jobs, "timezone": loc.String(), "utc_offset_seconds": offset})
 }
 
 func (a *App) handleSchedulerTerminate(w http.ResponseWriter, r *http.Request, params Params) {
@@ -219,7 +230,7 @@ func (a *App) schedulerDefaultRuntimeParams(jobID string) map[string]any {
 		}
 		return map[string]any{"enabled": a.cfg().AutoCleanupNoEmby, "auto_enabled": a.cfg().AutoCleanupNoEmby, "days": days, "preserve_tg_bound": a.cfg().EmbyDirectRegisterEnabled}
 	case "cleanup_pending_emby_entitlements":
-		return map[string]any{"enabled": a.cfg().AutoCleanupPendingEmby, "auto_enabled": a.cfg().AutoCleanupPendingEmby, "scope": "all"}
+		return map[string]any{"enabled": a.cfg().AutoCleanupPendingEmby, "auto_enabled": a.cfg().AutoCleanupPendingEmby, "days": pendingEmbyCleanupDays(a.cfg().AutoCleanupPendingEmbyDays)}
 	case "cleanup_audit_logs":
 		return map[string]any{"enabled": a.cfg().AuditLogAutoCleanupEnabled, "auto_enabled": a.cfg().AuditLogAutoCleanupEnabled, "retention_days": a.cfg().AuditLogRetentionDays, "max_entries": a.cfg().AuditLogMaxEntries, "preserve_admin": a.cfg().AuditLogPreserveAdmin}
 	case "cleanup_ticket_images":
@@ -232,8 +243,12 @@ func (a *App) schedulerDefaultRuntimeParams(jobID string) map[string]any {
 		return map[string]any{"dry_run": true, "max_workers": embyDeviceCleanupDefaultWorkers, "skip_usernames": []string{}}
 	case "kick_unknown_group_members":
 		return map[string]any{"dry_run": true, "max_per_run": 200}
+	case "emby_state_reconcile":
+		return map[string]any{"dry_run": false, "max_changes": embyReconcileDefaultMaxChanges}
+	case "auto_backup_database":
+		return map[string]any{"enabled": a.cfg().SchedulerAutoBackupEnabled, "keep": autoBackupKeep(a.cfg().SchedulerAutoBackupKeep)}
 	case "enforce_group_membership":
-		return map[string]any{"auto_enable_rejoined": a.cfg().TelegramAutoEnableRejoined}
+		return map[string]any{"auto_enable_rejoined": a.cfg().TelegramAutoEnableRejoined, "breaker_percent": a.cfg().TelegramMembershipBreakerPercent, "breaker_max": a.cfg().TelegramMembershipBreakerMax}
 	default:
 		return nil
 	}
@@ -275,7 +290,7 @@ func (a *App) normalizeSchedulerRuntimeParams(jobID string, params map[string]an
 		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "days": days, "preserve_tg_bound": boolValue(params, "preserve_tg_bound", a.cfg().EmbyDirectRegisterEnabled)}
 	case "cleanup_pending_emby_entitlements":
 		enabled := boolValue(params, "enabled", boolValue(params, "auto_enabled", a.cfg().AutoCleanupPendingEmby))
-		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "scope": "all"}
+		return map[string]any{"enabled": enabled, "auto_enabled": enabled, "days": clamp(intValue(params, "days", pendingEmbyCleanupDays(a.cfg().AutoCleanupPendingEmbyDays)), 1, 3650)}
 	case "cleanup_audit_logs":
 		enabled := boolValue(params, "enabled", boolValue(params, "auto_enabled", a.cfg().AuditLogAutoCleanupEnabled))
 		// 前端可能发送 "days" 作为 "retention_days" 的别名
@@ -288,9 +303,22 @@ func (a *App) normalizeSchedulerRuntimeParams(jobID string, params map[string]an
 	case "kick_unknown_group_members":
 		return map[string]any{"dry_run": boolValue(params, "dry_run", true), "max_per_run": clamp(intValue(params, "max_per_run", 200), 1, 500)}
 	case "enforce_group_membership":
-		return map[string]any{"auto_enable_rejoined": boolValue(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined)}
+		return map[string]any{
+			"auto_enable_rejoined": boolValue(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined),
+			"breaker_percent":      clamp(intValue(params, "breaker_percent", a.cfg().TelegramMembershipBreakerPercent), 0, 100),
+			"breaker_max":          clamp(intValue(params, "breaker_max", a.cfg().TelegramMembershipBreakerMax), 0, 1000000),
+		}
+	case "auto_backup_database":
+		return map[string]any{"enabled": boolValue(params, "enabled", a.cfg().SchedulerAutoBackupEnabled), "keep": clamp(intValue(params, "keep", autoBackupKeep(a.cfg().SchedulerAutoBackupKeep)), 1, 365)}
+	case "emby_state_reconcile":
+		return map[string]any{"dry_run": boolValue(params, "dry_run", false), "max_changes": clamp(intValue(params, "max_changes", embyReconcileDefaultMaxChanges), 0, 100000)}
 	case "emby_sync":
-		return map[string]any{"max_users": clamp(intValue(params, "max_users", 1000), 1, 50000)}
+		out := map[string]any{"max_users": clamp(intValue(params, "max_users", 1000), 1, 50000)}
+		// after_uid 只在显式传入时保留；缺省时任务会接着上一轮的游标继续。
+		if _, ok := params["after_uid"]; ok {
+			out["after_uid"] = max(intValue(params, "after_uid", 0), 0)
+		}
+		return out
 	case "sync_emby_activity_logs":
 		return map[string]any{"since_hours": clamp(intValue(params, "since_hours", 24), 1, 720)}
 	case "cleanup_unlinked_emby":
@@ -338,4 +366,19 @@ func (a *App) schedulerRunsForRead(r *http.Request, jobID string, limit int) ([]
 func schedulerRunListView(run store.SchedulerRun) store.SchedulerRun {
 	run.Logs = nil
 	return run
+}
+
+// pendingEmbyCleanupDays 给未使用开通资格清理一个下限，配置为 0 或负数时回退 7 天。
+func pendingEmbyCleanupDays(days int) int {
+	if days <= 0 {
+		return 7
+	}
+	return days
+}
+
+func autoBackupKeep(keep int) int {
+	if keep <= 0 {
+		return 7
+	}
+	return keep
 }

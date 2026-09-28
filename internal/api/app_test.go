@@ -2755,7 +2755,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(numeric(summary["cleared"])) != 2 || int(numeric(summary["deleted"])) != 0 || asString(summary["scope"]) != "all" {
+	// 只收回发放超过 AutoCleanupPendingEmbyDays 天的资格；刚发放的保留。
+	if int(numeric(summary["cleared"])) != 1 || int(numeric(summary["deleted"])) != 0 || int(numeric(summary["skipped_recent"])) != 1 {
 		t.Fatalf("unexpected entitlement cleanup summary: %#v", summary)
 	}
 	updated, ok := app.store().User(user.UID)
@@ -2766,8 +2767,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 		t.Fatalf("pending entitlement was not cleared cleanly: %#v", updated)
 	}
 	updatedRecent, ok := app.store().User(recentUser.UID)
-	if !ok || updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays != nil || !updatedRecent.Active {
-		t.Fatalf("recent pending entitlement was not cleared cleanly: ok=%v user=%#v", ok, updatedRecent)
+	if !ok || !updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays == nil || !updatedRecent.Active {
+		t.Fatalf("recent pending entitlement must be kept: ok=%v user=%#v", ok, updatedRecent)
 	}
 }
 
@@ -2979,7 +2980,12 @@ func TestTelegramMembershipRejoinManualReviewAndAutoEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error { u.Active = false; return nil }); err != nil {
+	// 只有因退群被巡检停用（DisabledReason=telegram_membership）的账号才会进入回群流程。
+	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error {
+		u.Active = false
+		u.DisabledReason = store.DisabledReasonTelegramMembership
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4965,7 +4971,7 @@ func TestSchedulerRuntimeParamsPersistInStoreAndDriveRunner(t *testing.T) {
 		}
 		found = true
 		params, _ := job["runtime_params"].(map[string]any)
-		if boolish(params["enabled"]) || asString(params["scope"]) != "all" {
+		if boolish(params["enabled"]) || int(numeric(params["days"])) <= 0 {
 			t.Fatalf("runtime params did not come from backend store: %#v", params)
 		}
 	}
@@ -6097,6 +6103,11 @@ func TestRegisterEmbyDoesNotOverwriteConcurrentBinding(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/New":
 			created = true
 			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created"}`))
+		// 新建账号后必须能收紧策略（GET 用户 + POST Policy），否则创建会整体失败。
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/race-created":
+			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created","Policy":{}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Policy":
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Password":
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/Users/race-created":

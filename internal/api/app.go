@@ -73,19 +73,23 @@ type App struct {
 	//   - store / sessions / limiter / redis 接口/指针的 (type,data) 双 word
 	//     非原子赋值导致 vtable 与 data 撕裂触发 segfault；
 	//   - reload 中途读端拿到 cfg 是 next、store 仍是 prev 的混合视图。
-	runtime                   atomic.Pointer[runtimeState]
-	routes                    []Route
-	routeIndex                map[routeIndexKey][]int
-	routePathIndex            map[routePathIndexKey][]int
-	runtimeMu                 sync.Mutex
-	setupMu                   sync.Mutex
-	configSignature           string
-	configSignatureCheckedAt  atomic.Int64
-	telegramBotMu             sync.Mutex
-	telegramBotCacheKey       telegramBotConfigKey
-	telegramBotCacheUntil     time.Time
-	telegramBotCache          map[string]any
-	telegramEndpointCache     atomic.Pointer[telegramEndpointCacheEntry]
+	runtime                  atomic.Pointer[runtimeState]
+	routes                   []Route
+	routeIndex               map[routeIndexKey][]int
+	routePathIndex           map[routePathIndexKey][]int
+	runtimeMu                sync.Mutex
+	setupMu                  sync.Mutex
+	configSignature          string
+	configSignatureCheckedAt atomic.Int64
+	telegramBotMu            sync.Mutex
+	telegramBotCacheKey      telegramBotConfigKey
+	telegramBotCacheUntil    time.Time
+	telegramBotCache         map[string]any
+	telegramEndpointCache    atomic.Pointer[telegramEndpointCacheEntry]
+	schedulerTZCache         atomic.Pointer[schedulerTZEntry]
+	// 定时任务失败通知的节流状态（jobID → 上次通知时间）。
+	schedulerAlertMu          sync.Mutex
+	schedulerAlertAt          map[string]time.Time
 	telegramCommandIndex      atomic.Pointer[telegramCommandConfigIndex]
 	telegramStatusMu          sync.Mutex
 	telegramLastOKAt          int64

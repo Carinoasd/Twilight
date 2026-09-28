@@ -1338,15 +1338,23 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 
 计划覆盖继续保存在状态文档中，新运行命令及历史由 `internal/store/scheduler_queue.go` 持久化到 `twilight_job_runs`。旧 JSONB 历史保留兼容读取。API 只入队，`scheduler` / `all` 领取执行，使用 30 秒租约及两秒心跳；失联记录标记 interrupted，不自动重放旧命令。读接口不修改持久历史；旧版无租约的过期 running 仅在响应中投影为带 interrupted 摘要的 failed。
 
-`GET /admin/scheduler/jobs` 返回的每个 job 含触发器结构化描述：
+`GET /admin/scheduler/jobs` 顶层返回 `jobs`、`timezone`（调度时区名，来自 `Scheduler.timezone`，留空时为进程本地时区）与 `utc_offset_seconds`。每个 job 含：
 
 | 字段 | 说明 |
 | ---- | ---- |
+| `id` / `name` / `description` | 任务标识、名称与说明 |
+| `manual_only` | 手动专用任务，永远不会自动入队 |
+| `enabled` | 任务定义是否允许自动执行（`system_auto_update` 另受 `SystemUpdate.auto_update_enabled` 控制） |
 | `trigger_spec` | 当前生效的触发规则，结构同下方 PUT 请求体 |
 | `default_trigger_spec` | config.toml 算出的默认值（用于"恢复默认"按钮显示） |
 | `is_custom` | 是否已被管理员覆盖（true 时前端显示"已自定义"徽章） |
-| `last_auto_run_at` | 最近一次自动执行开始时间 |
-| `last_manual_run_at` | 最近一次手动执行开始时间 |
+| `runtime_params` | 当前生效的运行参数（默认值叠加管理员保存的覆盖） |
+| `schedule_revision` | 计划版本，PUT / DELETE 可带 `expected_revision` 做乐观锁 |
+| `next_run_at` | 下次自动执行时间；手动模式或被配置关闭的任务为 `null` |
+| `auto_disabled` | 是否不会自动执行（手动模式或被配置关闭） |
+| `is_running` | 是否正在排队或执行 |
+| `last_run` | 最近一次运行摘要（不含 logs） |
+| `last_auto_run_at` / `last_manual_run_at` | 最近一次自动 / 手动执行开始时间 |
 
 单次运行（`SchedulerJobRun`）字段：
 
@@ -1355,8 +1363,8 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 | `id` | 运行记录主键 |
 | `job_id` | 任务标识（如 `check_expired`、`emby_sync`） |
 | `type` | 执行类型：`auto` / `manual` |
-| `trigger` | 触发来源：`scheduled` / `manual` / `startup` |
-| `status` | `queued` / `running` / `cancel_requested` / `success` / `failed` / `cancelled` / `interrupted` |
+| `trigger` | 触发来源：`scheduler`（到期自动入队）/ `scheduler_retry`（失败后的自动重试）/ `manual`（后台手动执行） |
+| `status` | `queued` / `running` / `cancel_requested` / `success` / `failed` / `cancelled` / `interrupted`。任务返回 error，或摘要里明确 `success=false`（例如部分用户处理失败）时都记为 `failed` |
 | `created_at` / `heartbeat_at` / `lease_until` | 入队、心跳、租约截止时间（秒）；未执行时 started_at 为 0 |
 | `params` | 入队时规范化的任务参数 |
 | `schedule_revision` / `config_revision` | 计划版本与执行配置摘要；不含配置密钥 |
@@ -1365,6 +1373,37 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 | `error` | 失败时的异常摘要 |
 | `summary` | 结构化指标，如 `{"scanned": 12, "disabled": 3, "failed": 0}` |
 | `logs` | 任务内部累积的日志行（列表接口不返回，详情接口返回） |
+
+#### 内置任务与默认时间
+
+每日任务的 `HH:MM` 按 `Scheduler.timezone` 解释（IANA 名，如 `Asia/Shanghai`；留空为进程本地时区，Docker 通常是 UTC；后端内嵌时区数据库）。
+
+| id | 做什么 | 默认触发（配置键） | 改用户状态 | dry_run |
+| ---- | ---- | ---- | ---- | ---- |
+| `check_expired` | 积分自动续期；未续期者停用 Web（被邀请者只停 Emby）并清会话。Emby 停用失败计数、列 uid 并让本轮失败 | 每日 03:00（`expired_check_time`） | 是 | — |
+| `check_expiring` / `expiry_reminders` | 统计即将到期 / 用 Telegram 发到期提醒 | 每日 09:00（`expiring_check_time`） | 否 | — |
+| `daily_stats` | 用户总数与活跃数 | 每日 00:05（`daily_stats_time`） | 否 | — |
+| `cleanup_sessions` | 清过期会话、邮箱验证码、长期未验证邮箱、过期与孤儿 Telegram 绑定链接；读 Emby 会话数失败只标 `partial` | 每 6 小时（`session_cleanup_interval`） | 清邮箱 | — |
+| `emby_state_reconcile` | Emby 状态对账：停用「Web 停用 / 过期但 Emby 仍启用」的账号；重新启用「本系统自动停用（`emby_auto_disabled`）且 Web 已恢复」的账号。不做名称认领，不启用管理员单独封禁的 Emby，跳过远端 Emby 管理员；计划改动超过 `max_changes`（默认 200）整轮中止 | 每 6 小时（`emby_reconcile_interval`） | 是 | 参数 `dry_run`，默认 `false` |
+| `emby_sync` | 同步 Emby ID、名称、停用状态，修复占位 ID。用户数超过 `max_users` 时按 UID 分批，下一次接着上次的 `next_after_uid`，也可传 `after_uid` | 手动 | 是 | — |
+| `cleanup_no_emby` | 删除长期没有 Emby 的 Web 账号；天数从注册时间与最近一次解绑 Emby 的时间中较晚者算起 | 每日 03:30（`cleanup_no_emby_time`），需 `SAR.auto_cleanup_no_emby` | 删除 | 支持 |
+| `cleanup_pending_emby_entitlements` | 收回发放超过 `days`（`SAR.auto_cleanup_pending_emby_days`，默认 7）天仍未开通的 Emby 资格 | 每日 03:45（`cleanup_pending_emby_time`），需 `SAR.auto_cleanup_pending_emby` | 是 | 支持 |
+| `enforce_group_membership` | 群成员巡检：退群停用 / 封禁，回群自动启用（只处理因退群停用的账号，并恢复随之停用的 Emby）。群组层级错误或拟停用人数超过熔断阈值时整轮中止 | 每日 03:10（`group_membership_check_time`） | 是 | 支持；另有 `breaker_percent` / `breaker_max` |
+| `check_telegram_bindings` | 统计重复 Telegram 绑定 | 每日 03:20（`telegram_bindings_check_time`） | 否 | — |
+| `auto_backup_database` | 数据库备份，只保留最近 `keep` 份自动备份，手动备份不受影响 | 每日 04:15（`auto_backup_time`），需 `Scheduler.auto_backup_enabled`；手动执行不受开关限制 | 否 | — |
+| `system_auto_update` | git 拉取更新并选择性重启 | 由 `SystemUpdate` 设置决定，默认关闭 | — | — |
+| `cleanup_unused_uploads` | 删除未被引用的上传文件 | 每日 02:20（`cleanup_unused_uploads_time`） | 否 | — |
+| `cleanup_audit_logs` | 按天数 / 条数裁剪稽核日志，并写一笔 `prune_audit_logs` | 每日 04:30（`cleanup_audit_logs_time`），需 `AuditLog.auto_cleanup_enabled` | 否 | — |
+| `cleanup_ticket_images` | 清理已关闭工单的过期图片 | 每日 04:45（`cleanup_ticket_images_time`） | 否 | — |
+| `refresh_bangumi_collections` | 缓存 Bangumi 收藏 | 每小时 | 否 | — |
+| `sync_emby_activity_logs` | 拉取 Emby 活动日志并入库播放记录（只按 Emby 身份归属） | 每 10 分钟 | 否 | — |
+| `cleanup_unlinked_emby` | 删除 Emby 上未绑定任何 Web 账号的孤立用户（跳过 Emby 管理员） | 默认手动；保存自定义排程才自动执行 | 删远端账号 | 默认 `dry_run=true`、`delete=false` |
+| `cleanup_emby_devices` / `kick_unknown_group_members` | 删除 Emby 设备记录 / 踢出未知群成员 | 手动 | — | 默认 `true` |
+
+失败处理：
+
+- **重试**：`check_expired`、`check_expiring`、`daily_stats`、`cleanup_no_emby`、`cleanup_pending_emby_entitlements`、`check_telegram_bindings`、`cleanup_unused_uploads`、`cleanup_audit_logs`、`cleanup_ticket_images`、`auto_backup_database` 这些可安全重放的每日任务，当天这轮失败后过 `Scheduler.retry_failed_after_minutes`（默认 15，0 关闭）分钟自动重试一次，`trigger=scheduler_retry`。到期提醒、群成员巡检、系统更新和远端删除类任务不自动重试。
+- **通知**：`Scheduler.failure_notify`（默认开）时，运行以 `failed` / `interrupted` 结束会用 Telegram 通知 `Telegram.admin_id` 与绑定了 Telegram 的管理员账号；同一任务连续失败只通知第一次（失败通知至少间隔 10 分钟），恢复成功时再通知一次；管理员取消不通知。
 
 #### 列出全部定时任务
 
@@ -1377,23 +1416,31 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 {
   "success": true,
   "data": {
+    "timezone": "Asia/Shanghai",
+    "utc_offset_seconds": 28800,
     "jobs": [
       {
         "id": "check_expired",
-        "name": "过期用户检查",
+        "name": "检查已过期用户",
         "description": "...",
+        "manual_only": false,
         "enabled": true,
-        "schedule": "cron[hour='4', minute='0']",
+        "trigger_spec": { "type": "cron_daily", "hour": 3, "minute": 0 },
+        "default_trigger_spec": { "type": "cron_daily", "hour": 3, "minute": 0 },
+        "is_custom": false,
+        "runtime_params": null,
+        "schedule_revision": 0,
         "next_run_at": 1715990400,
+        "auto_disabled": false,
         "is_running": false,
         "last_run": {
           "status": "success",
           "started_at": 1715904000,
           "finished_at": 1715904005,
           "type": "auto",
-          "trigger": "scheduled",
-          "error": null,
-          "summary": {"scanned": 12, "disabled": 3, "failed": 0}
+          "trigger": "scheduler",
+          "error": "",
+          "summary": {"success": true, "disabled": 3, "emby_disabled": 3, "emby_disable_failed": 0}
         }
       }
     ]
@@ -1407,6 +1454,7 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 
 - 说明：将指定任务排入后台执行；接口立即返回，前端通过轮询 `/admin/scheduler/jobs` 拿到结束状态。
 - 响应：`data.last_run` 是入队快照，状态为 `queued`。同一任务仍在排队、运行或等待取消时返回 409；必须运行 `scheduler` 或 `all` 才能执行。
+- 手动执行时可在请求体 `runtime_params` 里带 `dry_run: true` 先预览：`cleanup_no_emby`、`cleanup_pending_emby_entitlements`、`enforce_group_membership`、`emby_state_reconcile` 在预览时只回报名单（如 `would_disable_uids`），不做任何写入。
 - `cleanup_emby_devices` 运行参数：
   - `dry_run`：默认 `true`，只统计候选设备并写入运行日志，不删除。
   - `max_workers`：并发删除请求数，范围 `1-10`，默认 `10`。
@@ -1433,7 +1481,7 @@ curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/ru
 
 `GET /admin/scheduler/jobs/{job_id}/history?limit=20`
 
-- 说明：按时间倒序返回历史运行；`limit` 范围 1–100，默认 20。
+- 说明：按时间倒序返回历史运行；`limit` 范围 1–20，默认 20（每个任务最多保留 100 笔历史）。
 
 #### 修改触发器（覆盖 config.toml 默认值）
 
@@ -1459,7 +1507,7 @@ curl -X POST "http://localhost:5000/api/v1/admin/scheduler/jobs/check_expired/ru
 {
   "success": true,
   "data": {
-    "job_id": "emby_sync",
+    "job_id": "emby_state_reconcile",
     "trigger_spec": { "type": "interval", "seconds": 1800 },
     "is_custom": true
   }

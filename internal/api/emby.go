@@ -274,7 +274,19 @@ func (a *App) embyCreateUser(ctx context.Context, username, password string) (ma
 	if id == "" {
 		return nil, fmt.Errorf("Emby did not return a user id")
 	}
-	_ = a.embyUpdatePolicy(ctx, id, func(policy map[string]any) {})
+	// 新建账号在 Emby 端带着默认策略（通常允许下载 / 转码等）。收紧失败时不能留下
+	// 这个权限过宽的账号：先按 5xx 重试，仍失败就删掉新账号并回错，让调用方整体失败。
+	if err := embyRetryOn5xx(ctx, func(c context.Context) error {
+		return a.embyUpdatePolicy(c, id, func(policy map[string]any) {})
+	}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if delErr := a.embyDelete(cleanupCtx, "/Users/"+urlPathEscape(id)); delErr != nil {
+			zap.L().Error("failed to delete Emby user after policy hardening failure",
+				zap.String("emby_user_id", id), zap.String("error", redactSensitiveText(delErr.Error())))
+		}
+		return nil, fmt.Errorf("apply Emby policy for new user: %w", err)
+	}
 	if password != "" {
 		if err := a.embySetPassword(ctx, id, password); err != nil {
 			_ = a.embyDelete(ctx, "/Users/"+urlPathEscape(id))
@@ -381,15 +393,31 @@ func (a *App) embyApplyEnabledState(ctx context.Context, uid int64, embyID strin
 }
 
 // mirrorEmbyDisabled 仅在值变化时回写 EmbyDisabled，避免无谓写盘。
+//
+// 同时维护 EmbyAutoDisabled（「这次停用是系统按 Web 状态做的」）：
+//   - 启用：清掉标记；
+//   - 停用：若本地已是「管理员单独封禁」（已停用且无标记），保持无标记，封禁优先；
+//     否则按当下 Web 状态判断——Web 已停用或已过期即为系统停用，Web 正常则视为
+//     管理员单独封禁 Emby。Emby 状态对账只会重新启用带标记的账号。
 func (a *App) mirrorEmbyDisabled(uid int64, disabled bool) {
 	if uid == 0 {
 		return
 	}
-	if cur, ok := a.store().User(uid); ok && cur.EmbyDisabled == disabled {
+	cur, ok := a.store().User(uid)
+	if !ok {
+		return
+	}
+	auto := false
+	if disabled {
+		manualBan := cur.EmbyDisabled && !cur.EmbyAutoDisabled
+		auto = !manualBan && embyShouldDisableForWebState(cur)
+	}
+	if cur.EmbyDisabled == disabled && cur.EmbyAutoDisabled == auto {
 		return
 	}
 	_, _ = a.store().UpdateUser(uid, func(u *store.User) error {
 		u.EmbyDisabled = disabled
+		u.EmbyAutoDisabled = auto
 		return nil
 	})
 }
@@ -440,6 +468,12 @@ func (a *App) embyShouldEnableUser(u store.User) bool {
 }
 
 func embyAccessExpired(u store.User) bool {
+	// 管理员与白名单不受到期约束（check_expired 同样跳过他们）。升级为白名单时
+	// 旧的有限 ExpiredAt 会原样留下，若这里不排除，emby_sync / 管理员刷新 / 对账
+	// 会把他们的 Emby 停掉。
+	if u.Role == store.RoleAdmin || u.Role == store.RoleWhitelist {
+		return false
+	}
 	return u.EmbyID != "" && u.ExpiredAt > 0 && !expiryIsPermanent(u.ExpiredAt) && u.ExpiredAt < time.Now().Unix()
 }
 

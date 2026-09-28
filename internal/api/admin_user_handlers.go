@@ -470,6 +470,8 @@ func (a *App) handleAdminUnbindEmby(w http.ResponseWriter, r *http.Request, para
 	if statusFromError(w, err) {
 		return
 	}
+	// 解绑 Emby 改了用户状态，旧实现只有 fallback 稽核（看不出旧 Emby ID 与远端是否停用）。
+	a.audit(r, "admin_unbind_emby", "admin", uid, map[string]any{"old_emby_id": embyID, "old_emby_username": target.EmbyUsername, "remote_emby_disabled": remoteDisabled})
 	data := publicUser(u)
 	data["remote_emby_disabled"] = remoteDisabled
 	data["old_emby_id"] = embyID
@@ -710,6 +712,7 @@ func (a *App) handleKickUser(w http.ResponseWriter, r *http.Request, params Para
 		return
 	}
 	kicked := a.kickEmbySessions(r.Context(), u.EmbyID)
+	a.audit(r, "admin_kick_emby_sessions", "admin", u.UID, map[string]any{"emby_id": u.EmbyID, "kicked_count": kicked})
 	ok(w, "会话踢出完成", map[string]any{"kicked_count": kicked})
 }
 
@@ -1053,6 +1056,7 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 		return
 	}
 	targetUID, _ := int64Param(params, "uid")
+	previous, _ := a.store().User(targetUID)
 	body := decodeMap(r)
 	embyIDInput := stringValue(body, "emby_id")
 	embyNameInput := stringValue(body, "emby_username")
@@ -1105,6 +1109,12 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 	previousUID := any(nil)
 	if displacedUID != 0 {
 		previousUID = displacedUID
+	}
+	// 管理员绑定（含 force 夺取）必须留下明确稽核；被夺走绑定的一方另记一笔，
+	// 否则按 target_uid 查被夺者时什么都查不到。
+	a.audit(r, "admin_bind_emby", "admin", updatedUser.UID, map[string]any{"emby_id": embyID, "emby_username": embyName, "force": force, "displaced_uid": displacedUID, "old_emby_id": previous.EmbyID})
+	if displacedUID != 0 {
+		a.audit(r, "emby_binding_displaced", "admin", displacedUID, map[string]any{"emby_id": embyID, "new_owner_uid": updatedUser.UID})
 	}
 	ok(w, "Emby account linked", map[string]any{"uid": updatedUser.UID, "emby_id": updatedUser.EmbyID, "emby_username": updatedUser.EmbyUsername, "force_taken": displacedUID != 0, "previous_uid": previousUID, "user": publicUser(updatedUser)})
 }
