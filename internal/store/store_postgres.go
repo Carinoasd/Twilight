@@ -410,6 +410,11 @@ CREATE TABLE IF NOT EXISTS twilight_telegram_runtime (
 		_ = db.Close()
 		return nil, status, describePostgresConnectionError(target, err)
 	}
+	// offset 绑定 Bot 身份（getMe.id）：停机换 Token 后重启也能识别出新 Bot 并重置。
+	if _, err := db.ExecContext(ctx, `ALTER TABLE twilight_telegram_runtime ADD COLUMN IF NOT EXISTS bot_id bigint NOT NULL DEFAULT 0`); err != nil {
+		_ = db.Close()
+		return nil, status, describePostgresConnectionError(target, err)
+	}
 	if _, err := db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS twilight_telegram_identity_history (
 	id bigserial PRIMARY KEY,

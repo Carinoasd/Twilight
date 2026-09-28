@@ -362,3 +362,43 @@ func TestSharedTransportProxyGuardsTargetHost(t *testing.T) {
 		t.Fatalf("public target should use proxy, got %v err=%v", got, err)
 	}
 }
+
+// 停机换 Bot（新 Token、新 getMe.id）后重启，必须从 offset 0 开始拉取。
+func TestTelegramOffsetResetsWhenBotIdentityChangesAcrossRestart(t *testing.T) {
+	app := newTestApp(t)
+	tg := newRecordingTelegramServer(t, app)
+	// 旧 Bot（id=1）已经确认到 500。
+	if _, _, err := app.store().BindTelegramBotOffset(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store().SetTelegramBotOffset(500); err != nil {
+		t.Fatal(err)
+	}
+	tg.mu.Lock()
+	tg.botID = 2
+	tg.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = app.RunTelegramBot(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(tg.callsOf("getUpdates")) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	calls := tg.callsOf("getUpdates")
+	if len(calls) == 0 {
+		t.Fatal("bot never polled")
+	}
+	if offset, _ := calls[0].Body["offset"].(float64); offset != 0 {
+		t.Fatalf("new bot resumed stale offset %v, want 0", calls[0].Body["offset"])
+	}
+	// 同一 Bot 再次启动要沿用 offset。
+	if offset, reset, err := app.store().BindTelegramBotOffset(2); err != nil || reset {
+		t.Fatalf("same bot should not reset: offset=%d reset=%v err=%v", offset, reset, err)
+	}
+}

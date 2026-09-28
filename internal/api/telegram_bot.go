@@ -181,9 +181,19 @@ func (a *App) RunTelegramBot(ctx context.Context) error {
 				}
 			}
 			botIdentity := strings.TrimSpace(me.Username)
-			if botIdentity != "" && activeBot != "" && botIdentity != activeBot {
-				// bot 实体切换：旧 offset 和新 bot 的 update 序列没有任何关系，
-				// 必须 reset 否则会跳过新 bot 的真实初始 update。
+			// 修复：offset 绑定 Bot 数字 id 持久化在库里；换了 Bot（包括停机换
+			// Token 后重启）就归零，否则会把新 Bot 的真实 update 当成已处理丢掉。
+			storedOffset, reset, bindErr := a.store().BindTelegramBotOffset(me.ID)
+			if bindErr != nil {
+				zap.L().Warn("bind telegram offset to bot identity failed", zap.Error(bindErr))
+			} else if reset {
+				zap.L().Info("Telegram bot identity changed; update offset reset", zap.Int64("bot_id", me.ID))
+				offset = 0
+			} else if storedOffset > offset {
+				offset = storedOffset
+			}
+			if bindErr == nil && !reset && botIdentity != "" && activeBot != "" && botIdentity != activeBot && me.ID <= 0 {
+				// 拿不到数字 id 时退回旧逻辑：同进程内 username 变化才 reset。
 				if err := a.store().ResetTelegramBotOffset(); err != nil {
 					zap.L().Warn("reset telegram offset failed", zap.Error(err))
 				}
