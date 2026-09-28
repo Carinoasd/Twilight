@@ -38,3 +38,38 @@ func TestSchedulerCleanupNoEmbyKeepsRecentlyUnboundUser(t *testing.T) {
 		t.Fatalf("long-time no-Emby user should still be cleaned: %#v", summary)
 	}
 }
+
+// TestSchedulerFinishedRunTreatsSuccessFalseAsFailed 回归排程缺口：摘要 success=false
+// 但没有 error 时，旧实现仍显示成功。
+func TestSchedulerFinishedRunTreatsSuccessFalseAsFailed(t *testing.T) {
+	run := schedulerFinishedRun("refresh_bangumi_collections", "auto", "scheduler", time.Now().Unix(), map[string]any{"success": false, "failed": 2}, nil, nil)
+	if run.Status != "failed" || run.Error == "" {
+		t.Fatalf("success=false must be reported as failed: %#v", run)
+	}
+	ok := schedulerFinishedRun("daily_stats", "auto", "scheduler", time.Now().Unix(), map[string]any{"users": 1}, nil, nil)
+	if ok.Status != "success" {
+		t.Fatalf("summary without success key must stay successful: %#v", ok)
+	}
+}
+
+// TestCleanupSessionsPartialWhenEmbyUnavailable 回归排程缺口：前面的清理都做完了，只是
+// 读 Emby 会话失败时，不能把整轮标成失败；同时 Telegram 绑定链接要并入例行清理。
+func TestCleanupSessionsPartialWhenEmbyUnavailable(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().EmbyToken = "emby-token"
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer emby.Close()
+	app.cfg().EmbyURL = emby.URL
+	summary, _, err := app.runSchedulerJob(httptest.NewRequest(http.MethodPost, "/scheduler", nil), "cleanup_sessions")
+	if err != nil {
+		t.Fatalf("Emby read failure must not fail cleanup_sessions: %v", err)
+	}
+	if !boolish(summary["success"]) || !boolish(summary["partial"]) || asString(summary["emby_error"]) == "" {
+		t.Fatalf("expected partial success: %#v", summary)
+	}
+	if _, ok := summary["expired_telegram_links"]; !ok {
+		t.Fatalf("Telegram bind links must be cleaned up routinely: %#v", summary)
+	}
+}

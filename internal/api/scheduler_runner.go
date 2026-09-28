@@ -348,6 +348,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			expiredEmailCodes, _ = a.store().CleanupExpiredEmailVerifications(time.Now().Unix())
 		}
 		staleCleared := 0
+		staleClearedUIDs := []int64{}
 		if cfg.EmailAutoCleanupUnverified {
 			// 定期清理已绑定但长期未验证的邮箱，释放邮箱地址供其他用户使用。
 			// 使用基于 CreatedAt 的年龄门限而非 ClearUnverifiedEmails 的全量清理，
@@ -356,17 +357,35 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			if hours <= 0 {
 				hours = 24
 			}
+			staleClearedUIDs = a.unverifiedEmailUIDsBefore(time.Now().Add(-time.Duration(hours) * time.Hour).Unix())
 			_, staleCleared, _ = a.store().CleanupUnverifiedEmailsByAge(time.Now().Add(-time.Duration(hours) * time.Hour).Unix())
 		}
-		if !a.embyConfigured() {
-			return map[string]any{"success": true, "configured": false, "active": 0, "total": 0, "expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared}, []string{"Emby not configured", fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared)}, nil
+		// Telegram 绑定链接旧实现只在启动 / 配置重载时清理，这里并入例行清理。
+		now := time.Now().Unix()
+		expiredTelegramLinks := a.cleanupExpiredTelegramLinks(now)
+		orphanedTelegramLinks := a.cleanupOrphanedTelegramLinks()
+		summary := map[string]any{"success": true, "configured": a.embyConfigured(), "active": 0, "total": 0,
+			"expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared,
+			"expired_telegram_links": expiredTelegramLinks, "orphaned_telegram_links": orphanedTelegramLinks}
+		logs := []string{fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared), fmt.Sprintf("cleaned up %d expired and %d orphaned Telegram bind links", expiredTelegramLinks, orphanedTelegramLinks)}
+		if len(staleClearedUIDs) > 0 {
+			// 清掉用户邮箱属于改用户资料，写系统稽核并附 uid 清单。
+			a.auditSystem("scheduler", "clear_stale_unverified_emails", 0, map[string]any{"cleared": staleCleared, "uids": staleClearedUIDs})
 		}
+		if !a.embyConfigured() {
+			return summary, append([]string{"Emby not configured"}, logs...), nil
+		}
+		// 读 Emby 会话数只是巡检附带的观测项。前面的清理已经完成，读不到 Emby 时不能
+		// 把整轮标成失败——记为部分完成并附上原因。
 		sessions, err := a.embySessionsSnapshot(r.Context(), false)
 		if err != nil {
-			return map[string]any{"success": false}, nil, err
+			summary["partial"] = true
+			summary["emby_error"] = redactSensitiveText(err.Error())
+			return summary, append(logs, "failed to read Emby sessions: "+redactSensitiveText(err.Error())), nil
 		}
-		active := countEmbyPlayingSessions(sessions)
-		return map[string]any{"success": true, "active": active, "total": len(sessions), "expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared}, []string{fmt.Sprintf("read %d Emby sessions", len(sessions)), fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared)}, nil
+		summary["active"] = countEmbyPlayingSessions(sessions)
+		summary["total"] = len(sessions)
+		return summary, append([]string{fmt.Sprintf("read %d Emby sessions", len(sessions))}, logs...), nil
 	case "emby_sync":
 		if !a.embyConfigured() {
 			return map[string]any{"success": true, "configured": false}, []string{"Emby not configured"}, nil
@@ -1074,6 +1093,18 @@ func schedulerManualRun(r *http.Request) bool {
 
 func schedulerSideEffectContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+}
+
+// unverifiedEmailUIDsBefore 在清理前取出将被清掉邮箱的 uid（与 CleanupUnverifiedEmailsByAge
+// 同口径），只用于稽核名单，最多 auditUIDListLimit 个。
+func (a *App) unverifiedEmailUIDsBefore(cutoff int64) []int64 {
+	uids := []int64{}
+	for _, u := range a.store().ListUsers() {
+		if u.Email != "" && !u.EmailVerified && u.CreatedAt > 0 && u.CreatedAt < cutoff {
+			uids = appendLimitedUID(uids, u.UID)
+		}
+	}
+	return uids
 }
 
 // embySyncLastCursor 读取最近一轮完成的 emby_sync 留下的 next_after_uid；没有就从头开始。

@@ -214,6 +214,13 @@ func schedulerFinishedRun(jobID, runType, trigger string, started int64, summary
 			summary["terminated"] = true
 		}
 	}
+	// 任务没有返回 error、但摘要明确报告 success=false（例如部分用户处理失败、
+	// Emby 停用失败）时，旧实现仍显示「成功」，管理员看不到问题。这里一律按失败处理。
+	if err == nil && schedulerSummaryReportsFailure(summary) {
+		status = "failed"
+		message, _ = sanitizeSchedulerText(firstNonEmpty(asString(summary["error"]), "job reported failure (success=false)"), schedulerMaxPersistedErrorRunes)
+		errText = message
+	}
 	finished := time.Now().Unix()
 	return store.SchedulerRun{
 		JobID:      jobID,
@@ -228,6 +235,15 @@ func schedulerFinishedRun(jobID, runType, trigger string, started int64, summary
 		Logs:       sanitizeSchedulerLogs(logs),
 		Error:      errText,
 	}
+}
+
+// schedulerSummaryReportsFailure 只认显式的 success=false；没有这个键的摘要不算失败。
+func schedulerSummaryReportsFailure(summary map[string]any) bool {
+	if summary == nil {
+		return false
+	}
+	value, ok := summary["success"]
+	return ok && !boolish(value)
 }
 
 func sanitizeSchedulerSummary(summary map[string]any) map[string]any {
