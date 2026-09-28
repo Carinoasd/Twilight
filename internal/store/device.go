@@ -5,12 +5,11 @@ import (
 	"time"
 )
 
+// 设备相关写入统一走 mutateAndSaveLocked：失败整体回滚、版本冲突重放，
+// 无改动时返回 errNoChange 跳过整份落盘。
 func (s *Store) UpsertDevice(d Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
 	if d.FirstSeen == 0 {
 		d.FirstSeen = time.Now().Unix()
 	}
@@ -18,20 +17,13 @@ func (s *Store) UpsertDevice(d Device) error {
 		d.LastSeen = d.FirstSeen
 	}
 	key := deviceKey(d.UID, d.DeviceID)
-	previous, existed := s.state.Devices[key]
-	if existed && previous == d {
-		return nil
-	}
-	s.state.Devices[key] = d
-	if err := s.saveLocked(); err != nil {
-		if existed {
-			s.state.Devices[key] = previous
-		} else {
-			delete(s.state.Devices, key)
+	return s.mutateAndSaveLocked(func() error {
+		if previous, existed := s.state.Devices[key]; existed && previous == d {
+			return errNoChange
 		}
-		return err
-	}
-	return nil
+		s.state.Devices[key] = d
+		return nil
+	})
 }
 
 func (s *Store) ListDevices(uid int64) []Device {
@@ -50,9 +42,16 @@ func (s *Store) ListDevices(uid int64) []Device {
 func (s *Store) UpdateDevice(uid int64, deviceID string, fn func(*Device)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
+	return s.mutateAndSaveLocked(func() error {
+		if !s.updateDeviceLocked(uid, deviceID, fn) {
+			return errNoChange
+		}
+		return nil
+	})
+}
+
+// updateDeviceLocked 在 mutate 闭包内套用 fn，返回是否真有改动。
+func (s *Store) updateDeviceLocked(uid int64, deviceID string, fn func(*Device)) bool {
 	key := deviceKey(uid, deviceID)
 	d, existed := s.state.Devices[key]
 	if !existed {
@@ -64,18 +63,23 @@ func (s *Store) UpdateDevice(uid int64, deviceID string, fn func(*Device)) error
 	d.UID = uid
 	d.DeviceID = deviceID
 	if existed && previous == d {
-		return nil
+		return false
 	}
 	s.state.Devices[key] = d
-	if err := s.saveLocked(); err != nil {
-		if existed {
-			s.state.Devices[key] = previous
-		} else {
-			delete(s.state.Devices, key)
-		}
-		return err
-	}
-	return nil
+	return true
+}
+
+// RecordLogin 把登录时的「更新设备」与「追加登录记录」合并成一次整份写入：
+// 旧流程 UpdateDevice + AddLoginLog 每次登录要序列化并写两次整份 state，
+// 其他进程也要整份重载两次。
+func (s *Store) RecordLogin(uid int64, deviceID string, fn func(*Device), log LoginLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mutateAndSaveLocked(func() error {
+		s.updateDeviceLocked(uid, deviceID, fn)
+		s.appendLoginLogLocked(log)
+		return nil
+	})
 }
 
 // Device 返回某用户的一台设备（含已封禁的）。
@@ -95,28 +99,22 @@ func (s *Store) Device(uid int64, deviceID string) (Device, bool) {
 func (s *Store) TrustDevice(uid int64, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
 	key := deviceKey(uid, deviceID)
-	previous, existed := s.state.Devices[key]
-	if !existed {
-		return ErrNotFound
-	}
-	if previous.Blocked {
-		return ErrDeviceBlocked
-	}
-	if previous.Trusted {
-		return nil
-	}
-	next := previous
-	next.Trusted = true
-	s.state.Devices[key] = next
-	if err := s.saveLocked(); err != nil {
+	return s.mutateAndSaveLocked(func() error {
+		previous, existed := s.state.Devices[key]
+		if !existed {
+			return ErrNotFound
+		}
+		if previous.Blocked {
+			return ErrDeviceBlocked
+		}
+		if previous.Trusted {
+			return errNoChange
+		}
+		previous.Trusted = true
 		s.state.Devices[key] = previous
-		return err
-	}
-	return nil
+		return nil
+	})
 }
 
 // DeleteDevice 删除一台设备。已封禁的设备返回 ErrDeviceBlocked：封禁记录一旦删掉，
@@ -124,23 +122,18 @@ func (s *Store) TrustDevice(uid int64, deviceID string) error {
 func (s *Store) DeleteDevice(uid int64, deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
 	key := deviceKey(uid, deviceID)
-	previous, existed := s.state.Devices[key]
-	if !existed {
+	return s.mutateAndSaveLocked(func() error {
+		previous, existed := s.state.Devices[key]
+		if !existed {
+			return errNoChange
+		}
+		if previous.Blocked {
+			return ErrDeviceBlocked
+		}
+		delete(s.state.Devices, key)
 		return nil
-	}
-	if previous.Blocked {
-		return ErrDeviceBlocked
-	}
-	delete(s.state.Devices, key)
-	if err := s.saveLocked(); err != nil {
-		s.state.Devices[key] = previous
-		return err
-	}
-	return nil
+	})
 }
 
 // EnforceDeviceLimit 仅保留某用户最近活跃的 max 台设备（按 LastSeen 倒序），淘汰
@@ -161,49 +154,42 @@ func (s *Store) EnforceDeviceLimit(uid int64, max int, current string) ([]string
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return nil, err
-	}
-	type keyed struct {
-		key string
-		dev Device
-	}
-	active := make([]keyed, 0)
-	for key, d := range s.state.Devices {
-		if d.UID == uid && !d.Blocked {
-			active = append(active, keyed{key, d})
-		}
-	}
-	if len(active) <= max {
-		return nil, nil
-	}
-	sort.SliceStable(active, func(i, j int) bool {
-		ci, cj := active[i].dev.DeviceID == current, active[j].dev.DeviceID == current
-		if ci != cj {
-			return ci
-		}
-		return active[i].dev.LastSeen > active[j].dev.LastSeen
-	})
-	var previous map[string]Device
 	var evicted []string
-	for i, item := range active {
-		if i < max || item.dev.Trusted {
-			continue // 在名额内，或受信任 → 保留
+	err := s.mutateAndSaveLocked(func() error {
+		evicted = nil // 版本冲突重放时从头计算
+		type keyed struct {
+			key string
+			dev Device
 		}
-		if previous == nil {
-			previous = make(map[string]Device)
+		active := make([]keyed, 0)
+		for key, d := range s.state.Devices {
+			if d.UID == uid && !d.Blocked {
+				active = append(active, keyed{key, d})
+			}
 		}
-		previous[item.key] = item.dev
-		delete(s.state.Devices, item.key)
-		evicted = append(evicted, item.dev.DeviceID)
-	}
-	if len(evicted) == 0 {
-		return nil, nil
-	}
-	if err := s.saveLocked(); err != nil {
-		for key, dev := range previous {
-			s.state.Devices[key] = dev
+		if len(active) <= max {
+			return errNoChange
 		}
+		sort.SliceStable(active, func(i, j int) bool {
+			ci, cj := active[i].dev.DeviceID == current, active[j].dev.DeviceID == current
+			if ci != cj {
+				return ci
+			}
+			return active[i].dev.LastSeen > active[j].dev.LastSeen
+		})
+		for i, item := range active {
+			if i < max || item.dev.Trusted {
+				continue // 在名额内，或受信任 → 保留
+			}
+			delete(s.state.Devices, item.key)
+			evicted = append(evicted, item.dev.DeviceID)
+		}
+		if len(evicted) == 0 {
+			return errNoChange
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return evicted, nil

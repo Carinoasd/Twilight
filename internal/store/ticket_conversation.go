@@ -109,7 +109,8 @@ func (s *Store) AppendTicketMessage(ticketID int64, actor User, content, request
 				}
 				reply.ID = int64(i + 1)
 				result.Ticket, result.Reply, result.Replayed = t, reply, true
-				return nil
+				// 幂等重放：state 没有任何改动，跳过整份落盘。
+				return errNoChange
 			}
 		}
 		if !TicketStatusAllowsConversation(t.Status) && user.Role != RoleAdmin {
@@ -135,6 +136,9 @@ func (s *Store) AppendTicketMessage(ticketID int64, actor User, content, request
 	if err != nil {
 		return TicketReplyResult{}, err
 	}
+	// 回传的工单副本深拷贝，调用方在锁外使用时不与 s.state 共用底层数组。
+	result.Ticket = cloneTicket(result.Ticket)
+	result.Previous = cloneTicket(result.Previous)
 	return result, nil
 }
 
@@ -176,11 +180,12 @@ func (s *Store) DetachExpiredTicketAttachments(id, revision, cutoff int64) ([]Ti
 		removed = nil
 		ticket, exists := s.state.Tickets[id]
 		if !exists || TicketRevision(ticket) != revision || NormalizeTicketStatus(ticket.Status) != TicketStatusClosed || ticket.ClosedAt <= 0 || ticket.ClosedAt >= cutoff {
-			return nil
+			// 条件不符即无事可做：返回 errNoChange 跳过整份落盘（不递增 version）。
+			return errNoChange
 		}
 		removed = append([]TicketAttachment(nil), ticket.Attachments...)
 		if len(removed) == 0 {
-			return nil
+			return errNoChange
 		}
 		ticket.Attachments = nil
 		ticket.UpdatedAt = time.Now().Unix()

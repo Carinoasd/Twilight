@@ -75,6 +75,8 @@ func (s *Store) SyncEmbyActivityLogs(entries []EmbyActivityLog) (int, error) {
 	defer s.mu.Unlock()
 	added := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		added = 0
 		changed := false
 		if s.state.NextEmbyActivityLogID <= 0 {
 			maxID := int64(0)
@@ -183,20 +185,23 @@ func (s *Store) AddPlaybackRecordIdempotent(record PlaybackRecord) (bool, error)
 		record.PlayedAt = time.Now().Unix()
 	}
 	s.mu.Lock()
-	if err := s.refreshLocked(); err != nil {
-		s.mu.Unlock()
-		return false, err
-	}
-	if record.UID != 0 && record.ItemID != "" {
-		for _, existing := range s.state.PlaybackRecords {
-			if existing.UID == record.UID && existing.ItemID == record.ItemID && existing.PlayedAt == record.PlayedAt {
-				s.mu.Unlock()
-				return false, nil
+	// 走 mutateAndSaveLocked：存档失败回滚内存。旧实现失败后幽灵记录留在内存，
+	// 调用方重送时被当成「已存在」回 (false,nil)，专表永远不会写入。
+	inserted := false
+	err := s.mutateAndSaveLocked(func() error {
+		inserted = false
+		if record.UID != 0 && record.ItemID != "" {
+			for _, existing := range s.state.PlaybackRecords {
+				if existing.UID == record.UID && existing.ItemID == record.ItemID && existing.PlayedAt == record.PlayedAt {
+					return errNoChange
+				}
 			}
 		}
-	}
-	s.state.PlaybackRecords = prependBoundedHead(s.state.PlaybackRecords, record, maxStoredPlaybackRecords)
-	if err := s.saveLocked(); err != nil {
+		s.state.PlaybackRecords = prependBoundedHead(s.state.PlaybackRecords, record, maxStoredPlaybackRecords)
+		inserted = true
+		return nil
+	})
+	if err != nil || !inserted {
 		s.mu.Unlock()
 		return false, err
 	}
@@ -225,42 +230,43 @@ func (s *Store) AddPlaybackRecordsIdempotent(records []PlaybackRecord) (int, err
 	}
 	now := time.Now().Unix()
 	s.mu.Lock()
-	if err := s.refreshLocked(); err != nil {
-		s.mu.Unlock()
-		return 0, err
-	}
-	seen := make(map[playbackKey]struct{}, len(s.state.PlaybackRecords)+len(records))
-	for _, existing := range s.state.PlaybackRecords {
-		if existing.UID != 0 && existing.ItemID != "" {
-			seen[playbackKey{existing.UID, existing.ItemID, existing.PlayedAt}] = struct{}{}
-		}
-	}
-	accepted := make([]PlaybackRecord, 0, len(records))
-	for _, record := range records {
-		if record.PlayedAt == 0 {
-			record.PlayedAt = now
-		}
-		if record.UID != 0 && record.ItemID != "" {
-			key := playbackKey{record.UID, record.ItemID, record.PlayedAt}
-			if _, dup := seen[key]; dup {
-				continue
+	// 走 mutateAndSaveLocked：失败回滚、冲突重放。accepted 在闭包内每次重建，
+	// 重放时基于最新 state 重新去重。
+	var accepted []PlaybackRecord
+	err := s.mutateAndSaveLocked(func() error {
+		seen := make(map[playbackKey]struct{}, len(s.state.PlaybackRecords)+len(records))
+		for _, existing := range s.state.PlaybackRecords {
+			if existing.UID != 0 && existing.ItemID != "" {
+				seen[playbackKey{existing.UID, existing.ItemID, existing.PlayedAt}] = struct{}{}
 			}
-			seen[key] = struct{}{}
 		}
-		accepted = append(accepted, record)
-	}
-	if len(accepted) == 0 {
-		s.mu.Unlock()
-		return 0, nil
-	}
-	// 逐条 prepend 等价于把 accepted 反序拼到 head 前再截断到上限。
-	head := make([]PlaybackRecord, 0, len(accepted)+len(s.state.PlaybackRecords))
-	for i := len(accepted) - 1; i >= 0; i-- {
-		head = append(head, accepted[i])
-	}
-	head = append(head, s.state.PlaybackRecords...)
-	s.state.PlaybackRecords = compactHead(head, maxStoredPlaybackRecords)
-	if err := s.saveLocked(); err != nil {
+		accepted = make([]PlaybackRecord, 0, len(records))
+		for _, record := range records {
+			if record.PlayedAt == 0 {
+				record.PlayedAt = now
+			}
+			if record.UID != 0 && record.ItemID != "" {
+				key := playbackKey{record.UID, record.ItemID, record.PlayedAt}
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+			accepted = append(accepted, record)
+		}
+		if len(accepted) == 0 {
+			return errNoChange
+		}
+		// 逐条 prepend 等价于把 accepted 反序拼到 head 前再截断到上限。
+		head := make([]PlaybackRecord, 0, len(accepted)+len(s.state.PlaybackRecords))
+		for i := len(accepted) - 1; i >= 0; i-- {
+			head = append(head, accepted[i])
+		}
+		head = append(head, s.state.PlaybackRecords...)
+		s.state.PlaybackRecords = compactHead(head, maxStoredPlaybackRecords)
+		return nil
+	})
+	if err != nil || len(accepted) == 0 {
 		s.mu.Unlock()
 		return 0, err
 	}
@@ -639,66 +645,78 @@ RETURNING (xmax = 0)`,
 func (s *Store) applyPlaybackReportingMemory(records []PlaybackRecord) (int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
+	// 走 mutateAndSaveLocked：旧实现只有「命中修正、无新增」时直接 return 不存档，
+	// 已就地改掉的 Duration/Source 成了幽灵变更；这里只要有命中或新增就落盘，
+	// 失败回滚、冲突重放（计数在闭包开头重置）。
+	matched, inserted := 0, 0
+	err := s.mutateAndSaveLocked(func() error {
+		matched, inserted = 0, 0
+		// 就地修改前先复制切片：读路径可能在锁外持有旧切片（同第 4 条）。
+		current := append([]PlaybackRecord(nil), s.state.PlaybackRecords...)
+		accepted := make([]PlaybackRecord, 0, len(records))
+		touched := false
+		for _, record := range records {
+			if record.UID == 0 || record.ItemID == "" {
+				continue
+			}
+			low, high := playbackReportingWindow(record)
+			hit := -1
+			for index := range current {
+				existing := &current[index]
+				if existing.UID != record.UID || existing.ItemID != record.ItemID {
+					continue
+				}
+				if existing.PlayedAt < low || existing.PlayedAt > high {
+					continue
+				}
+				if existing.Source == PlaybackSourceReporting {
+					continue
+				}
+				if hit < 0 || absInt64(existing.PlayedAt-record.PlayedAt) < absInt64(current[hit].PlayedAt-record.PlayedAt) {
+					hit = index
+				}
+			}
+			if hit >= 0 {
+				current[hit].Duration = record.Duration
+				current[hit].Source = PlaybackSourceReporting
+				matched++
+				touched = true
+				continue
+			}
+			duplicate := false
+			for index := range current {
+				existing := &current[index]
+				if existing.UID == record.UID && existing.ItemID == record.ItemID && existing.PlayedAt == record.PlayedAt {
+					existing.Duration = record.Duration
+					existing.Source = PlaybackSourceReporting
+					duplicate = true
+					touched = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			stored := record
+			stored.Source = PlaybackSourceReporting
+			accepted = append(accepted, stored)
+			inserted++
+		}
+		if !touched && len(accepted) == 0 {
+			return errNoChange
+		}
+		head := make([]PlaybackRecord, 0, len(accepted)+len(current))
+		for i := len(accepted) - 1; i >= 0; i-- {
+			head = append(head, accepted[i])
+		}
+		head = append(head, current...)
+		s.state.PlaybackRecords = compactHead(head, maxStoredPlaybackRecords)
+		return nil
+	})
+	if err != nil {
 		return 0, 0, err
 	}
-	matched, inserted := 0, 0
-	accepted := make([]PlaybackRecord, 0, len(records))
-	for _, record := range records {
-		if record.UID == 0 || record.ItemID == "" {
-			continue
-		}
-		low, high := playbackReportingWindow(record)
-		hit := -1
-		for index := range s.state.PlaybackRecords {
-			existing := &s.state.PlaybackRecords[index]
-			if existing.UID != record.UID || existing.ItemID != record.ItemID {
-				continue
-			}
-			if existing.PlayedAt < low || existing.PlayedAt > high {
-				continue
-			}
-			if existing.Source == PlaybackSourceReporting {
-				continue
-			}
-			if hit < 0 || absInt64(existing.PlayedAt-record.PlayedAt) < absInt64(s.state.PlaybackRecords[hit].PlayedAt-record.PlayedAt) {
-				hit = index
-			}
-		}
-		if hit >= 0 {
-			s.state.PlaybackRecords[hit].Duration = record.Duration
-			s.state.PlaybackRecords[hit].Source = PlaybackSourceReporting
-			matched++
-			continue
-		}
-		duplicate := false
-		for index := range s.state.PlaybackRecords {
-			existing := &s.state.PlaybackRecords[index]
-			if existing.UID == record.UID && existing.ItemID == record.ItemID && existing.PlayedAt == record.PlayedAt {
-				existing.Duration = record.Duration
-				existing.Source = PlaybackSourceReporting
-				duplicate = true
-				break
-			}
-		}
-		if duplicate {
-			continue
-		}
-		stored := record
-		stored.Source = PlaybackSourceReporting
-		accepted = append(accepted, stored)
-		inserted++
-	}
-	if len(accepted) == 0 {
-		return matched, inserted, nil
-	}
-	head := make([]PlaybackRecord, 0, len(accepted)+len(s.state.PlaybackRecords))
-	for i := len(accepted) - 1; i >= 0; i-- {
-		head = append(head, accepted[i])
-	}
-	head = append(head, s.state.PlaybackRecords...)
-	s.state.PlaybackRecords = compactHead(head, maxStoredPlaybackRecords)
-	return matched, inserted, s.saveLocked()
+	return matched, inserted, nil
 }
 
 func absInt64(value int64) int64 {

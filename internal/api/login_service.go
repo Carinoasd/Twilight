@@ -10,6 +10,7 @@ import (
 	"github.com/prejudice-studio/twilight/internal/config"
 	"github.com/prejudice-studio/twilight/internal/security"
 	"github.com/prejudice-studio/twilight/internal/store"
+	"go.uber.org/zap"
 )
 
 type loginInput struct {
@@ -114,15 +115,18 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 
 	now := time.Now().Unix()
 	userAgent := firstNonEmpty(input.UserAgent, "unknown")
-	_ = a.store().UpdateDevice(user.UID, deviceID, func(device *store.Device) {
+	// 设备更新与登录记录合并为一次整份写入（旧流程每次登录写两次整份 state）。
+	// 写失败不阻断登录（会话已建立），但必须留下日志，不能像旧代码那样静默丢掉登录记录。
+	if err := a.store().RecordLogin(user.UID, deviceID, func(device *store.Device) {
 		device.DeviceName = userAgent
 		device.Client = "web"
 		device.LastIP = input.IP
 		device.LastSeen = now
-	})
-	_ = a.store().AddLoginLog(store.LoginLog{
+	}, store.LoginLog{
 		UID: user.UID, IP: input.IP, DeviceID: deviceID, DeviceName: userAgent, Client: "web", Time: now,
-	})
+	}); err != nil {
+		zap.L().Warn("record login device/log failed", zap.Int64("uid", user.UID), zap.Error(err))
+	}
 	a.auditWithUser(r, user.UID, user.Username, "login", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
 
 	// 使用统一的模板参数系统，支持所有用户状态参数

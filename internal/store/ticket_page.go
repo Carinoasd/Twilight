@@ -77,6 +77,9 @@ func (s *Store) ListTicketsPage(filter TicketFilter, page, perPage int) TicketPa
 		end = len(top)
 	}
 	tickets := make([]Ticket, end-offset)
-	copy(tickets, top[offset:end])
+	for i, t := range top[offset:end] {
+		// 深拷贝 Replies/Attachments，避免锁外编码与写者共用底层数组。
+		tickets[i] = cloneTicket(t)
+	}
 	return TicketPage{Tickets: tickets, Total: total}
 }

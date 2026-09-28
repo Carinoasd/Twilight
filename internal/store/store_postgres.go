@@ -27,27 +27,17 @@ func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
 	var version int64
 	err = db.QueryRowContext(ctx, `SELECT state, version FROM twilight_state WHERE id = 1`).Scan(&raw, &version)
 	if errors.Is(err, sql.ErrNoRows) {
-		// 冷启动首次落库：用 force 变体播种，绕过版本守卫。多个进程同时冷启动时
-		// 各自 seed 的都是同一份 emptyState，force 递增 version 也无害（内容一致），
-		// 避免其中一方因守卫 0 行冲突而启动失败。
-		if err := st.saveLockedForce(); err != nil {
-			_ = db.Close()
-			return nil, err
+		if testHookColdStartBeforeSeed != nil {
+			testHookColdStartBeforeSeed()
 		}
-		if err := st.ensureTelegramRuntime(ctx); err != nil {
-			_ = db.Close()
-			return nil, err
+		// 冷启动首次落库：只在「真的没有这一列」时播种，已存在就什么都不做，再重读。
+		// 旧实现用 force upsert（ON CONFLICT DO UPDATE）播种：两个进程同时冷启动、
+		// 都在 SELECT 时看到没有这一列，先到者播种并完成第一笔写入后，后到者的 force
+		// 会用 emptyState 把它整份覆盖掉。
+		err = seedStateRowIfMissing(ctx, db)
+		if err == nil {
+			err = db.QueryRowContext(ctx, `SELECT state, version FROM twilight_state WHERE id = 1`).Scan(&raw, &version)
 		}
-		if err := st.migrateLegacyTelegramRoster(ctx); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		if err := st.clearLegacyTelegramBotOffset(); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		st.startAPIKeyUsageFlusher()
-		return st, nil
 	}
 	if err != nil {
 		_ = db.Close()
@@ -81,6 +71,24 @@ func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
 	}
 	st.startAPIKeyUsageFlusher()
 	return st, nil
+}
+
+// testHookColdStartBeforeSeed 仅供测试：OpenPostgres 发现没有 state 列、播种之前调用，
+// 用来模拟另一进程抢先播种并写入。生产环境恒为 nil。
+var testHookColdStartBeforeSeed func()
+
+// seedStateRowIfMissing 以 ON CONFLICT DO NOTHING 播种空 state（version 1），
+// 已有列时不做任何改动。
+func seedStateRowIfMissing(ctx context.Context, db *sql.DB) error {
+	seed := emptyState()
+	seed.ensure()
+	data, err := json.Marshal(seed)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO twilight_state (id, state, version, updated_at) VALUES (1, $1::jsonb, 1, now())
+ON CONFLICT (id) DO NOTHING`, string(data))
+	return err
 }
 
 func CreatePostgresDatabase(ctx context.Context, dsn string) error {

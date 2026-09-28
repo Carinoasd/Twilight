@@ -47,25 +47,34 @@ func (s *Store) AddIPBlacklist(ip, reason string, expireAt int64) error {
 	ip = normalized
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
-	s.state.IPBlacklist[ip] = IPBlacklistEntry{IP: ip, Reason: reason, CreatedAt: time.Now().Unix(), ExpireAt: expireAt}
-	return s.saveLocked()
+	// 走 mutateAndSaveLocked：存档失败时回滚内存，避免未落盘的封禁残留在本进程生效。
+	return s.mutateAndSaveLocked(func() error {
+		s.state.IPBlacklist[ip] = IPBlacklistEntry{IP: ip, Reason: reason, CreatedAt: time.Now().Unix(), ExpireAt: expireAt}
+		return nil
+	})
 }
 
 func (s *Store) RemoveIPBlacklist(ip string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return err
-	}
-	// 规范化后的 key 与原样 key 都删，兼容历史上未规范化写入的条目。
-	if normalized, valid := NormalizeIPBlacklistEntry(ip); valid {
-		delete(s.state.IPBlacklist, normalized)
-	}
-	delete(s.state.IPBlacklist, ip)
-	return s.saveLocked()
+	return s.mutateAndSaveLocked(func() error {
+		// 规范化后的 key 与原样 key 都删，兼容历史上未规范化写入的条目。
+		keys := []string{ip}
+		if normalized, valid := NormalizeIPBlacklistEntry(ip); valid && normalized != ip {
+			keys = append(keys, normalized)
+		}
+		removed := false
+		for _, key := range keys {
+			if _, ok := s.state.IPBlacklist[key]; ok {
+				delete(s.state.IPBlacklist, key)
+				removed = true
+			}
+		}
+		if !removed {
+			return errNoChange
+		}
+		return nil
+	})
 }
 
 func (s *Store) ListIPBlacklist() []IPBlacklistEntry {
