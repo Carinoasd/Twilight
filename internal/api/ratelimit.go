@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,9 +38,12 @@ const (
 	// 才落一条 Warn，避免高频端点把运行日志表打爆。
 	fallbackWarnInterval = 30 * time.Second
 	// rateLimiterMaxBuckets limits attacker-controlled high-cardinality keys while
-	// Redis is unavailable. At capacity, existing buckets keep working and new
-	// keys fail closed until an expired bucket can be reclaimed.
-	rateLimiterMaxBuckets      = 10_000
+	// Redis is unavailable. At capacity, expired buckets are reclaimed first and
+	// then the oldest buckets are evicted, so new keys are always admitted.
+	rateLimiterMaxBuckets = 10_000
+	// rateLimiterEvictBatch 是桶满且没有过期桶可回收时一次淘汰的桶数。批量淘汰把
+	// 排序成本摊到多次新 key 上，避免攻击者每个新 key 都触发一次全表扫描。
+	rateLimiterEvictBatch      = rateLimiterMaxBuckets / 10
 	rateLimiterCleanupInterval = 5 * time.Minute
 )
 
@@ -91,11 +95,16 @@ func (r *rateLimiter) Allow(ctx context.Context, key string, limit int, window t
 	bucket, exists := r.items[key]
 	if !exists && len(r.items) >= rateLimiterMaxBuckets {
 		// Capacity pressure should not wait for the periodic sweep. Reclaim expired
-		// keys immediately, then fail closed instead of growing without bound.
+		// keys immediately.
 		r.cleanupExpiredLocked(now)
 		r.lastCleanup = now
+		// 仍然满：淘汰最早到期（最旧）的一批桶，而不是拒绝新 key。旧实现在这里
+		// fail closed——global 限流按 IP 建桶、所有请求都先经过它，攻击者用 1 万个
+		// 来源地址（一个 IPv6 /64 就够）各打一次，就能让之后一分钟内所有新访客
+		// （包括正常登录）一律 429，且可持续重放。淘汰最旧桶的代价只是被淘汰的 key
+		// 计数提前清零，属于限流在极端压力下的降级，不会把全站打挂。
 		if len(r.items) >= rateLimiterMaxBuckets {
-			return false
+			r.evictOldestLocked(len(r.items) - rateLimiterMaxBuckets + rateLimiterEvictBatch)
 		}
 	}
 	if now.After(bucket.ResetAt) {
@@ -104,6 +113,29 @@ func (r *rateLimiter) Allow(ctx context.Context, key string, limit int, window t
 	bucket.Count++
 	r.items[key] = bucket
 	return bucket.Count <= limit
+}
+
+// evictOldestLocked 淘汰 ResetAt 最早的 n 个桶。
+func (r *rateLimiter) evictOldestLocked(n int) {
+	if n <= 0 {
+		return
+	}
+	if n >= len(r.items) {
+		clear(r.items)
+		return
+	}
+	type keyed struct {
+		key     string
+		resetAt time.Time
+	}
+	all := make([]keyed, 0, len(r.items))
+	for key, bucket := range r.items {
+		all = append(all, keyed{key, bucket.ResetAt})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].resetAt.Before(all[j].resetAt) })
+	for _, item := range all[:n] {
+		delete(r.items, item.key)
+	}
 }
 
 func (r *rateLimiter) cleanupExpiredLocked(now time.Time) {
