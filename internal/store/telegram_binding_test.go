@@ -182,21 +182,21 @@ func TestTelegramRebindCompletionRejectsStaleChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range [][2]int64{{111, 100}, {222, 100}} {
-		if _, _, err := st.CompleteUserTelegramRebind(u.UID, expected[0], expected[1]); !errors.Is(err, ErrConflict) {
+		if _, _, _, err := st.CompleteUserTelegramRebind(u.UID, expected[0], expected[1]); !errors.Is(err, ErrConflict) {
 			t.Fatalf("stale completion accepted: %v", err)
 		}
 	}
-	updated, changed, err := st.CompleteUserTelegramRebind(u.UID, 222, 200)
+	updated, changed, _, err := st.CompleteUserTelegramRebind(u.UID, 222, 200)
 	if err != nil || !changed || updated.RebindingInProgress || updated.RebindingSince != 0 {
 		t.Fatalf("completion: changed=%v err=%v user=%#v", changed, err, updated)
 	}
-	if _, changed, err := other.CompleteUserTelegramRebind(u.UID, 222, 200); err != nil || changed {
+	if _, changed, _, err := other.CompleteUserTelegramRebind(u.UID, 222, 200); err != nil || changed {
 		t.Fatalf("duplicate completion: changed=%v err=%v", changed, err)
 	}
 	if _, err := st.UpdateUser(u.UID, func(u *User) error { u.Active = false; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := other.CompleteUserTelegramRebind(u.UID, 222, 200); !errors.Is(err, ErrInvalid) {
+	if _, _, _, err := other.CompleteUserTelegramRebind(u.UID, 222, 200); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("inactive user accepted: %v", err)
 	}
 }

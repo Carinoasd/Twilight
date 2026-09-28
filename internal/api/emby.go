@@ -402,11 +402,20 @@ func (a *App) disableRemoteEmbyForWebState(ctx context.Context, u store.User) (b
 		return false, err
 	}
 	a.mirrorEmbyDisabled(u.UID, true)
+	// 换绑期间由本流程停用、且停用前 Emby 是开着的：记下来，换绑完成时只恢复这种账号。
+	// 换绑前就被管理员单独封禁（EmbyDisabled=true）的 Emby 不打标记，完成后保持封禁。
+	if u.RebindingInProgress && !u.EmbyDisabled {
+		if err := a.store().MarkRebindEmbySuspended(u.UID, u.RebindingSince); err != nil {
+			zap.L().Warn("mark rebind emby suspension failed", zap.Int64("uid", u.UID), zap.Error(err))
+		}
+	}
 	return true, nil
 }
 
+// embyShouldDisableForWebState：Web 停用、到期，或 Telegram 换绑尚未完成时，远端 Emby
+// 必须处于停用状态。
 func embyShouldDisableForWebState(u store.User) bool {
-	return !u.Active || embyAccessExpired(u)
+	return !u.Active || embyAccessExpired(u) || u.RebindingInProgress
 }
 
 func (a *App) embyDisableUserForUnbind(ctx context.Context, userID string) (bool, error) {
@@ -435,8 +444,10 @@ func (a *App) embyDisableUserForUnbind(ctx context.Context, userID string) (bool
 	return true, nil
 }
 
+// embyShouldEnableUser 是所有“启用 Emby”路径的共同闸门。换绑未完成的账号一律不放开：
+// 管理员手动启用、签到自动续期、绑定/开通 Emby 都不能绕过“先完成 Telegram 绑定”。
 func (a *App) embyShouldEnableUser(u store.User) bool {
-	return u.Active && !embyAccessExpired(u)
+	return u.Active && !embyAccessExpired(u) && !u.RebindingInProgress
 }
 
 func embyAccessExpired(u store.User) bool {

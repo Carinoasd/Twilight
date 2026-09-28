@@ -1486,7 +1486,7 @@
     "unbindSuccess": "解绑成功",
     "unbindFailed": "解绑失败",
     "rebindRequiredTitle": "需要重新绑定 Telegram",
-    "rebindRequiredDescription": "解绑已完成，请立即绑定新的 Telegram 账号以继续使用系统",
+    "rebindRequiredDescription": "解绑已完成，Emby 账号已暂停使用。请立即绑定新的 Telegram 账号，绑定完成后 Emby 会自动恢复。",
     "rebindCompleteTitle": "绑定完成",
     "rebindCompleteDescription": "Telegram 已成功绑定，正在返回主页...",
     "rebindInstructions": "点击下方按钮获取绑定链接，然后在 Telegram 中打开完成验证",
@@ -1565,7 +1565,8 @@
     "loginNotifyEmailDesc": "登录时通过绑定的邮箱发送通知",
     "ticketNotifyTelegram": "工单变动通知",
     "ticketNotifyTelegramDesc": "管理员回复或处理工单时通过已绑定的 Telegram Bot 发送通知",
-    "openTelegramLink": "在 Telegram 中打开 @{username} 并绑定"
+    "openTelegramLink": "在 Telegram 中打开 @{username} 并绑定",
+    "rebindCompleteFailed": "换绑尚未完成"
   },
   "tickets": {
     "olderMessages": "较早回复",
