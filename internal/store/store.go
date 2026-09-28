@@ -1068,9 +1068,6 @@ func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(cont
 			s.restoreStateLocked(prev)
 			return err
 		}
-		if beforeSaveHookForTest != nil {
-			beforeSaveHookForTest(attempt)
-		}
 		if persist == nil {
 			err = s.saveLocked()
 		} else {
@@ -1127,6 +1124,9 @@ func (s *Store) saveLockedForce() error {
 }
 
 func (s *Store) saveStateLocked(force bool) error {
+	if beforeSaveHookForTest != nil {
+		beforeSaveHookForTest()
+	}
 	s.state.ensure()
 	data, err := json.Marshal(s.state)
 	if err != nil {
@@ -5235,9 +5235,9 @@ func (s *Store) DeleteRegCode(code string) error {
 	})
 }
 
-// beforeSaveHookForTest 仅供测试注入：在 mutate 成功后、落盘前调用，用来稳定制造
-// 版本冲突以验证闭包重放。生产代码中恒为 nil。
-var beforeSaveHookForTest func(attempt int)
+// beforeSaveHookForTest 仅供测试注入：在 saveStateLocked 落盘前调用，用来稳定制造
+// 版本冲突以验证重放 / 重试。生产代码中恒为 nil。
+var beforeSaveHookForTest func()
 
 func (s *Store) DeleteRegCodes(codes []string) (deleted []string, missing []string, err error) {
 	s.mu.Lock()

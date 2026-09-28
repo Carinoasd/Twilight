@@ -118,9 +118,9 @@ func TestDeleteRegCodesReplayDoesNotDuplicateResults(t *testing.T) {
 	}
 	other := reopenTestStore(t)
 	fired := false
-	beforeSaveHookForTest = func(attempt int) {
+	beforeSaveHookForTest = func() {
 		// 钩子是包级变量，other 的写入也会触发它：只在第一次触发，避免递归自锁。
-		if attempt == 0 && !fired {
+		if !fired {
 			fired = true
 			// 另一进程抢先提交一次写入，制造版本冲突迫使闭包重放。
 			if _, err := other.CreateUser(User{Username: "conflict-writer", PasswordHash: "x"}); err != nil {
@@ -139,5 +139,39 @@ func TestDeleteRegCodesReplayDoesNotDuplicateResults(t *testing.T) {
 	}
 	if _, ok := st.FindUserByUsername("conflict-writer"); !ok {
 		t.Fatal("conflict writer's user should survive the replay")
+	}
+}
+
+// 签到遇到其他进程的并发写入（版本冲突）时应重放成功，而不是直接报错。
+func TestAddSigninRetriesOnVersionConflict(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	u, err := st.CreateUser(User{Username: "signin-retry", PasswordHash: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := reopenTestStore(t)
+	fired := false
+	beforeSaveHookForTest = func() {
+		if !fired {
+			fired = true
+			if _, err := other.CreateUser(User{Username: "signin-conflict", PasswordHash: "x"}); err != nil {
+				t.Errorf("conflict writer: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { beforeSaveHookForTest = nil })
+	si, awarded, err := st.AddSigninWithOptions(u.UID, 5, nil, true)
+	beforeSaveHookForTest = nil
+	if err != nil {
+		t.Fatalf("signin should retry on version conflict, got %v", err)
+	}
+	if !awarded || si.Points != 5 || len(si.Records) != 1 {
+		t.Fatalf("unexpected signin result: awarded=%v %+v", awarded, si)
+	}
+	if _, ok := st.FindUserByUsername("signin-conflict"); !ok {
+		t.Fatal("concurrent writer's change must survive")
+	}
+	if _, again, err := st.AddSigninWithOptions(u.UID, 5, nil, true); err != nil || again {
+		t.Fatalf("second signin same day must be a no-op: again=%v err=%v", again, err)
 	}
 }
