@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
 )
@@ -141,5 +144,82 @@ func TestDeviceIDNormalization(t *testing.T) {
 	}
 	if validDeviceID(strings.Repeat("a", maxDeviceIDLength+1)) || validDeviceID("a\x00b") {
 		t.Fatal("validDeviceID accepted an invalid id")
+	}
+}
+
+// TestSessionTokenStoredAsDigest 防回归：PG 只存会话 token 的 SHA-256 摘要，明文 token
+// 仍可鉴权，登出后失效。
+func TestSessionTokenStoredAsDigest(t *testing.T) {
+	app := newTestApp(t)
+	registerAndLogin(t, app, "digest", "Digest123456")
+	resp := doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"digest","password":"Digest123456"}`, nil)
+	var env struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &env); err != nil || env.Data.Token == "" {
+		t.Fatalf("login: %v %s", err, resp.Body.String())
+	}
+	token := env.Data.Token
+	var plain, digest int
+	db := app.store().DB()
+	if err := db.QueryRow(`SELECT count(*) FROM twilight_sessions WHERE token = $1`, token).Scan(&plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM twilight_sessions WHERE token = $1`, sessionTokenDigest(token)).Scan(&digest); err != nil {
+		t.Fatal(err)
+	}
+	if plain != 0 || digest != 1 {
+		t.Fatalf("session must be stored as digest only: plain=%d digest=%d", plain, digest)
+	}
+	bearer := map[string]string{"Authorization": "Bearer " + token}
+	if resp := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/me", "", nil, bearer); resp.Code != http.StatusOK {
+		t.Fatalf("bearer token must authenticate, status=%d", resp.Code)
+	}
+	if resp := doJSONWithHeaders(app, http.MethodPost, "/api/v1/auth/logout", "", nil, bearer); resp.Code != http.StatusOK {
+		t.Fatalf("logout status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if resp := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/me", "", nil, bearer); resp.Code != http.StatusUnauthorized {
+		t.Fatalf("logged-out token must be rejected, status=%d", resp.Code)
+	}
+}
+
+// TestLegacyPlaintextSessionMigratedOnStartup 旧版本以明文 token 为主键的会话在启动时
+// 转成摘要键，现有登录继续有效。
+func TestLegacyPlaintextSessionMigratedOnStartup(t *testing.T) {
+	app := newTestApp(t)
+	registerAndLogin(t, app, "legacy", "Legacy123456")
+	user, _ := app.store().FindUserByUsername("legacy")
+	legacy := strings.Repeat("ab", 32)
+	db := app.store().DB()
+	if _, err := db.Exec(`INSERT INTO twilight_sessions (token, uid, expires_at) VALUES ($1, $2, $3)`, legacy, user.UID, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	ss := newSessionStoreWithDB(time.Hour, nil, app.store())
+	if uid, ok := ss.Get(context.Background(), legacy); !ok || uid != user.UID {
+		t.Fatalf("legacy session must survive migration: ok=%v uid=%d", ok, uid)
+	}
+	var plain int
+	if err := db.QueryRow(`SELECT count(*) FROM twilight_sessions WHERE token = $1`, legacy).Scan(&plain); err != nil || plain != 0 {
+		t.Fatalf("plaintext token must be rewritten: count=%d err=%v", plain, err)
+	}
+	// 撤销走摘要键也能删掉。
+	ss.DeleteUser(context.Background(), user.UID)
+	if _, ok := ss.Get(context.Background(), legacy); ok {
+		t.Fatal("migrated session must be revocable")
+	}
+}
+
+// TestSessionCreateFailsWhenPostgresWriteFails 防回归：PG 写入失败时不能返回一个只
+// 存在于 Redis / 内存、改密或登出全部都撤销不到的会话。
+func TestSessionCreateFailsWhenPostgresWriteFails(t *testing.T) {
+	st := newTestStore(t)
+	ss := newSessionStoreWithDB(time.Hour, nil, st)
+	if _, err := st.DB().Exec(`DROP TABLE twilight_sessions`); err != nil {
+		t.Fatal(err)
+	}
+	if token, _, err := ss.Create(context.Background(), 1, ""); err == nil {
+		t.Fatalf("Create must fail when PostgreSQL write fails, got token %q", token)
 	}
 }

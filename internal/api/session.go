@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +20,21 @@ import (
 )
 
 const maxSessionTokenCreateAttempts = 8
+
+// sessionDigestPrefix 标记已摘要化的会话键。旧版本把明文 token 直接当作 PG 主键与
+// Redis key；明文与摘要都是 64 位 hex，需要前缀才能区分并做一次性迁移。
+const sessionDigestPrefix = "sha256:"
+
+// sessionTokenDigest 返回会话 token 的存储键。
+//
+// 服务端只保存 token 的 SHA-256 摘要（PG twilight_sessions.token、Redis key、内存表），
+// 客户端持有的明文 token 不落库：数据库备份或只读账号外泄时拿不到可直接使用的
+// Bearer token（与 API Key、邮箱验证码只存哈希的口径一致）。token 本身是 32 字节
+// crypto/rand，无需加盐或慢哈希。
+func sessionTokenDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return sessionDigestPrefix + hex.EncodeToString(sum[:])
+}
 
 type sessionStore struct {
 	mu     sync.RWMutex
@@ -65,6 +83,7 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	now := time.Now().Unix()
 	// Purge expired sessions
 	_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE expires_at <= $1`, now)
+	s.migrateLegacyTokens(ctx, db)
 
 	rows, err := db.QueryContext(ctx, `SELECT token, uid, expires_at, device_id FROM twilight_sessions WHERE expires_at > $1`, now)
 	if err != nil {
@@ -107,6 +126,39 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	}
 }
 
+// migrateLegacyTokens 把旧版本以明文 token 为主键的会话一次性改写为摘要键，并删除
+// Redis 里对应的明文 key（随后 restore 循环会以摘要 key 回填）。现有登录不受影响：
+// 客户端仍持有同一个明文 token，查找时按摘要命中。幂等：只处理没有摘要前缀的行。
+func (s *sessionStore) migrateLegacyTokens(ctx context.Context, db *sql.DB) {
+	rows, err := db.QueryContext(ctx, `SELECT token FROM twilight_sessions WHERE token NOT LIKE 'sha256:%'`)
+	if err != nil {
+		zap.L().Warn("failed to scan legacy plaintext sessions", zap.Error(err))
+		return
+	}
+	var legacy []string
+	for rows.Next() {
+		var token string
+		if rows.Scan(&token) == nil {
+			legacy = append(legacy, token)
+		}
+	}
+	rows.Close()
+	migrated := 0
+	for _, token := range legacy {
+		if _, err := db.ExecContext(ctx, `UPDATE twilight_sessions SET token = $1 WHERE token = $2`, sessionTokenDigest(token), token); err != nil {
+			zap.L().Warn("failed to migrate legacy plaintext session", zap.Error(err))
+			continue
+		}
+		if s.redis != nil {
+			_ = s.redis.Del(ctx, s.prefix+token)
+		}
+		migrated++
+	}
+	if migrated > 0 {
+		zap.L().Info("migrated plaintext session tokens to SHA-256 digests", zap.Int("count", migrated))
+	}
+}
+
 func (s *sessionStore) pgDB() *sql.DB {
 	if s.st == nil {
 		return nil
@@ -122,8 +174,16 @@ func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (
 		}
 		expires := time.Now().Add(s.ttl)
 		record := sessionRecord{UID: uid, ExpiresAt: expires.Unix(), DeviceID: deviceID}
+		key := sessionTokenDigest(token)
 
-		if !s.persistToPostgres(ctx, token, record) {
+		inserted, err := s.persistToPostgres(ctx, key, record)
+		if err != nil {
+			// PG 写入失败就让创建失败：旧实现照样返回 token，会话只存在于 Redis /
+			// 内存，而 DeleteUser 只能从内存表和 PG 的 RETURNING 收集要删的 Redis key，
+			// 这类会话在改密 / 登出全部后仍在整个 TTL 内有效。
+			return "", time.Time{}, fmt.Errorf("persist session: %w", err)
+		}
+		if !inserted {
 			zap.L().Warn("session token collision in PostgreSQL; retrying")
 			continue
 		}
@@ -131,11 +191,11 @@ func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (
 		redisOK := false
 		if s.redis != nil {
 			payload, _ := json.Marshal(record)
-			ok, err := s.redis.SetEXNX(ctx, s.prefix+token, int(s.ttl/time.Second), string(payload))
+			ok, err := s.redis.SetEXNX(ctx, s.prefix+key, int(s.ttl/time.Second), string(payload))
 			if err == nil && ok {
 				redisOK = true
 			} else if err == nil {
-				s.deletePostgresToken(ctx, token)
+				s.deletePostgresToken(ctx, key)
 				zap.L().Warn("session token collision in Redis; retrying")
 				continue
 			} else {
@@ -148,13 +208,13 @@ func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (
 			// Memory fallback when Redis is unavailable. Check again under the
 			// write lock so concurrent fallback writers cannot reuse a token.
 			s.mu.Lock()
-			if _, exists := s.items[token]; exists {
+			if _, exists := s.items[key]; exists {
 				s.mu.Unlock()
-				s.deletePostgresToken(ctx, token)
+				s.deletePostgresToken(ctx, key)
 				zap.L().Warn("session token collision in memory fallback; retrying")
 				continue
 			}
-			s.items[token] = record
+			s.items[key] = record
 			s.mu.Unlock()
 		}
 
@@ -163,28 +223,30 @@ func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (
 	return "", time.Time{}, errors.New("failed to create unique session token")
 }
 
-func (s *sessionStore) persistToPostgres(ctx context.Context, token string, record sessionRecord) bool {
+// persistToPostgres 以摘要键 key 写入会话。返回 inserted=false 表示键冲突（需重试），
+// err 非空表示写入失败。
+func (s *sessionStore) persistToPostgres(ctx context.Context, key string, record sessionRecord) (bool, error) {
 	db := s.pgDB()
 	if db == nil {
-		return true
+		return true, nil
 	}
 	result, err := db.ExecContext(ctx,
 		`INSERT INTO twilight_sessions (token, uid, expires_at, device_id) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (token) DO NOTHING`,
-		token, record.UID, record.ExpiresAt, record.DeviceID)
+		key, record.UID, record.ExpiresAt, record.DeviceID)
 	if err != nil {
 		zap.L().Warn("failed to persist session to PostgreSQL", zap.Error(err))
-		return true
+		return false, err
 	}
 	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
-func (s *sessionStore) deletePostgresToken(ctx context.Context, token string) {
+func (s *sessionStore) deletePostgresToken(ctx context.Context, key string) {
 	if db := s.pgDB(); db != nil {
-		_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE token = $1`, token)
+		_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE token = $1`, key)
 	}
 }
 
@@ -199,10 +261,11 @@ func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionReco
 	if token == "" {
 		return sessionRecord{}, false
 	}
+	key := sessionTokenDigest(token)
 
 	// 1. Try Redis (fastest path)
 	if s.redis != nil {
-		payload, ok, err := s.redis.Get(ctx, s.prefix+token)
+		payload, ok, err := s.redis.Get(ctx, s.prefix+key)
 		if err == nil && ok {
 			var record sessionRecord
 			if json.Unmarshal([]byte(payload), &record) == nil && record.ExpiresAt >= time.Now().Unix() {
@@ -220,7 +283,7 @@ func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionReco
 
 	// 2. Try in-memory cache
 	s.mu.RLock()
-	record, ok := s.items[token]
+	record, ok := s.items[key]
 	s.mu.RUnlock()
 	if ok {
 		if record.ExpiresAt >= time.Now().Unix() {
@@ -228,7 +291,7 @@ func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionReco
 		}
 		// Expired in memory - clean up lazily
 		s.mu.Lock()
-		delete(s.items, token)
+		delete(s.items, key)
 		s.mu.Unlock()
 		return sessionRecord{}, false
 	}
@@ -238,14 +301,14 @@ func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionReco
 		var rec sessionRecord
 		err := db.QueryRowContext(ctx,
 			`SELECT uid, expires_at, device_id FROM twilight_sessions WHERE token = $1 AND expires_at > $2`,
-			token, time.Now().Unix()).Scan(&rec.UID, &rec.ExpiresAt, &rec.DeviceID)
+			key, time.Now().Unix()).Scan(&rec.UID, &rec.ExpiresAt, &rec.DeviceID)
 		if err == nil {
 			// Found in PG - re-populate Redis for future fast lookups
 			if s.redis != nil {
 				remainTTL := rec.ExpiresAt - time.Now().Unix()
 				if remainTTL > 0 {
 					payload, _ := json.Marshal(rec)
-					_ = s.redis.SetEX(ctx, s.prefix+token, int(remainTTL), string(payload))
+					_ = s.redis.SetEX(ctx, s.prefix+key, int(remainTTL), string(payload))
 				}
 			}
 			return rec, true
@@ -259,15 +322,16 @@ func (s *sessionStore) Delete(ctx context.Context, token string) {
 	if token == "" {
 		return
 	}
+	key := sessionTokenDigest(token)
 	// Remove from all layers
 	if s.redis != nil {
-		_ = s.redis.Del(ctx, s.prefix+token)
+		_ = s.redis.Del(ctx, s.prefix+key)
 	}
 	s.mu.Lock()
-	delete(s.items, token)
+	delete(s.items, key)
 	s.mu.Unlock()
 	if db := s.pgDB(); db != nil {
-		_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE token = $1`, token)
+		_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE token = $1`, key)
 	}
 }
 
