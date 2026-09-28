@@ -1360,7 +1360,8 @@ func TestSigninAutoRenewalPreferenceEnforcesBackendGates(t *testing.T) {
 	}
 	foundAudit := false
 	for _, entry := range app.store().ListAuditLogs() {
-		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == 0 {
+		// 自助操作的 target_uid 记为本人（原为 0，按 target_uid 筛不到自助记录）。
+		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == user.UID {
 			foundAudit = true
 			break
 		}
