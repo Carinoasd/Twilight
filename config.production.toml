@@ -392,6 +392,11 @@ cleanup_pending_emby_time = "03:45"
 group_membership_check_time = "03:10"
 # Telegram 重复绑定检查（每日 HH:MM）
 telegram_bindings_check_time = "03:20"
+# 任务失败时用 Telegram 通知管理员（Telegram.admin_id 与绑定了 Telegram 的管理员账号），
+# 恢复成功时再通知一次；同一任务连续失败只通知第一次
+failure_notify = true
+# 可安全重放的每日任务失败后，过多少分钟自动重试一次（每天最多一次）；0 关闭
+retry_failed_after_minutes = 15
 # 清理未使用上传文件（每日 HH:MM）
 cleanup_unused_uploads_time = "02:20"
 # 审计日志自动清理（每日 HH:MM）

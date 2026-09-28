@@ -119,12 +119,20 @@ func (a *App) runDueSchedulerJobs(ctx context.Context) {
 		if schedule.IsCustom {
 			spec = schedule.TriggerSpec
 		}
-		if schedulerTriggerDisabled(spec) || !schedulerJobDueFromSnapshot(spec, now, overview.Runs[id]) {
+		if schedulerTriggerDisabled(spec) {
 			continue
+		}
+		trigger := "scheduler"
+		if !schedulerJobDueFromSnapshot(spec, now, overview.Runs[id]) {
+			// 每日任务失败后不必等 24 小时：可安全重放的任务补一次重试。
+			if !a.schedulerRetryDue(id, spec, now, overview.Runs[id]) {
+				continue
+			}
+			trigger = schedulerRetryTrigger
 		}
 		last := overview.Runs[id].LatestAuto.ID
 		params := a.schedulerRuntimeParamsFromSchedule(id, schedule.RuntimeParams)
-		_, _, err = a.store().EnqueueSchedulerRun(ctx, store.SchedulerRun{JobID: id, Type: "auto", Trigger: "scheduler", Params: params, ScheduleRevision: schedule.Revision}, &last)
+		_, _, err = a.store().EnqueueSchedulerRun(ctx, store.SchedulerRun{JobID: id, Type: "auto", Trigger: trigger, Params: params, ScheduleRevision: schedule.Revision}, &last)
 		if err != nil {
 			zap.L().Warn("scheduler enqueue failed", zap.String("job_id", id))
 		}

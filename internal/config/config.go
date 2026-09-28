@@ -289,18 +289,22 @@ type Config struct {
 	// 群成员巡检与 Telegram 绑定检查的每日执行时间，原本没有专属设置、全挤在 03:00。
 	SchedulerGroupMembershipCheckTime  string
 	SchedulerTelegramBindingsCheckTime string
-	SchedulerCleanupPendingEmbyTime    string
-	SchedulerCleanupUnusedUploadsTime  string
-	SchedulerCleanupAuditLogsTime      string
-	SchedulerCleanupTicketImagesTime   string
-	SchedulerTickIntervalSeconds       int
-	SystemUpdateEnabled                bool
-	SystemUpdateRepoURL                string
-	SystemUpdateBranch                 string
-	SystemUpdateRestartServices        bool
-	SystemUpdateTriggerType            string
-	SystemUpdateIntervalHours          int
-	SystemUpdateTime                   string
+	// SchedulerFailureNotify：任务失败（及恢复）时用 Telegram 通知管理员。
+	SchedulerFailureNotify bool
+	// SchedulerRetryFailedAfterMinutes：可安全重放的每日任务失败后，过这么多分钟自动重试一次；0 关闭。
+	SchedulerRetryFailedAfterMinutes  int
+	SchedulerCleanupPendingEmbyTime   string
+	SchedulerCleanupUnusedUploadsTime string
+	SchedulerCleanupAuditLogsTime     string
+	SchedulerCleanupTicketImagesTime  string
+	SchedulerTickIntervalSeconds      int
+	SystemUpdateEnabled               bool
+	SystemUpdateRepoURL               string
+	SystemUpdateBranch                string
+	SystemUpdateRestartServices       bool
+	SystemUpdateTriggerType           string
+	SystemUpdateIntervalHours         int
+	SystemUpdateTime                  string
 
 	MediaRequestEnabled          bool
 	MaxConcurrentRequestsPerUser int
@@ -577,6 +581,8 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.SchedulerTimezone = reader.stringValue(cfg.SchedulerTimezone, "Scheduler.timezone", "scheduler_timezone")
 	cfg.SchedulerGroupMembershipCheckTime = reader.stringValue(cfg.SchedulerGroupMembershipCheckTime, "Scheduler.group_membership_check_time", "group_membership_check_time")
 	cfg.SchedulerTelegramBindingsCheckTime = reader.stringValue(cfg.SchedulerTelegramBindingsCheckTime, "Scheduler.telegram_bindings_check_time", "telegram_bindings_check_time")
+	cfg.SchedulerFailureNotify = reader.boolValue(cfg.SchedulerFailureNotify, "Scheduler.failure_notify", "scheduler_failure_notify")
+	cfg.SchedulerRetryFailedAfterMinutes = reader.intValue(cfg.SchedulerRetryFailedAfterMinutes, "Scheduler.retry_failed_after_minutes", "scheduler_retry_failed_after_minutes")
 	cfg.SchedulerCleanupPendingEmbyTime = reader.stringValue(cfg.SchedulerCleanupPendingEmbyTime, "Scheduler.cleanup_pending_emby_time", "cleanup_pending_emby_time")
 	cfg.SchedulerCleanupUnusedUploadsTime = reader.stringValue(cfg.SchedulerCleanupUnusedUploadsTime, "Scheduler.cleanup_unused_uploads_time", "cleanup_unused_uploads_time")
 	cfg.SchedulerCleanupAuditLogsTime = reader.stringValue(cfg.SchedulerCleanupAuditLogsTime, "Scheduler.cleanup_audit_logs_time", "cleanup_audit_logs_time")
@@ -720,6 +726,8 @@ func defaults() Config {
 		SchedulerCleanupNoEmbyTime:           "03:30",
 		SchedulerGroupMembershipCheckTime:    "03:10",
 		SchedulerTelegramBindingsCheckTime:   "03:20",
+		SchedulerFailureNotify:               true,
+		SchedulerRetryFailedAfterMinutes:     15,
 		SchedulerCleanupPendingEmbyTime:      "03:45",
 		SchedulerCleanupUnusedUploadsTime:    "02:20",
 		SchedulerCleanupAuditLogsTime:        "04:30",
