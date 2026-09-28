@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prejudice-studio/twilight/internal/config"
 	"github.com/prejudice-studio/twilight/internal/security"
 	"github.com/prejudice-studio/twilight/internal/store"
 	"github.com/prejudice-studio/twilight/internal/validate"
@@ -149,7 +150,15 @@ func (a *App) setupStatusData() map[string]any {
 }
 
 func (a *App) setupConfigValues(payload map[string]any) (map[string]map[string]any, error) {
-	values := configValues(*a.cfg())
+	// 以配置文件本身（config.LoadFileOnly，不含 env 与 .local 覆盖）为底稿：
+	// a.cfg() 是合并了覆盖层的生效值，整份渲染落盘会把 TWILIGHT_POSTGRES_PASSWORD /
+	// TWILIGHT_DATABASE_URL / TWILIGHT_BOT_INTERNAL_SECRET 等只打算放在 env 的密钥
+	// 明文写进 config.toml 及之后的每份配置备份。
+	fileCfg, err := config.LoadFileOnly(a.configFilePath())
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件失败")
+	}
+	values := configValues(fileCfg)
 
 	global := setupObject(payload, "global")
 	if name := stringValue(global, "server_name"); name != "" {
