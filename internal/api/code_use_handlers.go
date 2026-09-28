@@ -130,7 +130,9 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 			days = maxDays
 		}
 	}
+	var expiredBefore int64
 	updateUser := func(u *store.User, reg store.RegCode) error {
+		expiredBefore = u.ExpiredAt
 		if source == "regcode" && reg.Type == 2 {
 			if err := validateSelfServiceRenewalTarget(*u); err != nil {
 				return err
@@ -143,18 +145,32 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 		if grantsEmby && u.EmbyID == "" && u.EmbyGrantLocked && !u.PendingEmby {
 			return store.ErrGrantLocked
 		}
+		// 锁内复核 Emby 名额（锁外预检与消费之间有 TOCTOU，无限次码尤甚）。
+		// 替换已有待开通资格的不新增占用，跳过。
+		if grantsEmby && u.EmbyID == "" && !u.PendingEmby {
+			if err := a.embyCapacityExceededHeldLock(u.UID, reg.Code); err != nil {
+				return err
+			}
+		}
 		if currentReplacesPendingEntitlement {
 			u.PendingEmby = false
 			u.PendingEmbyDays = nil
 		}
 		if source == "regcode" {
+			// 只提升"更低"的角色，不改写管理员（及 type1 下的白名单）：旧实现无条件
+			// 改写 Role，未绑 Emby 的唯一管理员兑换一张注册码就被降为普通用户，
+			// 绕过 SetUserRoleAtomic 的 last-admin 保护。
 			switch reg.Type {
 			case 1:
-				u.Role = store.RoleNormal
+				if u.Role == store.RoleUnrecognized {
+					u.Role = store.RoleNormal
+				}
 				u.PendingEmby = u.EmbyID == ""
 				u.PendingEmbyDays = &days
 			case 3:
-				u.Role = store.RoleWhitelist
+				if u.Role == store.RoleUnrecognized || u.Role == store.RoleNormal {
+					u.Role = store.RoleWhitelist
+				}
 				u.Active = true
 				u.ExpiredAt = permanentExpiryUnix
 				if u.EmbyID == "" {
@@ -180,7 +196,8 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 			// invite 续期：上限 = 邀请人剩余天数。统一走 renewExpiryAndReactivate
 			// 让"过期 invitee 重新使用 invite 码"路径自动重新激活账号。
 			renewExpiryAndReactivate(u, boundedInviteExpiry(addDaysToExpiry(u.ExpiredAt, days, time.Now()), inviterForUse.ExpiredAt))
-		} else if u.Role != store.RoleWhitelist {
+		} else if u.Role != store.RoleWhitelist && u.Role != store.RoleAdmin {
+			// 管理员保持原到期（通常为永久），不因兑换卡码被改成有限期。
 			renewExpiryAndReactivate(u, addDaysToExpiry(u.ExpiredAt, days, time.Now()))
 		}
 		return nil
@@ -196,6 +213,10 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 	}
 	if errors.Is(err, store.ErrGrantLocked) {
 		failWithCode(w, http.StatusBadRequest, ErrCodeRegistrationGrantAlreadyUsed, "当前账号已经使用过 Emby 注册资格，不能重复使用注册码或邀请码")
+		return
+	}
+	if errors.Is(err, store.ErrEmbyCapacityReached) {
+		failWithCode(w, http.StatusConflict, ErrEmbyCapacityReached, "Emby 用户数量已达上限")
 		return
 	}
 	if errors.Is(err, store.ErrRegCodeAlreadyUsedByUser) {
@@ -222,9 +243,15 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 	data["expired_at"] = publicExpiryUnix(u.ExpiredAt)
 	data["role"] = u.Role
 	data["role_name"] = roleName(u.Role)
-	a.audit(r, "use_code", "user", 0, map[string]any{
-		"code": code, "source": source,
-	})
+	detail := map[string]any{
+		"code_hint": regcodeAuditHint(code), "source": source, "type": codeType, "days": days,
+		"pending_emby":      u.PendingEmby && u.EmbyID == "",
+		"expired_at_before": publicExpiryUnix(expiredBefore), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	}
+	if source == "invite" {
+		detail["inviter_uid"] = inviteForUse.InviterUID
+	}
+	a.audit(r, "use_code", "user", 0, detail)
 	ok(w, "使用成功", data)
 }
 

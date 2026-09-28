@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1123,6 +1124,9 @@ func (s *Store) saveLockedForce() error {
 }
 
 func (s *Store) saveStateLocked(force bool) error {
+	if beforeSaveHookForTest != nil {
+		beforeSaveHookForTest()
+	}
 	s.state.ensure()
 	data, err := json.Marshal(s.state)
 	if err != nil {
@@ -2332,8 +2336,11 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 				s.state.Users[uid] = u
 				userChanged = true
 			}
-			regRefs := s.clearRegCodeRefsForUIDLocked(uid)
-			invRefs := s.clearInviteUsageForUIDLocked(uid)
+			// 管理员显式"清理注册资格记录"：这是管理员主动收回并退还额度的操作
+			// （用于修复迁移误锁等脏数据），与用户自删 / 自助断开不同，保留退还语义，
+			// 走专门的 refund* 函数，避免与删号 / 断开的"只摘引用"路径混用。
+			regRefs := s.refundRegCodeUsageForUIDLocked(uid)
+			invRefs := s.refundInviteUsageForUIDLocked(uid)
 			result.RegcodeRefs += regRefs
 			result.InviteRefs += invRefs
 			if userChanged || regRefs > 0 || invRefs > 0 {
@@ -2350,11 +2357,50 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 	return result, nil
 }
 
-// clearRegCodeRefsForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
-// 回退；回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
+// removeRegCodeRefsForUIDLocked 只从注册码摘除对该 UID 的引用（UsedBy/UsedByUIDs），
+// 不回退 UseCount、不改 Active：用于删号等"用户自身消失"的路径，已消费次数不可退还，
+// 否则单次码可借删号重放。UsedByUIDs 用新切片重建而非就地 [:0] 改写——旧切片的底层
+// 数组可能被锁外持有的 RegCode 副本（RegCode()/ListRegCodes 的返回值）共享，就地
+// 改写会造成数据竞争并篡改调用方手里的快照。返回摘除的 UsedByUIDs 条数。
+func (s *Store) removeRegCodeRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	removed := 0
+	for code, rc := range s.state.RegCodes {
+		dirty := false
+		if rc.UsedBy == uid {
+			rc.UsedBy = 0
+			dirty = true
+		}
+		if slices.Contains(rc.UsedByUIDs, uid) {
+			pruned := make([]int64, 0, len(rc.UsedByUIDs))
+			for _, u := range rc.UsedByUIDs {
+				if u == uid {
+					removed++
+					continue
+				}
+				pruned = append(pruned, u)
+			}
+			if len(pruned) == 0 {
+				pruned = nil
+			}
+			rc.UsedByUIDs = pruned
+			dirty = true
+		}
+		if dirty {
+			s.state.RegCodes[code] = rc
+		}
+	}
+	return removed
+}
+
+// refundRegCodeUsageForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
+// 回退；仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用，删号走
+// removeRegCodeRefsForUIDLocked（不退还）。回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
 // 返回抹除的引用条数（每个码对同一 UID 至多一条）。UsedByTelegramIDs 保持不动：
 // TG 维度的占用无法可靠映射回单个 UID，避免误删他人记录。
-func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
+func (s *Store) refundRegCodeUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2396,11 +2442,13 @@ func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
 	return removed
 }
 
-// clearInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
+// refundInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
 // 断开邀请关系并抹除其在邀请码上的占用（UsedByUID/Used/UseCount/Active），使其可
 // 重新加入邀请树 / 使用邀请码。只清理其作为 child 的记录；其作为邀请人(inviter)
 // 生成、被他人使用的邀请码不受影响。返回处理的邀请记录数。
-func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
+// 会退还次数并重新启用码，仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用；
+// 下级自助 / 管理员断开邀请关系走 detachInviteRefsForUIDLocked（不退还）。
+func (s *Store) refundInviteUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2428,6 +2476,34 @@ func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
 		if !c.Active && c.UseCountLimit != -1 && c.UseCount < c.UseCountLimit {
 			c.Active = true
 		}
+		s.state.InviteCodes[code] = c
+		handled++
+	}
+	return handled
+}
+
+// detachInviteRefsForUIDLocked 断开该 UID 作为被邀请者的邀请关系，并只清掉邀请码上
+// 指向它的 UsedByUID 引用；不回退 UseCount、不改 Used / Active。旧实现（现
+// refundInviteUsageForUIDLocked）会把码退回并重新启用：下级到期后自助断开，同一张
+// 永不过期的邀请码就能被小号再次使用，无限循环且邀请人不知情。下级若需重新加入，
+// 靠"关系已断开"即可使用新的邀请码，不需要复活旧码。返回处理的记录数。
+func (s *Store) detachInviteRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	handled := 0
+	for key, rel := range s.state.InviteRelations {
+		if key != uid && rel.ChildUID != uid {
+			continue
+		}
+		delete(s.state.InviteRelations, key)
+		handled++
+	}
+	for code, c := range s.state.InviteCodes {
+		if c.UsedByUID != uid {
+			continue
+		}
+		c.UsedByUID = 0
 		s.state.InviteCodes[code] = c
 		handled++
 	}
@@ -2900,40 +2976,10 @@ func (s *Store) deleteUserStateLocked(uid int64) error {
 		}
 	}
 
-	// RegCode：删除用户时清理所有引用并回退 UseCount，释放被占用的码额度。
-	for code, rc := range s.state.RegCodes {
-		dirty := false
-		if rc.UsedBy == uid {
-			rc.UsedBy = 0
-			dirty = true
-		}
-		if len(rc.UsedByUIDs) > 0 {
-			pruned := rc.UsedByUIDs[:0]
-			for _, u := range rc.UsedByUIDs {
-				if u == uid {
-					if rc.UseCount > 0 {
-						rc.UseCount--
-					}
-					continue
-				}
-				pruned = append(pruned, u)
-			}
-			if len(pruned) != len(rc.UsedByUIDs) {
-				if len(pruned) == 0 {
-					rc.UsedByUIDs = nil
-				} else {
-					rc.UsedByUIDs = pruned
-				}
-				dirty = true
-			}
-		}
-		if dirty {
-			if !rc.Active && rc.UseCountLimit != -1 && rc.UseCount < rc.UseCountLimit {
-				rc.Active = true
-			}
-			s.state.RegCodes[code] = rc
-		}
-	}
+	// RegCode：删除用户时只摘除对该 UID 的引用，不回退 UseCount、不重新启用。
+	// 旧实现会退还次数并把用满的码恢复 Active，用户用单次码开通后 /delAccount
+	// 自删即可让同一张码重新可用（重放 / 转手），故已消费的次数永久保留。
+	s.removeRegCodeRefsForUIDLocked(uid)
 
 	// 公告作者匿名化：公告本体不删，只清掉 CreatedByUID 引用。
 	for id, ann := range s.state.Announcements {
@@ -4196,6 +4242,12 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 				changed = true
 			}
 			if grant, ok := grants[uid]; ok {
+				// 只有用户侧"授权锁本身丢失"才算真正的残留（旧流程码侧已记账、用户侧
+				// 更新丢失）。授权锁完好却无 Emby、无 PendingEmby，说明资格已被正常
+				// 消费后又被收回：管理员解绑 / 删除 Emby、清注册队列、排程收回待开通
+				// 资格等。旧逻辑对这类用户也重发 PendingEmby，重启或保存设置即让被
+				// 移除的用户重新拿到完整天数，故这里记下修复前的锁状态作为闸门。
+				lostGrantLock := !u.EmbyGrantLocked
 				if !u.EmbyGrantLocked || strings.TrimSpace(u.RegistrationSource) == "" || strings.TrimSpace(u.RegistrationCode) == "" {
 					u.EmbyGrantLocked = true
 					if strings.TrimSpace(u.RegistrationSource) == "" {
@@ -4207,7 +4259,7 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 					result.RestoredGrantLocks++
 					changed = true
 				}
-				if strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
+				if lostGrantLock && strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
 					days := grant.days
 					u.PendingEmby = true
 					u.PendingEmbyDays = &days
@@ -4872,7 +4924,7 @@ func (s *Store) DetachInvite(uid int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mutateAndSaveLocked(func() error {
-		s.clearInviteUsageForUIDLocked(uid)
+		s.detachInviteRefsForUIDLocked(uid)
 		return nil
 	})
 }
@@ -4897,6 +4949,42 @@ func (s *Store) RegCode(code string) (RegCode, bool) {
 	defer s.mu.RUnlock()
 	r, ok := s.state.RegCodes[code]
 	return r, ok
+}
+
+// UpdateRegCode 在 store 写锁内读取注册码的最新值并交给 fn 做字段级修改。
+// 管理员编辑 / 清理使用记录原先在锁外读快照、改字段后 UpsertRegCode 整笔覆写：
+// 其间若有用户成功兑换，UseCount++ 与 UsedByUIDs 会被旧值覆盖（次数倒退、
+// per-identity 记录丢失），码在其间被删除还会被复活。fn 基于最新状态执行，
+// 版本冲突重放时也会重新读取；码不存在返回 ErrNotFound。
+func (s *Store) UpdateRegCode(code string, fn func(*RegCode) error) (RegCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updated RegCode
+	err := s.mutateAndSaveLocked(func() error {
+		rc, ok := s.state.RegCodes[code]
+		if !ok {
+			return ErrNotFound
+		}
+		if len(rc.UsedByUIDs) > 0 {
+			rc.UsedByUIDs = append([]int64(nil), rc.UsedByUIDs...)
+		}
+		if len(rc.UsedByTelegramIDs) > 0 {
+			rc.UsedByTelegramIDs = append([]int64(nil), rc.UsedByTelegramIDs...)
+		}
+		if fn != nil {
+			if err := fn(&rc); err != nil {
+				return err
+			}
+		}
+		rc.Code = code
+		s.state.RegCodes[code] = rc
+		updated = rc
+		return nil
+	})
+	if err != nil {
+		return RegCode{}, err
+	}
+	return updated, nil
 }
 
 func (s *Store) UpsertRegCode(code RegCode) error {
@@ -5147,11 +5235,20 @@ func (s *Store) DeleteRegCode(code string) error {
 	})
 }
 
+// beforeSaveHookForTest 仅供测试注入：在 saveStateLocked 落盘前调用，用来稳定制造
+// 版本冲突以验证重放 / 重试。生产代码中恒为 nil。
+var beforeSaveHookForTest func()
+
 func (s *Store) DeleteRegCodes(codes []string) (deleted []string, missing []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	deletedSet := map[string]bool{}
+	var deletedSet map[string]bool
 	mutErr := s.mutateAndSaveLocked(func() error {
+		// 版本冲突时 mutateAndSaveLocked 会重放本闭包：闭包外的累加变数必须在开头
+		// 重置，否则 deleted / missing 会重复，甚至同一个码同时出现在两边
+		// （第一次删掉的码在重放时被判为 missing）。
+		deleted, missing = nil, nil
+		deletedSet = map[string]bool{}
 		seen := map[string]bool{}
 		for _, code := range codes {
 			code = strings.TrimSpace(code)

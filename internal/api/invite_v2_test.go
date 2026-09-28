@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/prejudice-studio/twilight/internal/store"
 )
 
 func TestV2InviteActionsUseAuthenticatedNoStoreResources(t *testing.T) {
@@ -27,6 +29,15 @@ func TestV2InviteActionsUseAuthenticatedNoStoreResources(t *testing.T) {
 	cookies := registerAndLogin(t, app, "v2-invite-owner", "InviteV2Owner123456")
 	app.cfg().InviteEnabled = true
 	app.cfg().InviteRequireEmby = false
+	// 未开通 Emby 的用户只能在持有待开通资格时按资格天数发码（ExpiredAt=-1 不再视为永久）。
+	pendingDays := 30
+	if owner, ok := app.store().FindUserByUsername("v2-invite-owner"); ok {
+		if _, err := app.store().UpdateUser(owner.UID, func(u *store.User) error { u.PendingEmby = true; u.PendingEmbyDays = &pendingDays; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal("owner missing")
+	}
 
 	read := doJSON(app, http.MethodGet, "/api/v2/invite/summary", "", cookies)
 	if read.Code != http.StatusOK || read.Header().Get("Cache-Control") != "private, no-store" {

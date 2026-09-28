@@ -76,7 +76,7 @@ func (a *App) handleSignin(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := signinActionPayload(*a.cfg(), si, createdToday, dailyPoints, bonusPoints)
 	a.attachSigninAutoRenewal(payload, *a.cfg(), si.Points, current(r).User)
 	if createdToday {
-		a.audit(r, "signin", "user", 0, map[string]any{"points": dailyPoints, "bonus": bonusPoints})
+		a.audit(r, "signin", "user", 0, map[string]any{"points": dailyPoints, "bonus": bonusPoints, "streak": si.Streak, "balance": si.Points})
 		ok(w, "签到成功", payload)
 		return
 	}
@@ -151,7 +151,10 @@ func (a *App) handleSigninRenew(w http.ResponseWriter, r *http.Request, _ Params
 		}
 		return
 	}
-	a.audit(r, "renew_with_signin_points", "user", 0, map[string]any{"spent_points": cost, "days": days})
+	a.audit(r, "renew_with_signin_points", "user", 0, map[string]any{
+		"spent_points": cost, "days": days, "remaining_points": si.Points,
+		"expired_at_before": publicExpiryUnix(p.User.ExpiredAt), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	})
 	renewalPayload := signinRenewalPayload(cfg, si.Points)
 	a.attachSigninAutoRenewalToRenewal(renewalPayload, cfg, u)
 	ok(w, signinRenewalSuccessMessage, map[string]any{

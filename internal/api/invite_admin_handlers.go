@@ -158,6 +158,7 @@ func (a *App) handleAdminInviteDetachBatch(w http.ResponseWriter, r *http.Reques
 		"only_emby_disabled":        onlyEmbyDisabled,
 		"deleted_emby":              deletedEmbyCount,
 		"skipped_not_emby_disabled": skippedNotEmbyDisabled,
+		"uids":                      auditUIDSample(uids),
 	})
 	ok(w, "批量邀请关系处理完成", result)
 }

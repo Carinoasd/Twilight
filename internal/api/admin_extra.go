@@ -943,11 +943,11 @@ func (a *App) handleInviteDetach(w http.ResponseWriter, r *http.Request, params 
 		return
 	}
 	uid, _ := int64Param(params, "uid")
-	_, hadParent := a.store().ParentOf(uid)
+	rel, hadParent := a.store().ParentOf(uid)
 	if err := a.store().DetachInvite(uid); statusFromError(w, err) {
 		return
 	}
-	a.audit(r, "invite_detach", "admin", uid, map[string]any{"changed": hadParent})
+	a.audit(r, "invite_detach", "admin", uid, map[string]any{"changed": hadParent, "parent_uid": rel.ParentUID})
 	ok(w, "detached", map[string]any{"uid": uid, "is_root": true, "changed": hadParent})
 }
 

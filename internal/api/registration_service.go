@@ -71,6 +71,16 @@ func (a *App) handleRegistration(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// 公开注册路由不走 fallback 审计（AuthPublic），这里以新用户身份显式记一笔。
+	regDetail := map[string]any{
+		"telegram_bound": result.User.TelegramID != 0, "promoted_admin": result.FirstAdmin,
+		"pending_emby": result.User.PendingEmby, "has_email": strings.TrimSpace(input.Email) != "",
+	}
+	if result.RegCode.Code != "" {
+		regDetail["code_hint"] = regcodeAuditHint(result.RegCode.Code)
+		regDetail["days"] = result.RegCode.Days
+	}
+	a.auditWithUser(r, result.User.UID, result.User.Username, "register", "user", result.User.UID, regDetail)
 	created(w, "注册成功", map[string]any{
 		"user": publicUser(result.User), "first_admin": result.FirstAdmin,
 		"reg_code_used":           result.RegCode.Code,
@@ -264,6 +274,10 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 		if consumed.Code == "" {
 			return nil
 		}
+		// 锁内复核 Emby 名额（新用户尚未写入 state，无需排除）。
+		if err := a.embyCapacityExceededHeldLock(0, consumed.Code); err != nil {
+			return err
+		}
 		days := normalizeRegCodeDays(consumed.Days)
 		user.PendingEmby = true
 		user.PendingEmbyDays = &days
@@ -312,6 +326,9 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 }
 
 func (a *App) mapRegistrationStoreError(err error, input registrationInput, bind store.BindCode, reg store.RegCode) error {
+	if errors.Is(err, store.ErrEmbyCapacityReached) {
+		return registrationFail(409, ErrEmbyCapacityReached, "Emby 用户数量已达上限")
+	}
 	if errors.Is(err, store.ErrTelegramLinkOwner) {
 		return registrationFail(400, ErrTGBindCodeNotFound, "绑定链接不存在或不属于当前浏览器")
 	}
