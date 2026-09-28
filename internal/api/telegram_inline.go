@@ -143,6 +143,17 @@ func telegramGroupUserSearchUsage() string {
 }
 
 func (a *App) telegramSendGroupAdminAuth(ctx context.Context, chatID, commandMessageID int64, query string, message *telegramMessage) {
+	// 修复：同一聊天里同一 sender_chat 身份 30 秒内只发一个验证面板，防止刷屏。
+	var senderID int64
+	if message != nil {
+		senderID = message.SenderChat.ID
+		if senderID == 0 {
+			senderID = message.From.ID
+		}
+	}
+	if !a.telegramPanelThrottle.allow(telegramCooldownKey("auth", chatID, senderID), telegramUnauthorizedCooldown) {
+		return
+	}
 	panel := a.telegramCreateAuthPanel(chatID, commandMessageID, query, telegramReplyTelegramID(message))
 	markup := telegramInlineKeyboard([][]telegramInlineButton{
 		{{Text: "验证管理员身份", Data: "gadm:auth:" + panel.Token}},
@@ -424,8 +435,8 @@ func (a *App) telegramHandleCallback(ctx context.Context, callback *telegramCall
 		return
 	}
 	if !a.telegramAdminID(actorID) {
+		// 修复：非管理员点击只弹出 callback 提示，不再往群里发消息、挂定时器。
 		_ = a.telegramAnswerCallbackQuery(ctx, callbackID, "没有管理员权限。", true)
-		a.telegramSendUnauthorizedAndCleanup(ctx, panel.ChatID, panel.CommandMessageID)
 		return
 	}
 	if mode == "auth" {

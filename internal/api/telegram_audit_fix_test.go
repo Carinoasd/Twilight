@@ -503,3 +503,31 @@ func TestTelegramBanWebRequiresExactTarget(t *testing.T) {
 		t.Fatalf("exact username should disable bobby; sent=%v", tg.sentTexts())
 	}
 }
+
+// 非管理员连点面板按钮 / 反复发 /twguser 不能刷屏。
+func TestTelegramPanelNonAdminIsThrottled(t *testing.T) {
+	app := newTestApp(t)
+	tg := newRecordingTelegramServer(t, app)
+	app.cfg().TelegramEnablePanel = true
+	app.cfg().TelegramAdminIDs = []int64{42}
+	target := mustCreateTGUser(t, app, store.User{Username: "throttle-target", Role: store.RoleNormal, Active: true})
+	panel := app.telegramCreatePanel(-100, 10, target)
+	panel.MessageID = 777
+	app.telegramSavePanel(panel)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		app.handleTelegramUpdate(ctx, &telegramUpdate{CallbackQuery: &telegramCallbackQuery{
+			ID:      fmt.Sprintf("cb%d", i),
+			From:    telegramUser{ID: 99},
+			Message: &telegramMessage{MessageID: 777, Chat: telegramChat{ID: -100, Type: "supergroup"}},
+			Data:    "gadm:act:refresh:" + panel.Token,
+		}})
+		app.handleTelegramUpdate(ctx, tgTextUpdate(-100, 99, "/twguser throttle-target"))
+		anon := tgTextUpdate(-100, 1087968824, "/twguser throttle-target")
+		anon.Message.SenderChat = telegramChat{ID: -100, Type: "supergroup"}
+		app.handleTelegramUpdate(ctx, anon)
+	}
+	if sent := tg.callsOf("sendMessage"); len(sent) > 2 {
+		t.Fatalf("non-admin interactions flooded the group with %d messages: %v", len(sent), tg.sentTexts())
+	}
+}

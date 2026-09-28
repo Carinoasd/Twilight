@@ -947,7 +947,10 @@ func (a *App) telegramHandleGroupUser(ctx context.Context, chatID, telegramID in
 		return
 	}
 	if !a.telegramAdminID(telegramID) {
-		a.telegramSendUnauthorizedAndCleanup(ctx, chatID, messageID)
+		// 修复：同一 (chat, user) 30 秒内只提示一次，其余越权指令静默忽略。
+		if a.telegramPanelThrottle.allow(telegramCooldownKey("deny", chatID, telegramID), telegramUnauthorizedCooldown) {
+			a.telegramSendUnauthorizedAndCleanup(ctx, chatID, messageID)
+		}
 		return
 	}
 	resolution := a.telegramResolveGroupUserTargets(query, message)
