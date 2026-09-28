@@ -15,14 +15,3 @@ func (a *App) deleteLocalUser(ctx context.Context, u store.User) error {
 	}
 	return nil
 }
-
-func (a *App) cleanupUserTelegramResidue(uid, telegramID int64) int {
-	n, err := a.store().CleanupTelegramChallenges(context.Background(), 0, uid, telegramID)
-	logTelegramChallengeFailure("cleanup_identity", err)
-	return n
-}
-func (a *App) cleanupOrphanedUserBindCodes() int {
-	n, err := a.store().CleanupOrphanedTelegramChallenges(context.Background())
-	logTelegramChallengeFailure("cleanup_orphaned", err)
-	return n
-}

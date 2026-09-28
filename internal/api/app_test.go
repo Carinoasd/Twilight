@@ -315,35 +315,35 @@ func TestWildcardCORSUsesRelaxedValidOriginReflection(t *testing.T) {
 	}
 }
 
-func TestBindCodeCreationGETRequiresWebUIIntent(t *testing.T) {
+func TestTelegramLinkCreationRequiresWebUIIntent(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:ABC"
 
-	missing := doJSON(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil)
+	missing := doJSON(app, http.MethodPost, "/api/v1/users/telegram/register/link", ``, nil)
 	if missing.Code != http.StatusBadRequest || !strings.Contains(missing.Body.String(), "显式前端操作意图") {
-		t.Fatalf("bind-code without intent status=%d body=%s", missing.Code, missing.Body.String())
+		t.Fatalf("link without intent status=%d body=%s", missing.Code, missing.Body.String())
 	}
 
-	prefetch := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil, map[string]string{
+	prefetch := doJSONWithHeaders(app, http.MethodPost, "/api/v1/users/telegram/register/link", ``, nil, map[string]string{
 		"X-Twilight-Client": "webui",
-		"X-Twilight-Intent": "create-bind-code",
+		"X-Twilight-Intent": "create-telegram-link",
 		"Purpose":           "prefetch",
 	})
 	if prefetch.Code != http.StatusBadRequest || !strings.Contains(prefetch.Body.String(), "预取请求") {
-		t.Fatalf("bind-code prefetch status=%d body=%s", prefetch.Code, prefetch.Body.String())
+		t.Fatalf("link prefetch status=%d body=%s", prefetch.Code, prefetch.Body.String())
 	}
 
-	created := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil, bindCodeCreateTestHeaders())
+	created := doJSONWithHeaders(app, http.MethodPost, "/api/v1/users/telegram/register/link", ``, nil, telegramLinkCreateTestHeaders())
 	if created.Code != http.StatusOK {
-		t.Fatalf("bind-code with intent status=%d body=%s", created.Code, created.Body.String())
+		t.Fatalf("link with intent status=%d body=%s", created.Code, created.Body.String())
 	}
 	if created.Header().Get("Cache-Control") != "no-store, private" {
-		t.Fatalf("bind-code response is cacheable: %q", created.Header().Get("Cache-Control"))
+		t.Fatalf("link response is cacheable: %q", created.Header().Get("Cache-Control"))
 	}
 }
 
-func TestRegcodesAndChallengesPersistAcrossAppRestart(t *testing.T) {
+func TestRegcodesAndTelegramLinksPersistAcrossAppRestart(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:ABC"
@@ -371,24 +371,12 @@ func TestRegcodesAndChallengesPersistAcrossAppRestart(t *testing.T) {
 		t.Fatalf("created regcode was not written to store: %s", regcode)
 	}
 
-	createdBindCode := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil, bindCodeCreateTestHeaders())
-	if createdBindCode.Code != http.StatusOK {
-		t.Fatalf("create bind code status=%d body=%s", createdBindCode.Code, createdBindCode.Body.String())
+	link := issueRegisterTelegramLink(t, app)
+	if _, ok := app.telegramLinkAlive(link.ID); !ok {
+		t.Fatalf("created link was not present in dedicated table: %s", link.ID)
 	}
-	var bindEnv envelope
-	if err := json.Unmarshal(createdBindCode.Body.Bytes(), &bindEnv); err != nil {
-		t.Fatalf("decode bind code response: %v", err)
-	}
-	bindData, _ := bindEnv.Data.(map[string]any)
-	bindCode, _ := bindData["bind_code"].(string)
-	if bindCode == "" {
-		t.Fatalf("empty bind code in response: %#v", bindEnv.Data)
-	}
-	if _, ok := app.bindCode(bindCode); !ok {
-		t.Fatalf("created challenge was not present in dedicated table: %s", bindCode)
-	}
-	if _, ok := app.store().BindCode(bindCode); ok {
-		t.Fatalf("bind code leaked into persistent store: %s", bindCode)
+	if _, ok := app.store().BindCode(link.ID); ok {
+		t.Fatalf("link leaked into persistent state JSON: %s", link.ID)
 	}
 
 	cfg := *app.cfg()
@@ -407,24 +395,11 @@ func TestRegcodesAndChallengesPersistAcrossAppRestart(t *testing.T) {
 	if _, ok := restarted.store().RegCode(regcode); !ok {
 		t.Fatalf("regcode disappeared after app restart: %s", regcode)
 	}
-	if _, ok := restarted.bindCode(bindCode); !ok {
-		t.Fatalf("challenge disappeared after restart: %s", bindCode)
+	if _, ok := restarted.telegramLinkAlive(link.ID); !ok {
+		t.Fatalf("link disappeared after restart: %s", link.ID)
 	}
-	if _, ok := restarted.store().BindCode(bindCode); ok {
-		t.Fatalf("bind code was persisted after app restart: %s", bindCode)
-	}
-}
-
-func TestBindCodeWebSocketRejectsMalformedCodeBeforeUpgrade(t *testing.T) {
-	app := newTestApp(t)
-	malformed := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code/ws?code=../../bad", ``, nil, map[string]string{
-		"Connection":            "Upgrade",
-		"Upgrade":               "websocket",
-		"Sec-WebSocket-Version": "13",
-		"Sec-WebSocket-Key":     "dGhlIHNhbXBsZSBub25jZQ==",
-	})
-	if malformed.Code != http.StatusBadRequest || !strings.Contains(malformed.Body.String(), "TG_BIND_CODE_FORMAT_INVALID") {
-		t.Fatalf("ws malformed code status=%d body=%s", malformed.Code, malformed.Body.String())
+	if _, ok := restarted.store().BindCode(link.ID); ok {
+		t.Fatalf("link was persisted into state JSON after app restart: %s", link.ID)
 	}
 }
 
@@ -2566,138 +2541,120 @@ func TestSystemUpdateValidationHelpers(t *testing.T) {
 	}
 }
 
-func TestBindCodesAreDedicatedRowsOutsideStateJSON(t *testing.T) {
+func TestTelegramLinksAreDedicatedRowsOutsideStateJSON(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "MEMORY12345", Scene: "register", Confirmed: true, TelegramID: 12345, TelegramUsername: "memory", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
+	id := linkIDFor("memory")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "register", TelegramID: 12345, TelegramUsername: "memory", CreatedAt: now, ExpiresAt: now + 600})
+	if _, ok := app.store().BindCode(id); ok {
+		t.Fatal("link should not be written to state JSON")
 	}
-	if _, ok := app.store().BindCode("MEMORY12345"); ok {
-		t.Fatal("bind code should not be written to store")
-	}
-	bind, ok := app.bindCode("MEMORY12345")
-	if !ok || bind.TelegramID != 12345 || !bind.Confirmed || bind.TelegramUsername != "memory" {
-		t.Fatalf("challenge was not loaded correctly: ok=%v bind=%#v", ok, bind)
+	link, ok := app.telegramLinkAlive(id)
+	if !ok || link.TelegramID != 12345 || !link.Confirmed() || link.TelegramUsername != "memory" {
+		t.Fatalf("link was not loaded correctly: ok=%v link=%#v", ok, link)
 	}
 }
 
-func TestConfirmedRegisterBindCodeHonorsTTL(t *testing.T) {
+func TestConfirmedRegisterLinkHonorsTTL(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
-	// 注册场景（UID==0）：已确认但已过 TTL 的绑定码必须按过期处理，否则
-	// 无后台清扫时它会无限期停留在 confirmed，可跨越 TTL 重放到 /register。
-	if err := app.upsertBindCode(store.BindCode{Code: "REGEXPIRED12", Scene: "register", Confirmed: true, TelegramID: 777, TelegramUsername: "ttl", CreatedAt: now - 700, ExpiresAt: now - 1}); err != nil {
-		t.Fatal(err)
-	}
-	state := app.telegramBindCodeState("REGEXPIRED12", 0, "register", now, true)
+	// 注册场景：已确认但已过 TTL 的链接必须按过期处理，否则可跨越 TTL 重放到 /register。
+	expired := linkIDFor("reg-expired")
+	app.seedTelegramLink(t, store.TelegramLink{ID: expired, Scene: "register", TelegramID: 777, TelegramUsername: "ttl", CreatedAt: now - 700, ExpiresAt: now - 1})
+	state := app.telegramLinkStatus(context.Background(), expired, 0, store.TelegramLinkSecretHash(expired), "register", now)
 	if state.Status != "expired" || !state.Terminal || state.Confirmed {
-		t.Fatalf("confirmed-but-expired register code should be expired, got %#v", state)
+		t.Fatalf("confirmed-but-expired register link should be expired, got %#v", state)
 	}
-	// 仍在有效期内的已确认注册码继续返回 confirmed。
-	if err := app.upsertBindCode(store.BindCode{Code: "REGVALID1234", Scene: "register", Confirmed: true, TelegramID: 778, TelegramUsername: "ok", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
-	}
-	if state := app.telegramBindCodeState("REGVALID1234", 0, "register", now, true); state.Status != "confirmed" {
-		t.Fatalf("in-window confirmed register code should stay confirmed, got %#v", state)
+	valid := linkIDFor("reg-valid")
+	app.seedTelegramLink(t, store.TelegramLink{ID: valid, Scene: "register", TelegramID: 778, TelegramUsername: "ok", CreatedAt: now, ExpiresAt: now + 600})
+	if state := app.telegramLinkStatus(context.Background(), valid, 0, store.TelegramLinkSecretHash(valid), "register", now); state.Status != "confirmed" {
+		t.Fatalf("in-window confirmed register link should stay confirmed, got %#v", state)
 	}
 }
 
-func TestCleanupExpiredBindCodesKeepsValidCodes(t *testing.T) {
+func TestCleanupExpiredTelegramLinksKeepsValidLinks(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "EXPIRED12345", Scene: "register", CreatedAt: now - 700, ExpiresAt: now - 1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.upsertBindCode(store.BindCode{Code: "VALID1234567", Scene: "register", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
-	}
-	deleted := app.cleanupExpiredBindCodes(now)
-	if deleted != 1 {
+	expired, valid := linkIDFor("expired"), linkIDFor("valid")
+	app.seedTelegramLink(t, store.TelegramLink{ID: expired, Scene: "register", CreatedAt: now - 700, ExpiresAt: now - 1})
+	app.seedTelegramLink(t, store.TelegramLink{ID: valid, Scene: "register", CreatedAt: now, ExpiresAt: now + 600})
+	if deleted := app.cleanupExpiredTelegramLinks(now); deleted != 1 {
 		t.Fatalf("deleted=%d, want 1", deleted)
 	}
-	if _, ok := app.bindCode("EXPIRED12345"); ok {
-		t.Fatal("expired bind code was not deleted")
+	if _, ok := app.telegramLinkAlive(expired); ok {
+		t.Fatal("expired link was not deleted")
 	}
-	if _, ok := app.bindCode("VALID1234567"); !ok {
-		t.Fatal("valid bind code was deleted")
+	if _, ok := app.telegramLinkAlive(valid); !ok {
+		t.Fatal("valid link was deleted")
 	}
 }
 
-func TestRepairTelegramBindResidueClearsLegacyStateAndExpiredChallenges(t *testing.T) {
+func TestRepairTelegramBindResidueClearsLegacyStateAndExpiredLinks(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	if err := app.store().UpsertBindCode(store.BindCode{Code: "LEGACYTG1", Scene: "register", Confirmed: true, TelegramID: 12345, CreatedAt: now - 3600, ExpiresAt: now - 3500}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.upsertBindCode(store.BindCode{Code: "MEMEXPIRED1", Scene: "register", Confirmed: true, TelegramID: 67890, CreatedAt: now - 3600, ExpiresAt: now - 1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.upsertBindCode(store.BindCode{Code: "MEMVALID123", Scene: "register", Confirmed: true, TelegramID: 67891, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		t.Fatal(err)
-	}
+	expired, valid := linkIDFor("repair-expired"), linkIDFor("repair-valid")
+	app.seedTelegramLink(t, store.TelegramLink{ID: expired, Scene: "register", TelegramID: 67890, CreatedAt: now - 3600, ExpiresAt: now - 1})
+	app.seedTelegramLink(t, store.TelegramLink{ID: valid, Scene: "register", TelegramID: 67891, CreatedAt: now, ExpiresAt: now + 300})
 
 	app.repairTelegramBindResidue("test")
 
 	if _, ok := app.store().BindCode("LEGACYTG1"); ok {
 		t.Fatal("legacy persisted bind code should be removed by repair")
 	}
-	if _, ok := app.bindCode("MEMEXPIRED1"); ok {
-		t.Fatal("expired persistent challenge should be removed by repair")
+	if _, ok := app.telegramLinkAlive(expired); ok {
+		t.Fatal("expired link should be removed by repair")
 	}
-	if _, ok := app.bindCode("MEMVALID123"); !ok {
-		t.Fatal("valid persistent challenge should remain")
+	if _, ok := app.telegramLinkAlive(valid); !ok {
+		t.Fatal("valid link should remain")
 	}
 }
 
-func TestDeleteLocalUserClearsTelegramBindCodeResidue(t *testing.T) {
+func TestDeleteLocalUserClearsTelegramLinkResidue(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	user, err := app.store().CreateUser(store.User{Username: "tg-delete", TelegramID: 24680})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := app.upsertBindCode(store.BindCode{Code: "TGDELETE1", Scene: "register", Confirmed: true, TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.upsertBindCode(store.BindCode{Code: "USERDELETE1", Scene: "user", UID: user.UID, Confirmed: true, TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 30}); err != nil {
-		t.Fatal(err)
-	}
+	byIdentity, byAccount := linkIDFor("delete-identity"), linkIDFor("delete-account")
+	app.seedTelegramLink(t, store.TelegramLink{ID: byIdentity, Scene: "register", TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 300})
+	app.seedTelegramLink(t, store.TelegramLink{ID: byAccount, Scene: "user", UID: user.UID, TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 30})
 
 	if err := app.deleteLocalUser(context.Background(), user); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := app.bindCode("TGDELETE1"); ok {
-		t.Fatal("register bind code for deleted telegram id should be removed")
+	if _, ok := app.telegramLinkAlive(byIdentity); ok {
+		t.Fatal("register link for deleted telegram id should be removed")
 	}
-	if _, ok := app.bindCode("USERDELETE1"); ok {
-		t.Fatal("user bind code for deleted user should be removed")
+	if _, ok := app.telegramLinkAlive(byAccount); ok {
+		t.Fatal("account link for deleted user should be removed")
 	}
 }
 
-func TestRepairTelegramBindResidueClearsOrphanedUserBindCodes(t *testing.T) {
+func TestRepairTelegramBindResidueClearsOrphanedUserLinks(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
 	user, err := app.store().CreateUser(store.User{Username: "orphan-source", TelegramID: 35791})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := app.upsertBindCode(store.BindCode{Code: "ORPHANUSER1", Scene: "user", UID: user.UID, Confirmed: true, TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.upsertBindCode(store.BindCode{Code: "REGKEEP123", Scene: "register", Confirmed: true, TelegramID: 35792, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		t.Fatal(err)
-	}
+	orphan, keep := linkIDFor("orphan"), linkIDFor("keep")
+	app.seedTelegramLink(t, store.TelegramLink{ID: orphan, Scene: "user", UID: user.UID, TelegramID: user.TelegramID, CreatedAt: now, ExpiresAt: now + 300})
+	app.seedTelegramLink(t, store.TelegramLink{ID: keep, Scene: "register", TelegramID: 35792, CreatedAt: now, ExpiresAt: now + 300})
 	if err := app.store().DeleteUser(user.UID); err != nil {
 		t.Fatal(err)
 	}
 
 	app.repairTelegramBindResidue("test")
 
-	if _, ok := app.bindCode("ORPHANUSER1"); ok {
-		t.Fatal("orphaned user-scene bind code should be removed by repair")
+	if _, ok := app.telegramLinkAlive(orphan); ok {
+		t.Fatal("orphaned account link should be removed by repair")
 	}
-	if _, ok := app.bindCode("REGKEEP123"); !ok {
-		t.Fatal("valid register-scene bind code should remain")
+	if _, ok := app.telegramLinkAlive(keep); !ok {
+		t.Fatal("valid register link should remain")
 	}
 }
 
@@ -3073,35 +3030,17 @@ func TestTelegramMembershipEnforcementUsesConfiguredConcurrency(t *testing.T) {
 	}
 }
 
-func TestRegisterConsumesConfirmedTelegramBindCode(t *testing.T) {
+func TestRegisterConsumesConfirmedTelegramLink(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().ForceBindTelegram = true
 
-	codeResp := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil, bindCodeCreateTestHeaders())
-	if codeResp.Code != http.StatusOK {
-		t.Fatalf("bind-code status=%d body=%s", codeResp.Code, codeResp.Body.String())
+	link := issueRegisterTelegramLink(t, app)
+	if result := app.confirmTelegramLink(context.Background(), link.Token, 424242, "alice_tg"); !result.Success {
+		t.Fatalf("confirm: %+v", result)
 	}
-	var codeBody struct {
-		Data struct {
-			BindCode string `json:"bind_code"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(codeResp.Body.Bytes(), &codeBody); err != nil {
-		t.Fatal(err)
-	}
-	code := codeBody.Data.BindCode
-	if code == "" {
-		t.Fatalf("missing bind code in response: %s", codeResp.Body.String())
-	}
-
-	confirmPayload := fmt.Sprintf(`{"code":%q,"telegram_id":424242,"telegram_username":"alice_tg"}`, code)
-	confirmed := doLoopbackJSON(app, http.MethodPost, "/api/v1/users/me/telegram/bind-confirm", confirmPayload)
-	if confirmed.Code != http.StatusOK {
-		t.Fatalf("confirm status=%d body=%s", confirmed.Code, confirmed.Body.String())
-	}
-	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"alice","password":"Alice123456","telegram_bind_code":%q}`, code), codeResp.Result().Cookies())
+	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"alice","password":"Alice123456","telegram_link_id":%q,"telegram_link_secret":%q}`, link.ID, link.Secret), nil)
 	if registered.Code != http.StatusCreated {
 		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
 	}
@@ -3109,95 +3048,59 @@ func TestRegisterConsumesConfirmedTelegramBindCode(t *testing.T) {
 	if !ok || u.TelegramID != 424242 || u.TelegramUsername != "alice_tg" {
 		t.Fatalf("telegram bind not applied to registered user: ok=%v user=%#v", ok, u)
 	}
-	if _, ok := app.bindCode(code); ok {
-		t.Fatal("confirmed register bind code was not consumed")
+	if consumed, _ := app.store().TelegramLink(context.Background(), link.ID); consumed.State != "consumed" || consumed.ResultUID != u.UID {
+		t.Fatalf("confirmed register link was not consumed: %#v", consumed)
 	}
 }
 
-func TestRegisterBindCodeCreateFailurePreservesConfirmedState(t *testing.T) {
+func TestRegisterLinkCreateFailurePreservesConfirmedState(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
-	code := "REGFAIL1234"
-	if err := app.upsertBindCode(store.BindCode{
-		Code:             code,
-		Scene:            "register",
-		Confirmed:        true,
-		TelegramID:       424242,
-		TelegramUsername: "ghost_tg",
-		CreatedAt:        now,
-		ExpiresAt:        now + 600,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	id := linkIDFor("regfail")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "register", TelegramID: 424242, TelegramUsername: "ghost_tg", CreatedAt: now, ExpiresAt: now + 600})
 
-	_, _, consumedBind, err := app.store().RegisterWithTelegramChallenge(context.Background(), store.User{Username: "retryuser"}, "", code, store.TelegramBrowserHash(store.TelegramChallengeHash(code)), func(*store.User, store.RegCode, store.BindCode) error { return store.ErrConflict })
+	_, _, consumedBind, err := app.store().RegisterWithTelegramLink(context.Background(), store.User{Username: "retryuser"}, "", id, store.TelegramLinkSecretHash(id), func(*store.User, store.RegCode, store.BindCode) error { return store.ErrConflict })
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("consume error=%v want ErrConflict", err)
 	}
-	if consumedBind.Code != code || consumedBind.TelegramID != 424242 {
+	if consumedBind.Code != id || consumedBind.TelegramID != 424242 {
 		t.Fatalf("consume should return the failed bind for diagnostics: %#v", consumedBind)
 	}
-	if bind, ok := app.bindCode(code); !ok || !bind.Confirmed {
-		t.Fatal("failed registration must preserve its verified bind code for retry")
+	if link, ok := app.telegramLinkAlive(id); !ok || !link.Confirmed() {
+		t.Fatal("failed registration must preserve its confirmed link for retry")
 	}
-	state := app.telegramBindCodeState(code, 0, "register", now, false)
+	state := app.telegramLinkStatus(context.Background(), id, 0, store.TelegramLinkSecretHash(id), "register", now)
 	if state.Status != "confirmed" || state.Invalid || !state.Terminal || !state.Confirmed {
-		t.Fatalf("failed registration should leave a confirmed code, got %#v", state)
+		t.Fatalf("failed registration should leave a confirmed link, got %#v", state)
 	}
 	if _, ok := app.store().FindUserByTelegramID(424242); ok {
 		t.Fatal("failed register consumption should not create a user with the Telegram ID")
 	}
 }
 
-func TestConfirmedRegisterBindCodeDetectsTelegramTakenBeforeSubmit(t *testing.T) {
+func TestConfirmedRegisterLinkDetectsTelegramTakenBeforeSubmit(t *testing.T) {
 	app := newTestApp(t)
 	now := time.Now().Unix()
-	code := "REGTAKEN123"
-	if err := app.upsertBindCode(store.BindCode{
-		Code:             code,
-		Scene:            "register",
-		Confirmed:        true,
-		TelegramID:       555001,
-		TelegramUsername: "taken_tg",
-		CreatedAt:        now,
-		ExpiresAt:        now + 600,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	id := linkIDFor("regtaken")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "register", TelegramID: 555001, TelegramUsername: "taken_tg", CreatedAt: now, ExpiresAt: now + 600})
 	if _, err := app.store().CreateUser(store.User{Username: "owner", TelegramID: 555001}); err != nil {
 		t.Fatal(err)
 	}
-
-	state := app.telegramBindCodeState(code, 0, "register", now, true)
+	state := app.telegramLinkStatus(context.Background(), id, 0, store.TelegramLinkSecretHash(id), "register", now)
 	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal || state.Confirmed {
-		t.Fatalf("confirmed register bind should become terminal when Telegram is taken, got %#v", state)
-	}
-	state = app.telegramBindCodeState(code, 0, "register", now, false)
-	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal {
-		t.Fatalf("cleared telegram-taken bind should keep failure detail briefly, got %#v", state)
+		t.Fatalf("confirmed register link should become terminal when Telegram is taken, got %#v", state)
 	}
 }
 
-func TestConfirmedUserBindCodeDetectsDatabaseMismatch(t *testing.T) {
+func TestConfirmedUserLinkDetectsDatabaseMismatch(t *testing.T) {
 	app := newTestApp(t)
 	user, err := app.store().CreateUser(store.User{Username: "stale-bind", TelegramID: 777001})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().Unix()
-	code := "USERSTALE12"
-	if err := app.upsertBindCode(store.BindCode{
-		Code:             code,
-		Scene:            "user",
-		UID:              user.UID,
-		Confirmed:        true,
-		TelegramID:       777001,
-		TelegramUsername: "old_tg",
-		CreatedAt:        now,
-		ExpiresAt:        now + 30,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	id := linkIDFor("userstale")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "user", UID: user.UID, TelegramID: 777001, TelegramUsername: "old_tg", CreatedAt: now, ExpiresAt: now + 30})
 	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error {
 		u.TelegramID = 0
 		u.TelegramUsername = ""
@@ -3205,26 +3108,26 @@ func TestConfirmedUserBindCodeDetectsDatabaseMismatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	state := app.telegramBindCodeState(code, user.UID, "user", now, true)
+	state := app.telegramLinkStatus(context.Background(), id, user.UID, "", "user", now)
 	if state.Status != "telegram_taken" || !state.Invalid || !state.Terminal || state.TelegramBound {
-		t.Fatalf("stale user bind code should not report bound, got %#v", state)
+		t.Fatalf("stale account link should not report bound, got %#v", state)
 	}
 }
 
 func TestTelegramUserBindWritesAuditLog(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().AuditLogEnabled = true
+	app.cfg().TelegramMode = true
+	app.cfg().TelegramBotToken = "123:ABC"
 	user, err := app.store().CreateUser(store.User{Username: "tg-audit", Role: store.RoleNormal, Active: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "AUDITBIND1", Scene: "user", UID: user.UID, CreatedAt: now, ExpiresAt: now + 300}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err := app.confirmBindCodeAtomic("AUDITBIND1", 919191, "audit_user", now); err != nil {
-		t.Fatal(err)
+	id := linkIDFor("auditbind")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "user", UID: user.UID, CreatedAt: now, ExpiresAt: now + 300})
+	if result := app.confirmTelegramLink(context.Background(), id, 919191, "audit_user"); !result.Success {
+		t.Fatalf("confirm: %+v", result)
 	}
 	logs := app.store().ListAuditLogs()
 	if len(logs) == 0 || logs[0].Action != "bind_telegram_via_telegram" || logs[0].Source != "telegram" || logs[0].TargetUID != user.UID {
@@ -3317,7 +3220,7 @@ func TestTelegramInlinePanelActionWritesAuditLog(t *testing.T) {
 	}
 }
 
-func TestRegisterWithTelegramBindCodeAllowsBootstrapAdminUIDOnlyConfig(t *testing.T) {
+func TestRegisterWithTelegramLinkAllowsBootstrapAdminUIDOnlyConfig(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
 	app.cfg().TelegramBotToken = "123:ABC"
@@ -3325,26 +3228,11 @@ func TestRegisterWithTelegramBindCodeAllowsBootstrapAdminUIDOnlyConfig(t *testin
 	app.cfg().AdminUIDs = []int64{1}
 	app.cfg().AdminUsernames = nil
 
-	codeResp := doJSONWithHeaders(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code", ``, nil, bindCodeCreateTestHeaders())
-	if codeResp.Code != http.StatusOK {
-		t.Fatalf("bind-code status=%d body=%s", codeResp.Code, codeResp.Body.String())
+	link := issueRegisterTelegramLink(t, app)
+	if result := app.confirmTelegramLink(context.Background(), link.Token, 777, "admin_tg"); !result.Success {
+		t.Fatalf("confirm: %+v", result)
 	}
-	var codeBody struct {
-		Data struct {
-			BindCode string `json:"bind_code"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(codeResp.Body.Bytes(), &codeBody); err != nil {
-		t.Fatal(err)
-	}
-	code := codeBody.Data.BindCode
-	confirmPayload := fmt.Sprintf(`{"code":%q,"telegram_id":777,"telegram_username":"admin_tg"}`, code)
-	confirmed := doLoopbackJSON(app, http.MethodPost, "/api/v1/users/me/telegram/bind-confirm", confirmPayload)
-	if confirmed.Code != http.StatusOK {
-		t.Fatalf("confirm status=%d body=%s", confirmed.Code, confirmed.Body.String())
-	}
-
-	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"bootstrap","password":"Admin123456","telegram_bind_code":%q}`, code), codeResp.Result().Cookies())
+	registered := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"bootstrap","password":"Admin123456","telegram_link_id":%q,"telegram_link_secret":%q}`, link.ID, link.Secret), nil)
 	if registered.Code != http.StatusCreated {
 		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
 	}
@@ -3354,130 +3242,32 @@ func TestRegisterWithTelegramBindCodeAllowsBootstrapAdminUIDOnlyConfig(t *testin
 	}
 }
 
-func TestRegisterRejectsUserSceneTelegramBindCode(t *testing.T) {
+func TestRegisterRejectsUserSceneTelegramLink(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().ForceBindTelegram = true
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "USERBIND1234", Scene: "user", UID: 99, Confirmed: true, TelegramID: 999, CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
-	}
-	resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"bob","password":"Bob123456","telegram_bind_code":"USERBIND1234"}`, nil)
+	id := linkIDFor("userbind")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "user", UID: 99, TelegramID: 999, CreatedAt: now, ExpiresAt: now + 600})
+	resp := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"bob","password":"Bob123456","telegram_link_id":%q,"telegram_link_secret":%q}`, id, id), nil)
 	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("register with user-scene bind code status=%d body=%s", resp.Code, resp.Body.String())
+		t.Fatalf("register with account-scene link status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	if _, ok := app.store().FindUserByUsername("bob"); ok {
-		t.Fatal("user was registered with a user-scene bind code")
+		t.Fatal("user was registered with an account-scene link")
 	}
 }
 
-func TestRegisterRejectsMalformedTelegramBindCodeBeforeLookup(t *testing.T) {
+func TestRegisterRejectsMalformedTelegramLinkBeforeLookup(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().ForceBindTelegram = true
-	resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"badbind","password":"badbind123A","telegram_bind_code":"../../bad"}`, nil)
+	resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"badbind","password":"badbind123A","telegram_link_id":"../../bad"}`, nil)
 	if resp.Code != http.StatusBadRequest || !strings.Contains(resp.Body.String(), `"error_code":"TG_BIND_CODE_FORMAT_INVALID"`) {
-		t.Fatalf("malformed bind code status=%d body=%s", resp.Code, resp.Body.String())
+		t.Fatalf("malformed link status=%d body=%s", resp.Code, resp.Body.String())
 	}
 
-	rr := doJSON(app, http.MethodGet, "/api/v1/users/telegram/register/bind-code/status?code=../../bad", ``, nil)
+	rr := doJSON(app, http.MethodGet, "/api/v1/users/telegram/register/link/zz000000000000000000000000000000/status", ``, nil)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"invalid":true`) || !strings.Contains(rr.Body.String(), `"terminal":true`) {
-		t.Fatalf("malformed bind code status endpoint response=%d body=%s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestBindCodeLongPollUsesHubNotifications(t *testing.T) {
-	app := newTestApp(t)
-	now := time.Now().Unix()
-	bind := store.BindCode{Code: "EVENT12", Scene: "register", CreatedAt: now, ExpiresAt: now + 60}
-	if err := app.upsertBindCode(bind); err != nil {
-		t.Fatal(err)
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/users/telegram/register/bind-code/status?code=EVENT12&wait=5", nil)
-	request.AddCookie(testTelegramCookies(bind.Code)[0])
-	response := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		app.handleBindCodeStatus(response, request, nil)
-		close(done)
-	}()
-
-	watchDeadline := time.Now().Add(time.Second)
-	for {
-		app.bindStatus.mu.Lock()
-		watching := len(app.bindStatus.watchers[bind.Code]) > 0
-		app.bindStatus.mu.Unlock()
-		if watching {
-			break
-		}
-		if time.Now().After(watchDeadline) {
-			t.Fatal("long poll did not subscribe to bind-status notifications")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	bind.Confirmed = true
-	bind.TelegramID = 777
-	if err := app.upsertBindCode(bind); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("long poll did not wake after bind-status notification")
-	}
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"confirmed":true`) {
-		t.Fatalf("long poll response=%d body=%s", response.Code, response.Body.String())
-	}
-	app.bindStatus.mu.Lock()
-	remainingWatchers := len(app.bindStatus.watchers[bind.Code])
-	app.bindStatus.mu.Unlock()
-	if remainingWatchers != 0 {
-		t.Fatalf("long poll leaked %d bind-status watchers", remainingWatchers)
-	}
-}
-
-// A valid signature does not bypass the existing loopback/proxy restrictions.
-func TestTelegramBindConfirmLoopbackOnly(t *testing.T) {
-	app := newTestApp(t)
-	app.cfg().BotInternalSecret = "test-bind-signing-key"
-	now := time.Now().Unix()
-	mustUpsert := func(code string) {
-		if err := app.upsertBindCode(store.BindCode{Code: code, Scene: "register", CreatedAt: now, ExpiresAt: now + 60}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	serve := func(remoteAddr string, headers map[string]string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/telegram/bind-confirm", strings.NewReader(`{"code":"LOOPBK12","telegram_id":42}`))
-		req.Header.Set("Content-Type", "application/json")
-		signTelegramBindRequest(req, []byte(`{"code":"LOOPBK12","telegram_id":42}`), app.telegramBindSigningKey(), time.Now())
-		if remoteAddr != "" {
-			req.RemoteAddr = remoteAddr
-		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		rr := httptest.NewRecorder()
-		app.ServeHTTP(rr, req)
-		return rr
-	}
-
-	// 外部 IP：拒绝。
-	if rr := serve("203.0.113.7:5555", nil); rr.Code != http.StatusForbidden {
-		t.Fatalf("external bind confirm = %d body=%s", rr.Code, rr.Body.String())
-	}
-	// 同机反代转进来的外部流量（回环对端 + XFF）：拒绝。
-	if rr := serve("127.0.0.1:6666", map[string]string{"X-Forwarded-For": "203.0.113.7"}); rr.Code != http.StatusForbidden {
-		t.Fatalf("proxied external bind confirm = %d body=%s", rr.Code, rr.Body.String())
-	}
-	// 独立 Bot 直连 127.0.0.1、无代理头：放行。
-	mustUpsert("LOOPBK12")
-	if rr := serve("127.0.0.1:7777", nil); rr.Code != http.StatusOK {
-		t.Fatalf("loopback internal bind confirm = %d body=%s", rr.Code, rr.Body.String())
-	}
-	// IPv6 回环同样视为内部。
-	mustUpsert("LOOPBK12")
-	if rr := serve("[::1]:8888", nil); rr.Code != http.StatusOK {
-		t.Fatalf("ipv6 loopback bind confirm = %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("malformed link status endpoint response=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -4269,16 +4059,14 @@ func TestTelegramBindRequirementSplitsGroupAndChannel(t *testing.T) {
 	app.cfg().TelegramAPIURL = tg.URL
 
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "GROUP1", Scene: "register", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
+	group := linkIDFor("group1")
+	app.seedTelegramLink(t, store.TelegramLink{ID: group, Scene: "register", CreatedAt: now, ExpiresAt: now + 600})
+	if result := app.confirmTelegramLink(context.Background(), group, 42, "tguser"); !result.Success {
+		t.Fatalf("confirm failed: %+v", result)
 	}
-	_, _, _, err := app.confirmBindCodeAtomic("GROUP1", 42, "tguser", now)
-	if err != nil {
-		t.Fatalf("confirm failed: %v", err)
-	}
-	bind, ok := app.bindCode("GROUP1")
-	if !ok || !bind.Confirmed {
-		t.Fatalf("group-only requirement should confirm bind code: %#v", bind)
+	link, ok := app.telegramLinkAlive(group)
+	if !ok || !link.Confirmed() {
+		t.Fatalf("group-only requirement should confirm link: %#v", link)
 	}
 	for _, req := range requests {
 		if req["_path"] == "/bot123:ABC/getChatMember" && asString(req["chat_id"]) == "@RequiredChannel" {
@@ -4287,13 +4075,12 @@ func TestTelegramBindRequirementSplitsGroupAndChannel(t *testing.T) {
 	}
 
 	app.cfg().TelegramForceBindChannel = true
-	if err := app.upsertBindCode(store.BindCode{Code: "CHAN01", Scene: "register", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
-	}
-	app.telegramConfirmBindCode(context.Background(), 42, 43, "tguser2", "CHAN01")
-	channelBind, ok := app.bindCode("CHAN01")
-	if !ok || channelBind.Confirmed {
-		t.Fatalf("channel requirement should reject user missing required channel: %#v", channelBind)
+	channel := linkIDFor("chan01")
+	app.seedTelegramLink(t, store.TelegramLink{ID: channel, Scene: "register", CreatedAt: now, ExpiresAt: now + 600})
+	app.telegramConfirmLinkFromChat(context.Background(), 42, 43, "tguser2", channel)
+	channelLink, ok := app.telegramLinkAlive(channel)
+	if !ok || channelLink.Confirmed() || channelLink.ErrorCode != string(ErrTGBindGroupMembershipRequired) || !channelLink.Retryable {
+		t.Fatalf("channel requirement should reject user missing required channel: %#v", channelLink)
 	}
 }
 
@@ -5947,10 +5734,9 @@ func TestRegisterCodeLimitHonorsTelegramTarget(t *testing.T) {
 	}
 
 	now := time.Now().Unix()
-	if err := app.upsertBindCode(store.BindCode{Code: "TGREG123456", Scene: "register", Confirmed: true, TelegramID: 424242, TelegramUsername: "target_tg", CreatedAt: now, ExpiresAt: now + 600}); err != nil {
-		t.Fatal(err)
-	}
-	created := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"tg-target","password":"User123456","reg_code":"TG-REGISTER","telegram_bind_code":"TGREG123456"}`, testTelegramCookies("TGREG123456"))
+	id := linkIDFor("tgreg")
+	app.seedTelegramLink(t, store.TelegramLink{ID: id, Scene: "register", TelegramID: 424242, TelegramUsername: "target_tg", CreatedAt: now, ExpiresAt: now + 600})
+	created := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":"tg-target","password":"User123456","reg_code":"TG-REGISTER","telegram_link_id":%q,"telegram_link_secret":%q}`, id, id), nil)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("telegram targeted register should succeed with matching bind, status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -7816,29 +7602,6 @@ func TestCleanupInvalidUsersDefaultsToDryRunAndRequiresConfirm(t *testing.T) {
 
 func doJSON(app *App, method, path, body string, cookies []*http.Cookie) *httptest.ResponseRecorder {
 	return doJSONWithHeaders(app, method, path, body, cookies, nil)
-}
-
-// doLoopbackJSON models an authenticated same-host Bot request.
-func doLoopbackJSON(app *App, method, path, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.RemoteAddr = "127.0.0.1:54321"
-	if app.telegramBindSigningKey() == "" {
-		app.cfg().BotInternalSecret = "test-bind-signing-key"
-	}
-	signTelegramBindRequest(req, []byte(body), app.telegramBindSigningKey(), time.Now())
-	rr := httptest.NewRecorder()
-	app.ServeHTTP(rr, req)
-	return rr
-}
-
-func bindCodeCreateTestHeaders() map[string]string {
-	return map[string]string{
-		"X-Twilight-Client": "webui",
-		"X-Twilight-Intent": "create-bind-code",
-	}
 }
 
 func doJSONWithHeaders(app *App, method, path, body string, cookies []*http.Cookie, headers map[string]string) *httptest.ResponseRecorder {

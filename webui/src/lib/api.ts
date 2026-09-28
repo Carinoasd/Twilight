@@ -130,8 +130,8 @@ import type {
   V2LoginByAPIKeyRequest,
   V2TelegramLoginRequest,
   V2TelegramLoginResponse,
-  V2CreateRegistrationBindCodeRequest,
-  V2CreateRegistrationBindCodeResponse,
+  TelegramLinkIssue,
+  TelegramLinkStatus,
   V2UserListParams,
   V2UserListResponse,
   V2UserDetailResponse,
@@ -164,10 +164,11 @@ import {
   normalizeUserTicketListItem,
 } from "./tickets";
 
-const BIND_CODE_CREATE_HEADERS = {
+const TELEGRAM_LINK_CREATE_HEADERS = {
   "X-Twilight-Client": "webui",
-  "X-Twilight-Intent": "create-bind-code",
+  "X-Twilight-Intent": "create-telegram-link",
 };
+const TELEGRAM_LINK_SECRET_HEADER = "X-Telegram-Link-Secret";
 
 const SETUP_COMPLETE_HEADERS = {
   "X-Twilight-Client": "webui",
@@ -615,96 +616,45 @@ class ApiClient {
     return this.request<TelegramStatus>("/telegram/status", { signal, cache: "no-store" }, { cacheRead: false, dedupe: false });
   }
 
-  async getBindCode() {
-    return this.getBindCodeV2();
-  }
-
-  async getBindCodeV2(signal?: AbortSignal) {
-    return this.request<{ bind_code: string; challenge_id: string; expires_in: number }>("/me/telegram/bind-code", {
-      headers: BIND_CODE_CREATE_HEADERS,
-      cache: "no-store",
-      signal,
-    }, { apiVersion: "v2" });
-  }
-
-  async getRegisterBindCode() {
-    return this.getRegisterBindCodeV2();
-  }
-
-  async getRegisterBindCodeV2(request?: V2CreateRegistrationBindCodeRequest, signal?: AbortSignal) {
-    return this.request<V2CreateRegistrationBindCodeResponse>("/registration/telegram/bind-code", {
+  /** 已登录用户签发 Telegram 绑定链接；已绑定账号返回 409 / TG_ALREADY_BOUND。 */
+  async createTelegramLink(signal?: AbortSignal) {
+    return this.request<TelegramLinkIssue>("/me/telegram/link", {
       method: "POST",
-      headers: BIND_CODE_CREATE_HEADERS,
+      headers: TELEGRAM_LINK_CREATE_HEADERS,
       cache: "no-store",
       signal,
-      body: request ? JSON.stringify(request) : undefined,
     }, { apiVersion: "v2" });
   }
 
-  async getRegisterBindCodeStatus(code: string, signal?: AbortSignal) {
-    const q = new URLSearchParams({ code }).toString();
-    // 后端约定：code 在 DB 不存在 / 已过期 / 已确认 都是 *终态*，
-    // 通过 data.terminal === true 表示；其中 invalid 区分"不存在/过期"和"已确认"。
-    // 这一端点不会再为业务无效抛 HTTP 404——上面的字段是唯一可信信号。
-    return apiRequest<{
-      code?: string;
-      status?: string;
-      error_code?: string;
-      message?: string;
-      confirmed?: boolean;
-      expires_in?: number;
-      invalid?: boolean;
-      terminal?: boolean;
-      telegram_bound?: boolean;
-      telegram_id?: number;
-      telegram_username?: string;
-    }>(
-      // V2 把公开注册流的绑定码状态收在 /registration 命名空间下
-      // （/api/v2/registration/telegram/bind-code/status）。/users/telegram/...
-      // 只剩 V1 形状，继续用它会在默认 v2 下恒定 404。
-      `/registration/telegram/bind-code/status?${q}`,
-      { signal, cache: "no-store" },
+  /** 注册场景签发 Telegram 绑定链接，响应额外带 link_secret。 */
+  async createRegisterTelegramLink(signal?: AbortSignal) {
+    return this.request<TelegramLinkIssue>("/registration/telegram/link", {
+      method: "POST",
+      headers: TELEGRAM_LINK_CREATE_HEADERS,
+      cache: "no-store",
+      signal,
+    }, { apiVersion: "v2" });
+  }
+
+  /**
+   * 注册场景查询绑定链接状态。secret 走请求头而不是 Cookie，因此与前后端是否
+   * 跨站无关。HTTP 200 + success=false 仍会携带终态 data，调用方必须处理。
+   */
+  async getRegisterTelegramLinkStatus(linkId: string, secret: string, signal?: AbortSignal) {
+    return apiRequest<TelegramLinkStatus>(
+      `/registration/telegram/link/${encodeURIComponent(linkId)}/status`,
+      { signal, cache: "no-store", headers: { [TELEGRAM_LINK_SECRET_HEADER]: secret } },
       { timeoutMs: 10_000, cacheRead: false, dedupe: false },
     );
   }
 
-  getRegisterBindCodeStatusWebSocketUrl(code: string) {
-    const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
-    // 版本号跟随 DEFAULT_API_VERSION，避免写死 v1：整站退回 v1 时这条
-    // WebSocket 还留在 v2，两个通道会指向不同后端契约。
-    const url = new URL(`/api/${DEFAULT_API_VERSION}/users/telegram/register/bind-code/ws`, base);
-    url.searchParams.set("code", code);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    return url.toString();
-  }
-
-  async getBindCodeStatus(code: string, signal?: AbortSignal) {
-    const q = new URLSearchParams({ code }).toString();
-    return apiRequest<{
-      code?: string;
-      status?: string;
-      error_code?: string;
-      message?: string;
-      confirmed?: boolean;
-      expires_in?: number;
-      invalid?: boolean;
-      terminal?: boolean;
-      telegram_bound?: boolean;
-      telegram_id?: number;
-      telegram_username?: string;
-    }>(
-      `/me/telegram/bind-code/status?${q}`,
+  /** 已登录用户查询自己签发的绑定链接状态。 */
+  async getTelegramLinkStatus(linkId: string, signal?: AbortSignal) {
+    return apiRequest<TelegramLinkStatus>(
+      `/me/telegram/link/${encodeURIComponent(linkId)}/status`,
       { signal, cache: "no-store" },
       { timeoutMs: 10_000, cacheRead: false, dedupe: false },
     );
-  }
-
-  getBindCodeStatusWebSocketUrl(code: string) {
-    const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
-    const url = new URL("/api/v2/me/telegram/bind-code/ws", base);
-    url.searchParams.set("code", code);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    return url.toString();
   }
 
   async getRegisterAvailability(signal?: AbortSignal) {

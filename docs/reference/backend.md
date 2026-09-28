@@ -355,12 +355,11 @@ govulncheck ./...
 
 更多本地开发与构建说明见 [开发指南](../guides/development.md)。
 
-### Telegram 认证挑战
+### Telegram 绑定链接
 
-`twilight_telegram_challenges` 是 API、Bot 共享的短期认证表；版本由 `twilight_telegram_challenge_schema` 管理。状态包含 pending、verified、consumed、cancelled，过期由 expires_at 判断。签发与确认使用主状态行在前、挑战行在后的锁顺序；仅注册/账号绑定修改主 JSONB，普通挑战状态读取不刷新整个 Store。新发码是 128 位随机令牌，表中仅存摘要；注册所有者为 HttpOnly 浏览器证明摘要，账号所有者为 UID。进程内 hub 只用于本地唤醒。
+`twilight_telegram_links` 是 API、Bot 共享的短期绑定表，首次启动自动建表并丢弃上一代 `twilight_telegram_challenges`。状态为 `pending → confirmed → consumed`，`cancelled` 表示被同一所有者的新链接取代，过期由 `expires_at` 判断（TTL 10 分钟）。表中只有摘要：`start_hash` 对应交给 Telegram 的 `start` 参数，`secret_hash` 对应注册场景的浏览器 secret；已登录场景以 `uid` 为所有者。签发与确认使用主状态行在前、链接行在后的锁顺序；只有账号绑定 / 注册会修改主 JSONB，状态读取不刷新整个 Store。没有进程内 hub、长轮询或 WebSocket：网页按 `poll_interval` 轮询，每次都从数据库读取，独立 Bot 进程的确认结果同样可见。
 
-升级 API、Bot、Scheduler 和 WebUI 需协调完成，连接同一个 PostgreSQL。旧内存码不会迁移，新挑战在 TTL 内跨重启有效。旧业务账号不需要重绑。逻辑导出不携带挑战，导入和快照恢复会清空目标现有挑战。用户绑定确认维持现有即时绑定语义；完整设计中的浏览器最终批准与通知 outbox 尚未引入。
-
+升级 API、Bot、Scheduler 和 WebUI 需协调完成，连接同一个 PostgreSQL。旧绑定码不会迁移，已绑定账号不需要重绑。逻辑导出不携带链接，导入和快照恢复会清空目标现有链接。
 
 ## 持久调度队列与配置编辑（第四批）
 

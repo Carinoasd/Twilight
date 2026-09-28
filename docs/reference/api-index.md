@@ -62,7 +62,7 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | POST | `/api/v2/auth/password/email/reset` | Public | 校验邮箱验证码并重置 Web 密码 |
 | POST | `/api/v2/registration` | Public | 创建 Web 账号；后端最终校验密码、注册码和 Telegram 绑定码 |
 | GET | `/api/v2/registration/availability` | Public | 返回注册开关、容量和用户名可用性摘要 |
-| POST | `/api/v2/registration/telegram/bind-code` | Public | 创建注册阶段 Telegram 绑定码；需要 WebUI intent 头 |
+| POST | `/api/v2/registration/telegram/link` | Public | 签发注册阶段 Telegram 绑定链接（deep link）；需 `X-Twilight-Intent: create-telegram-link`；响应含 `link_id`、`start_token`、`deep_link`、`manual_command`、`link_secret` |
 | GET | `/api/v2/dashboard/summary` | User | 聚合当前用户、公开能力和在线人数摘要；Emby 失败时通过 `viewers.available=false` 独立降级 |
 | GET | `/api/v2/settings` | User | 当前用户设置、Telegram/Emby 状态和密码安全策略；私有 `no-store` |
 | PUT | `/api/v2/settings/preferences` | User | 更新通知、自动续期和密码安全偏好；仅接受严格 JSON 布尔值 |
@@ -185,10 +185,8 @@ V2 业务模块迁移采用兼容 adapter；未列入 V2 的接口仍使用 `/ap
 | POST | `/api/v1/users/register` | Public | 注册系统账号 |
 | GET | `/api/v1/users/check-available` | Public | 注册可用性检查（用户名等） |
 | GET | `/api/v1/users/regcode/check` | Public | 预检注册码/续期码/卡码 |
-| GET | `/api/v1/users/telegram/register/bind-code` | Public | 生成注册用 Telegram 绑定码（需 `X-Twilight-Intent: create-bind-code`） |
-| GET | `/api/v1/users/telegram/register/bind-code/status` | Public | 查询注册用 Telegram 绑定码状态 |
-| GET | `/api/v1/users/telegram/register/bind-code/ws` | Public | WebSocket 订阅注册用 Telegram 绑定码状态 |
-| POST | `/api/v1/users/me/telegram/bind-confirm` | Public | 确认 Telegram 绑定（安全确认流程） |
+| POST | `/api/v1/users/telegram/register/link` | Public | 签发注册用 Telegram 绑定链接（需 `X-Twilight-Intent: create-telegram-link`） |
+| GET | `/api/v1/users/telegram/register/link/{id}/status` | Public | 查询注册用绑定链接状态；需 `X-Telegram-Link-Secret` 头 |
 | GET | `/api/v1/users/register/emby/status` | Public | 查询 Emby 注册队列状态 |
 | GET | `/api/v1/users/me` | User | 当前用户资料 |
 | PUT | `/api/v1/users/me` | User | 更新当前用户资料 |
@@ -212,9 +210,8 @@ V2 业务模块迁移采用兼容 adapter；未列入 V2 的接口仍使用 `/ap
 | GET | `/api/v1/users/me/telegram` | User | Telegram 绑定状态 |
 | POST | `/api/v1/users/me/telegram/rebind-request` | User | 提交 Telegram 换绑申请 |
 | POST | `/api/v1/users/me/telegram/unbind` | User | 解绑 Telegram |
-| GET | `/api/v1/users/me/telegram/bind-code` | User | 生成登录用户的 Telegram 绑定码（需 `X-Twilight-Intent: create-bind-code`） |
-| GET | `/api/v1/users/me/telegram/bind-code/status` | User | 获取换绑码状态 |
-| GET | `/api/v1/users/me/telegram/bind-code/ws` | User | WebSocket 监听换绑码完成事件 |
+| POST | `/api/v1/users/me/telegram/link` | User | 签发登录用户的 Telegram 绑定链接（需 `X-Twilight-Intent: create-telegram-link`） |
+| GET | `/api/v1/users/me/telegram/link/{id}/status` | User | 查询自己签发的绑定链接状态 |
 | POST | `/api/v1/users/me/telegram/rebind-complete` | User | 完成 Telegram 换绑流程 |
 | GET | `/api/v1/users/me/settings` | User | 当前用户设置聚合 |
 | GET | `/api/v1/users/me/announcements` | User | 我的公告列表（已读/未读状态） |
@@ -722,8 +719,6 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | GET | `/api/v2/apikey/emby/status` | API Key | Emby 状态 |
 | POST | `/api/v2/apikey/emby/kick` | API Key | 将账号踢下线 |
 | POST | `/api/v2/apikey/use-code` | API Key | 使用卡码 / 注册码 |
-| GET | `/api/v2/users/telegram/register/bind-code/ws` | Public | 注册流程绑定码 WebSocket |
-| GET | `/api/v2/me/telegram/bind-code/ws` | User | 账户页绑定码 WebSocket |
 | GET | `/api/v2/me/announcements` | User | 个人公告态（含强制已读标记） |
 | GET | `/api/v2/invite/codes`、`/api/v2/invite/me` | User | 我的邀请码与邀请概览 |
 | GET | `/api/v2/bangumi/me`、`/bangumi/sync/status`、`/bangumi/sync/history` | User | Bangumi 个人视图与同步历史 |
@@ -788,7 +783,8 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | 方法 | 路径 | 鉴权 | 说明 |
 | ---- | ---- | ---- | ---- |
 | GET | `/api/v2/me/sessions` | User | 当前用户的 Emby 播放会话；只保留 `UserId` 等于本人 `EmbyID` 的会话，未绑定即返回空列表，不泄露他人信息 |
-| GET | `/api/v2/me/telegram/bind-code/status` | User | 查自己发起的绑定码状态：`code` 填观察 ID，`wait` 为可选长轮询秒数（0–60，单次最多等待 2 秒）。带 UID 校验，只能查自己的 |
+| POST | `/api/v2/me/telegram/link` | User | 签发登录用户的 Telegram 绑定链接；已绑定返回 409 / `TG_ALREADY_BOUND`；需 `X-Twilight-Intent: create-telegram-link` |
+| GET | `/api/v2/me/telegram/link/{id}/status` | User | 查自己签发的绑定链接状态。带 UID 校验，只能查自己的；没有长轮询，前端按 `poll_interval` 轮询 |
 | POST | `/api/v2/me/telegram/rebind-complete` | User | 结束自己的 Telegram 换绑流程：校验新账号已加入要求的群组/频道，未加入返回 403 `TG_BIND_GROUP_CHECK_FAILED` 并保持换绑中 |
 | POST | `/api/v2/me/use-code` | User | 使用注册码/续期码/邀请码：`code`（或 `reg_code`）必填，`check_only` 为 true 时只预览不消费，`emby_username` 可选。要求邮箱已验证，限流 10 次/分钟 |
 | GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}` <!-- 待确认 --> |
@@ -807,8 +803,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | ---- | ---- | ---- | ---- |
 | GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列 <!-- 待确认 --> |
 | GET | `/api/v2/registration/regcode/check` | Public | 注册前校验注册码，按 IP 限流 10 次/分钟。**诱饵码与定向码（指名用户名/Telegram/TargetUID）一律按 404 处理**，避免枚举；命中返回 `type`、`type_name`、`days`、`valid` |
-| GET | `/api/v2/registration/telegram/bind-code/status` | Public | 注册场景查持久化挑战状态：`code` 填观察 ID，必须携带签发 Cookie；`wait` 接受 0–60，单次最多等 2 秒后读库。503 不作为过期处理 |
-| POST | `/api/v2/registration/telegram/bind-confirm` | Public | 同机 Bot 进程确认绑定码。**免登录，但只接受回环直连**：`RemoteAddr` 须是回环 IP，且不得携带 `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` / `Forwarded` 任一转发头（经反代进来的外部流量一律 403）。含幂等重放保护与加群校验 |
+| GET | `/api/v2/registration/telegram/link/{id}/status` | Public | 注册场景查绑定链接状态：必须携带签发时返回的 `X-Telegram-Link-Secret` 头，否则一律 `not_found`。503 不作为过期处理 |
 | GET | `/api/v2/signin/config` | Public | 签到公开规则：`enabled`、`currency_name`、`daily_min`、`daily_max`、`streak_bonus_enabled`、`bonus_table`、`reset_after_miss`、`renewal`。与 `/system/config` 的 `signin` 字段同源 |
 | GET | `/api/v2/signin/history` | User | 自己的签到历史：`limit` 默认 30（>365 时回退 30），返回 `records[]` 与 `currency_name` |
 | GET | `/api/v2/system/config` | User | 前端渲染开关的**聚合配置投影**（`upload_limit`、各功能 `enabled`、`device_limit`、`signin`、`invite`、`email` 等）。刻意不返回监听地址/端口、`state_file`、`upload_dir`、Emby URL 与 Token、Postgres/Redis DSN、Bot Token、`BotInternalSecret`、Webhook Secret、TMDB API Key、Bangumi Token 等任何凭据 |

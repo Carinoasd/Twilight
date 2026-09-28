@@ -1,11 +1,5 @@
 package store
 
-import (
-	"context"
-	"database/sql"
-	"time"
-)
-
 // createRegistrationUserLocked mutates only the caller's transaction snapshot.
 // It must never call another Store method or perform external I/O.
 func (s *Store) createRegistrationUserLocked(u User, regCode string, bind BindCode, now int64, fn func(*User, RegCode, BindCode) error) (User, RegCode, error) {
@@ -61,42 +55,4 @@ func (s *Store) createRegistrationUserLocked(u User, regCode string, bind BindCo
 	s.state.Users[u.UID] = u
 	s.maintainUserIndexes(User{}, u, u.UID)
 	return u, consumed, nil
-}
-
-// RegisterWithTelegramChallenge commits account creation, registration grant,
-// identity history and single-use challenge consumption in one transaction.
-func (s *Store) RegisterWithTelegramChallenge(ctx context.Context, u User, regCode, key, ownerHash string, fn func(*User, RegCode, BindCode) error) (User, RegCode, BindCode, error) {
-	var created User
-	var consumed RegCode
-	var bind BindCode
-	err := s.withTelegramChallengeState(ctx, func(ctx context.Context, tx *sql.Tx) (bool, error) {
-		c, err := challengeInTx(ctx, tx, key)
-		if err != nil {
-			return false, err
-		}
-		if !c.OwnedBy(0, ownerHash) {
-			return false, ErrTelegramChallengeOwner
-		}
-		now := time.Now().Unix()
-		if c.ExpiresAt <= now {
-			return false, ErrExpired
-		}
-		bind = c.BindCode
-		if c.State != "verified" {
-			return false, ErrConflict
-		}
-		created, consumed, err = s.createRegistrationUserLocked(u, regCode, bind, now, fn)
-		if err != nil {
-			return false, err
-		}
-		if err = recordTelegramIdentity(ctx, tx, created.UID, c.TelegramID, c.TelegramUsername, "register"); err != nil {
-			return false, err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE twilight_telegram_challenges SET state='consumed', consumed_at=$2, result_uid=$3, revision=revision+1 WHERE id=$1`, c.ID, now, created.UID)
-		return true, err
-	})
-	if err != nil {
-		return User{}, RegCode{}, bind, err
-	}
-	return created, consumed, bind, nil
 }

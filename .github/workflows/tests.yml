@@ -181,8 +181,8 @@ jobs:
     - name: Type check
       run: pnpm typecheck
 
-    - name: Test Telegram binding status lifecycle
-      run: pnpm test:bind-code-status
+    - name: Test Telegram link status lifecycle
+      run: pnpm test:telegram-link-status
 
     - name: Lint
       run: pnpm lint

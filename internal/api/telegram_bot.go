@@ -1,14 +1,10 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"go.uber.org/zap"
-	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,8 +12,6 @@ import (
 
 	"github.com/prejudice-studio/twilight/internal/store"
 )
-
-var telegramBindCodePattern = regexp.MustCompile(`^[A-Za-z0-9]{6,64}$`)
 
 const (
 	telegramBotConfigCheckInterval = time.Second
@@ -277,8 +271,9 @@ func (a *App) handleTelegramUpdate(ctx context.Context, update *telegramUpdate) 
 		return
 	}
 	if !isCommand {
-		if privateChat && telegramBindCodePattern.MatchString(text) {
-			a.telegramConfirmBindCode(ctx, chatID, fromID, username, text)
+		// 私聊里直接粘贴签发的 32 位 token 也能完成绑定；其它闲聊文本不响应。
+		if privateChat && telegramLinkIDPattern.MatchString(text) {
+			a.telegramConfirmLinkFromChat(ctx, chatID, fromID, username, text)
 		}
 		return
 	}
@@ -304,6 +299,11 @@ func (a *App) handleTelegramUpdate(ctx context.Context, update *telegramUpdate) 
 			return
 		}
 		if command == "/start" {
+			// deep link：t.me/<bot>?start=<token> 会以 "/start <token>" 送达。
+			if len(args) > 0 && telegramLinkTokenPattern.MatchString(args[0]) {
+				a.telegramConfirmLinkFromChat(ctx, chatID, fromID, username, args[0])
+				return
+			}
 			_ = a.telegramSendMessage(ctx, chatID, a.telegramStartText())
 			return
 		}
@@ -362,35 +362,6 @@ func (a *App) observeTelegramRoster(update *telegramUpdate) {
 // 无谓写盘；用户名为空（对方删了 @username）时保留旧值不清空，以免破坏指名码匹配。
 func (a *App) refreshTelegramUsername(telegramID int64, rawUsername string) {
 	_, _, _ = a.store().UpdateTelegramUsernameIfBound(telegramID, rawUsername)
-}
-
-func (a *App) telegramConfirmBindCode(ctx context.Context, chatID, telegramID int64, username, code string) {
-	result := a.confirmTelegramChallenge(ctx, normalizeBindStatusCode(code), telegramID, username)
-	_ = a.telegramSendMessage(ctx, chatID, telegramBindResultMessage(result))
-}
-
-func (a *App) confirmBindCodeViaHTTP(ctx context.Context, chatID int64, code string, telegramID int64, username string) {
-	port := a.cfg().Port
-	if port <= 0 {
-		port = 5000
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/users/me/telegram/bind-confirm", port)
-	reqBody := map[string]any{"code": code, "telegram_id": telegramID, "telegram_username": username}
-	b, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
-	if err != nil {
-		_ = a.telegramSendMessage(ctx, chatID, "绑定请求异常，请稍后重试。")
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	signTelegramBindRequest(req, b, a.telegramBindSigningKey(), time.Now())
-	resp, err := requestTelegramBindConfirmation(req)
-	if err != nil {
-		zap.L().Warn("telegram binding confirmation unavailable", zap.Int("http_status", resp.Code), zap.Error(err))
-		_ = a.telegramSendMessage(ctx, chatID, "绑定请求异常，请稍后重试。若问题持续，请联系管理员。")
-		return
-	}
-	_ = a.telegramSendMessage(ctx, chatID, telegramBindResultMessage(resp))
 }
 
 func (a *App) telegramHandleMe(ctx context.Context, chatID, telegramID int64) {
@@ -1001,7 +972,7 @@ func (a *App) telegramBindPrompt() string {
 	if text := strings.TrimSpace(a.cfg().TelegramBotBindPromptText); text != "" {
 		return a.telegramRenderText(text)
 	}
-	return "请发送 /bind <绑定码>。绑定码需要先在 Web 端生成，有效期较短。"
+	return "请在网页点击「在 Telegram 中绑定」打开链接；或发送 /bind <绑定令牌>。链接需要先在 Web 端生成，有效期较短。"
 }
 
 func (a *App) telegramHelpText(admin bool) string {

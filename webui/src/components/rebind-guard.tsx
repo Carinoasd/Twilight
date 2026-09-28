@@ -2,15 +2,16 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Copy, Bot, Check, AlertCircle } from "lucide-react";
+import { Loader2, Copy, Bot, Check, AlertCircle, Send } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { useBindCodeStatus } from "@/hooks/use-bind-code-status";
+import { useTelegramLinkStatus } from "@/hooks/use-telegram-link-status";
 import { useAuthStore } from "@/store/auth";
 import { useSystemStore } from "@/store/system";
 import { useI18n } from "@/lib/i18n";
 import { api } from "@/lib/api";
+import type { TelegramLinkIssue } from "@/lib/api-types-v2";
 import { telegramBotUrl } from "@/lib/safe-url";
 
 export default function RebindGuard() {
@@ -19,9 +20,7 @@ export default function RebindGuard() {
   const router = useRouter();
   const { user, fetchUser } = useAuthStore();
   const { info: systemInfo } = useSystemStore();
-  const [bindCode, setBindCode] = useState<string | null>(null);
-  const [challengeId, setChallengeId] = useState("");
-  const [bindCodeExpiry, setBindCodeExpiry] = useState(0);
+  const [telegramLink, setTelegramLink] = useState<TelegramLinkIssue | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isBound, setIsBound] = useState(false);
   const completeRef = useRef(false);
@@ -43,35 +42,33 @@ export default function RebindGuard() {
     }
   }, [fetchUser, router]);
 
-  // 统一的绑定码状态轮询：带超时中断 + 请求中断，绑定成功即收尾换绑。
-  useBindCodeStatus({
-    code: bindCode ? challengeId : null,
+  // 统一的绑定链接状态轮询：带超时中断 + 请求中断，绑定成功即收尾换绑。
+  useTelegramLinkStatus({
+    linkId: telegramLink?.link_id ?? null,
     scene: "user",
-    expiresIn: bindCodeExpiry,
-    enabled: Boolean(bindCode) && !isBound,
+    expiresIn: telegramLink?.expires_in,
+    enabled: Boolean(telegramLink) && !isBound,
     onBound: () => {
       setIsBound(true);
       setTimeout(() => void completeRebind(), 1500);
     },
     onTerminalError: (data) => {
-      setBindCode(null);
+      setTelegramLink(null);
       toast({ title: t("settings.getBindCodeFailed"), description: data.message, variant: "destructive" });
     },
     onTimeout: () => {
-      setBindCode(null);
+      setTelegramLink(null);
       toast({ title: t("settings.getBindCodeFailed"), description: t("settings.retryBindCode"), variant: "destructive" });
     },
   });
 
   const handleGetBindCode = async () => {
     setIsLoading(true);
-    setBindCode(null);
+    setTelegramLink(null);
     try {
-      const res = await api.getBindCode();
-      if (res.success && res.data?.bind_code) {
-        setBindCode(res.data.bind_code);
-        setChallengeId(res.data.challenge_id);
-        setBindCodeExpiry(res.data.expires_in);
+      const res = await api.createTelegramLink();
+      if (res.success && res.data?.link_id) {
+        setTelegramLink(res.data);
         toast({
           title: t("settings.bindCodeGenerated"),
           variant: "success",
@@ -94,7 +91,7 @@ export default function RebindGuard() {
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
               {isBound ? (
                 <Check className="h-7 w-7 text-emerald-500" />
-              ) : bindCode ? (
+              ) : telegramLink ? (
                 <Loader2 className="h-7 w-7 animate-spin text-primary" />
               ) : (
                 <Bot className="h-7 w-7 text-primary" />
@@ -110,7 +107,7 @@ export default function RebindGuard() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {!isBound && !bindCode && (
+            {!isBound && !telegramLink && (
               <div className="text-center space-y-3">
                 <p className="text-sm text-muted-foreground">
                   {t("settings.rebindInstructions")}
@@ -131,14 +128,22 @@ export default function RebindGuard() {
               </div>
             )}
 
-            {bindCode && !isBound && (
+            {telegramLink && !isBound && (
               <div className="space-y-3">
+                {telegramLink.deep_link && (
+                  <Button className="w-full" size="lg" asChild>
+                    <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">
+                      <Send className="mr-2 h-5 w-5" />
+                      {t("settings.openTelegramLink", { username: telegramLink.bot_username })}
+                    </a>
+                  </Button>
+                )}
                 <div className="rounded-lg bg-primary/5 p-4 text-center">
                   <p className="text-sm text-muted-foreground mb-2">
-                    {t("settings.sendBindWithin", { minutes: Math.floor(bindCodeExpiry / 60), bot: botUsername ? `@${botUsername}` : "Telegram Bot" })}
+                    {t("settings.sendBindWithin", { minutes: Math.floor((telegramLink.expires_in ?? 0) / 60), bot: telegramLink.bot_username ? `@${telegramLink.bot_username}` : botUsername ? `@${botUsername}` : "Telegram Bot" })}
                   </p>
-                  <code className="block min-w-0 max-w-full break-all font-mono text-base font-semibold tracking-wide text-primary">
-                    {bindCode}
+                  <code className="block min-w-0 max-w-full break-all font-mono text-sm font-semibold tracking-wide text-primary">
+                    {telegramLink.manual_command}
                   </code>
                 </div>
 
@@ -147,14 +152,14 @@ export default function RebindGuard() {
                     variant="outline"
                     className="flex-1"
                     onClick={() => {
-                      navigator.clipboard.writeText(`/bind ${bindCode}`);
+                      navigator.clipboard.writeText(telegramLink.manual_command);
                       toast({ title: t("settings.copyCommand"), variant: "success" });
                     }}
                   >
                     <Copy className="mr-2 h-4 w-4" />
                     {t("settings.copyCommand")}
                   </Button>
-                  {botUrl && (
+                  {botUrl && !telegramLink.deep_link && (
                     <Button variant="outline" className="flex-1" asChild>
                       <a href={botUrl} target="_blank" rel="noopener noreferrer">
                         <Bot className="mr-2 h-4 w-4" />
@@ -173,7 +178,7 @@ export default function RebindGuard() {
                   variant="ghost"
                   className="w-full text-xs"
                   onClick={() => {
-                    setBindCode(null);
+                    setTelegramLink(null);
                   }}
                 >
                   {t("settings.retryBindCode")}

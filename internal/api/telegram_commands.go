@@ -167,7 +167,7 @@ var telegramCommandRegistry = map[string]telegramCommandSpec{
 		name:        "bind",
 		label:       "/bind",
 		description: "绑定 Telegram 账号到 Web 账户",
-		usage:       "/bind <绑定码>",
+		usage:       "/bind <绑定令牌>",
 		category:    "user",
 		order:       10,
 		private:     true,
@@ -177,11 +177,11 @@ var telegramCommandRegistry = map[string]telegramCommandSpec{
 				return
 			}
 			code := c.Args[0]
-			if !telegramBindCodePattern.MatchString(code) {
-				_ = a.telegramSendMessage(ctx, c.ChatID, "绑定码格式无效，请在网页重新获取后发送。\n\n示例：/bind ABC123")
+			if !telegramLinkTokenPattern.MatchString(code) {
+				_ = a.telegramSendMessage(ctx, c.ChatID, "绑定令牌格式无效，请在网页重新获取后发送，或直接点击网页上的 Telegram 绑定链接。")
 				return
 			}
-			a.telegramConfirmBindCode(ctx, c.ChatID, c.FromID, c.Username, code)
+			a.telegramConfirmLinkFromChat(ctx, c.ChatID, c.FromID, c.Username, code)
 		},
 	},
 	"/about": {

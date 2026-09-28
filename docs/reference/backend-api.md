@@ -150,7 +150,7 @@ GET /api/v1/apikey/status?apikey=<api_key>
 
 Cookie 鉴权的变更类请求（`POST` / `PUT` / `DELETE`）不要求 CSRF 令牌，也不做额外来源校验。后端只校验有效登录会话、Bearer Token 或 API Key。
 
-`X-Twilight-Client: webui` 仅作为前端请求识别与 CORS 允许头保留，不参与鉴权。少数有副作用的 `GET`（例如绑定码创建）还要求 `X-Twilight-Intent: create-bind-code` 显式声明操作意图，用于拦截浏览器预取、链接探测或代理误触发。
+`X-Twilight-Client: webui` 仅作为前端请求识别与 CORS 允许头保留，不参与鉴权。绑定链接签发还要求 `X-Twilight-Intent: create-telegram-link` 显式声明操作意图，用于拦截浏览器预取、链接探测或代理误触发。
 
 双子域部署时，如需两个子域都能携带同一登录会话，应设置 `session_cookie_domain` 让前端站点与 API 站点共享 `HttpOnly` session cookie。CORS 留空或 `*` 时会反射合法 Origin；填写 `cors_origins` 后仅允许列表内 Origin。WebUI 登录态以浏览器请求 `/users/me` 的后端响应为准；`/users/me` 与 `/auth/me` 不应被浏览器、代理或前端请求层缓存/合流，登录和登出后必须重新确认当前用户，避免多账号切换时旧响应覆盖新会话。
 
@@ -268,10 +268,9 @@ JSON 请求体只能包含一个 JSON 值，值后只允许空白字符与 EOF�
 | `POST /api/v2/registration` | `POST /users/register` | IP | 5 / 10 分钟 | 防批量注册 |
 | `GET /api/v2/registration/availability` | `GET /users/check-available` | IP | 60 / 60 秒 | 防扫描可用用户名 |
 | `GET /api/v2/registration/emby/queue-status` | `GET /users/register/emby/status` | request_id + IP | 60/60s + 240/60s | Emby 注册队列轮询 |
-| `POST /api/v2/registration/telegram/bind-code` | `GET /users/telegram/register/bind-code` | IP | 5 / 10 分钟 | 生成注册绑定码；需 `X-Twilight-Intent: create-bind-code` |
-| `GET /api/v2/registration/telegram/bind-code/status` | `GET /users/telegram/register/bind-code/status` | code + IP | PostgreSQL 状态；需浏览器证明；wait 最多等待 2 秒 | WebUI 使用可取消、可见性感知轮询；HTTP 200 的 `success=false` 响应仍可能包含终态 data，必须处理 |
-| `GET /api/v2/users/telegram/register/bind-code/ws` | `GET /users/telegram/register/bind-code/ws` | IP | 30/min 或登录限流配置较大者 | WebSocket 订阅注册绑定码状态 |
-| `GET /api/v2/me/telegram/bind-code` | `GET /users/me/telegram/bind-code` | UID | 5 / 10 分钟 | 尚未绑定的已登录用户生成 TG 绑定码；已绑定返回 409 / `TG_ALREADY_BOUND`；需 `X-Twilight-Intent: create-bind-code` |
+| `POST /api/v2/registration/telegram/link` | `POST /users/telegram/register/link` | IP | 5 / 10 分钟 | 签发注册绑定链接；需 `X-Twilight-Intent: create-telegram-link` |
+| `GET /api/v2/registration/telegram/link/{id}/status` | `GET /users/telegram/register/link/{id}/status` | 全局限流 | 每次读取 PostgreSQL；需 `X-Telegram-Link-Secret` 头 | WebUI 按 `poll_interval` 做可取消、可见性感知轮询；HTTP 200 的 `success=false` 响应仍可能包含终态 data，必须处理 |
+| `POST /api/v2/me/telegram/link` | `POST /users/me/telegram/link` | UID | 登录限流（每分钟） | 尚未绑定的已登录用户签发绑定链接；已绑定返回 409 / `TG_ALREADY_BOUND`；需 `X-Twilight-Intent: create-telegram-link` |
 | `POST /api/v2/telegram/unbind` | `POST /users/me/telegram/unbind` | UID | 5 / 10 分钟 | 防恶意频繁解绑 |
 | `POST /api/v2/telegram/rebind-request` | `POST /users/me/telegram/rebind-request` | UID | 3 / 1 小时 | 换绑申请会进管理员队列，从严限制 |
 | `GET /api/v2/registration/regcode/check` | `GET /users/regcode/check` | IP | 10 / 60 秒 | 防注册码枚举 |
@@ -283,269 +282,35 @@ JSON 请求体只能包含一个 JSON 值，值后只允许空白字符与 EOF�
 
 > 限速命中只写日志告警，不会写入安全日志 / 登录历史。
 
-#### Telegram 注册绑定码状态通道
+#### Telegram 注册绑定链接
 
-注册、设置和换绑页统一使用可取消、页面可见性感知的状态轮询，间隔 2.5 秒。查询参数 `code` 传签发响应的 `challenge_id`；注册场景必须携带签发时的 HttpOnly Cookie，登录用户场景必须属于当前 UID。无权限返回通用不存在状态，不泄露 Telegram 身份。
+`POST /users/telegram/register/link` — 签发注册阶段的 Telegram 绑定链接（公开，IP 限流 5/10 分钟）。调用方必须带 `X-Twilight-Client: webui` 与 `X-Twilight-Intent: create-telegram-link`，后端会拒绝预取请求。
 
-挑战持久化于 PostgreSQL，API/Bot 分进程共享，重启不会改变 TTL。可选 `wait` 参数仍接受 0–60，但单次等待最多 2 秒后重新读库，以发现另一进程的提交；旧 WebSocket 通道仅作兼容，并在握手前校验格式和归属。数据库故障返回 503，客户端继续重试至总截止时间。
-
-## 4. 模块总览
-
-> 完整端点列表见 [API 路由索引](../reference/api-index.md)。本节只保留模块边界和维护口径。
-
-| 模块 | 路径前缀 | 说明 |
-| ---- | -------- | ---- |
-| Auth | `/auth` | 登录、登出、会话、Token 刷新、登录端 API Key 管理 |
-| Users | `/users` | 注册、个人信息、密码、Emby 绑定、续期、设备、Telegram、头像背景、个人 API Key |
-| Media | `/media` | TMDB/Bangumi 搜索、求片、库存检查 |
-| Emby | `/emby` | Emby 账号状态、库、搜索、会话、Bangumi Webhook |
-| Admin | `/admin` | 管理用户、Emby 同步、注册码、广播、定时任务、邀请树、公告、Telegram 管理 |
-| System | `/system` | 健康、系统信息、配置、运行时状态/日志、数据库、自动更新、路由列表 |
-| API Key | `/apikey` | 外部系统专用 API Key 接口 |
-| Security | `/security` | 设备、登录历史、IP 黑名单、可疑行为 |
-| Batch | `/batch` | 批量用户操作、导出 |
-| Invite / Signin / Announcements | `/invite` `/signin` `/announcements` | 邀请树、签到（装饰性）、公告 |
-
-### 4.1 命名与归属约定
-
-| 场景 | 约定 |
-| ---- | ---- |
-| 当前登录用户 | 使用 `/users/me/*`，不要新增 `/user/current/*` 一类别名 |
-| 管理用户 | 使用 `/admin/users/*` |
-| 系统配置管理 | 使用 `/system/admin/config/*` |
-| 定时任务管理 | 使用 `/admin/scheduler/*` |
-| 用户可见系统信息 | 使用 `/system/info` 或 `/system/config` |
-| Emby 线路下发 | 只使用 `/system/emby-urls`，按登录用户角色和 Emby 绑定状态判断 |
-| 上传头像/背景读取 | 只使用 `/users/assets/{avatar|background}/{filename}` |
-| 外部系统 API Key 调用 | 使用 `/apikey/*`，不混用登录 Token |
-| 废弃接口 | 保留时返回明确错误和替代路径，例如 `/emby/urls` 返回 410 |
-
-## 5. Auth 模块
-
-### 5.1 登录
-
-`POST /auth/login`
-
-- 说明：用户名/密码登录
-- 认证：公开（`AuthPublic`）
-- 请求头：`Content-Type: application/json`
-- 请求体：
+签发返回：
 
 ```json
 {
-  "username": "user123",
-  "password": "strongpassword"
+  "link_id": "<32 位十六进制资源 ID>",
+  "start_token": "<32 位十六进制 token>",
+  "deep_link": "https://t.me/<bot>?start=<start_token>",
+  "bot_username": "<bot>",
+  "manual_command": "/bind <start_token>",
+  "link_secret": "<64 位十六进制浏览器 secret，仅注册场景>",
+  "expires_in": 600,
+  "poll_interval": 3
 }
 ```
 
-- 示例 cURL：
+- `deep_link` 交给用户在 Telegram 中打开，Bot 会收到 `/start <start_token>` 并完成确认；Bot 身份暂不可用（getMe 失败）时为空串，前端退回展示 `manual_command`。
+- `link_id` 只是观察句柄，不能向 Bot 确认；`start_token` 只交给 Telegram，不能用来查询状态。
+- `link_secret` 是注册场景的所有权凭据：状态查询放在 `X-Telegram-Link-Secret` 请求头，注册提交放在 `telegram_link_secret` 字段。它不是 Cookie，因此与前后端是否跨站无关；数据库只保存摘要。已登录场景没有 secret，链接直接归属当前 UID。
+- 同一浏览器（同一 secret）或同一账号重新签发会取消之前尚未消费的链接。
 
-```bash
-curl -X POST "http://localhost:5000/api/v1/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"user123","password":"strongpassword"}'
-```
+`GET /users/telegram/register/link/{id}/status` — 查询注册绑定链接状态。产品前端使用 `GET /api/v2/registration/telegram/link/{id}/status`，两者都要求 `X-Telegram-Link-Secret` 头；缺失或不匹配一律返回 `not_found`，不泄露身份。
 
-### 5.2 Emby 找回 Web 密码
+状态响应包含 `link_id`、`status`、`confirmed`、`terminal`、`invalid`、`retryable`、`expires_in`、`telegram_id`、`telegram_username`、`message`、`poll_interval`。`status` 取值：`pending`、`confirmed`、`consumed`、`expired`、`cancelled`、`telegram_taken`、`not_found`、`invalid_format`、`wrong_scene`。终态失败以 HTTP 200 + `success=false` 返回并附带 data；临时的加群 / 上游校验失败仍为 `pending`、`terminal=false`、`retryable=true`，用户处理后在 Telegram 里重试即可；数据库不可用返回 503，不作为过期处理。
 
-`POST /auth/forgot-password/emby`
-
-- 说明：用 Emby 账号密码校验身份后重置 Web 密码，新密码只返回一次。
-- 认证：公开（`AuthPublic`）
-- 限流：IP + Emby 用户名双维度（见限流表）。
-- 请求头：`Content-Type: application/json`
-
-### 5.3 Telegram 直接登录（已禁用）
-
-`POST /auth/login/telegram`
-
-- 说明：固定返回"直接登录不可用"。Telegram 仅用于绑定，不作为登录入口。
-- 认证：公开（`AuthPublic`）
-
-### 5.4 API Key 登录（已禁用会话兑换）
-
-`POST /auth/login/apikey`
-
-- 说明：V1/V2 保留此兼容入口，但有效且所属账号启用的 API Key 返回 HTTP 403 + `API_KEY_PERMISSION_DENIED`，不会签发会话或 Cookie。无效、禁用或到期的 Key 仍返回 HTTP 401。API Key 仅用于 `/apikey/*` 权限受限接口；网页登录请使用用户名/邮箱和密码。
-- 认证：公开（`AuthPublic`）
-
-此限制同样适用于管理员的 Key、默认四项权限全部开启的 Key 和 legacy Key。API 权限不能代表完整网页权限，不能通过会话兑换绕过 scope、有效期或 Key 撤销。
-
-### 5.5 登出
-
-`POST /auth/logout`
-
-- 说明：注销当前登录会话
-- 认证：登录用户（`AuthUser`）
-
-```bash
-curl -X POST "http://localhost:5000/api/v1/auth/logout" \
-  -H "Authorization: Bearer <token>"
-```
-
-### 5.6 登出全部会话
-
-`POST /auth/logout/all`
-
-- 说明：注销当前用户的所有会话。
-- 认证：登录用户（`AuthUser`）
-
-### 5.7 当前用户
-
-`GET /auth/me`
-
-- 说明：获取当前登录用户信息（与 `GET /users/me` 同 handler）。
-- 认证：登录用户（`AuthUser`）
-- 缓存：身份响应为会话作用域数据，服务端返回 `Cache-Control: no-store, private`；客户端不得对该响应做共享缓存或 in-flight 复用。
-
-```bash
-curl -X GET "http://localhost:5000/api/v1/auth/me" \
-  -H "Authorization: Bearer <token>"
-```
-
-### 5.8 刷新 Token
-
-`POST /auth/refresh`
-
-- 说明：刷新用户 Token
-- 认证：登录用户（`AuthUser`）
-
-```bash
-curl -X POST "http://localhost:5000/api/v1/auth/refresh" \
-  -H "Authorization: Bearer <token>"
-```
-
-### 5.9 登录端 API Key 管理（旧版兼容）
-
-以下接口为登录态下管理"用户级 API Key"的兼容接口；新的多 Key 管理见 [6.10 个人 API Key](#610-个人-api-key)，外部接入见 [API Key 外部接入](../reference/api-key.md)。
-
-#### 获取当前用户 API Key
-
-`GET /auth/apikey`
-
-- 认证：登录用户（`AuthUser`）
-
-```bash
-curl -X GET "http://localhost:5000/api/v1/auth/apikey" \
-  -H "Authorization: Bearer <token>"
-```
-
-#### 生成 / 刷新 API Key
-
-`POST /auth/apikey`
-
-- 认证：登录用户（`AuthUser`）
-
-```bash
-curl -X POST "http://localhost:5000/api/v1/auth/apikey" \
-  -H "Authorization: Bearer <token>"
-```
-
-#### 删除当前 API Key
-
-`DELETE /auth/apikey`
-
-- 认证：登录用户（`AuthUser`）
-
-#### 启用当前 API Key
-
-`POST /auth/apikey/enable`
-
-- 认证：登录用户（`AuthUser`）
-
-#### 获取 API Key 权限列表
-
-`GET /auth/apikey/permissions`
-
-- 认证：登录用户（`AuthUser`）
-
-#### 更新 API Key 权限
-
-`PUT /auth/apikey/permissions`
-
-- 认证：登录用户（`AuthUser`）
-- 请求体：
-
-```json
-{
-  "permissions": ["account:read", "emby:read"]
-}
-```
-
-```bash
-curl -X PUT "http://localhost:5000/api/v1/auth/apikey/permissions" \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"permissions":["account:read","emby:read"]}'
-```
-
-## 6. Users 模块
-
-### 6.1 注册与校验
-
-#### 新用户注册
-
-`POST /users/register`
-
-- 说明：新用户注册（成功返回 `201`）
-- 认证：公开（`AuthPublic`）
-- 限流：IP，5 / 10 分钟
-- 请求头：`Content-Type: application/json`
-- 请求体（可携带注册码 / Telegram 绑定码，视配置而定）：
-
-```json
-{
-  "username": "newuser",
-  "password": "Password123!",
-  "email": "newuser@example.com"
-}
-```
-
-```bash
-curl -X POST "http://localhost:5000/api/v1/users/register" \
-  -H "Content-Type: application/json" \
-  -d '{"username":"newuser","password":"Password123!","email":"newuser@example.com"}'
-```
-
-#### 检查用户名是否可用
-
-`GET /users/check-available?username=<name>`
-
-- 说明：检查用户名是否可用
-- 认证：公开（`AuthPublic`）
-- 限流：IP，60 / 60 秒
-
-```bash
-curl -X GET "http://localhost:5000/api/v1/users/check-available?username=newuser"
-```
-
-#### 校验注册码
-
-`GET /users/regcode/check?reg_code=<code>`
-
-- 说明：校验注册码 / 卡码是否有效，供注册页预检。
-- 认证：公开（`AuthPublic`）
-- 限流：IP，10 / 60 秒
-- 规则细节见 [注册码与卡码](../features/regcodes.md)。
-
-#### Telegram 注册绑定码
-
-`GET /users/telegram/register/bind-code` — 生成注册阶段的 Telegram 绑定码（公开，IP 限流 5/10 分钟）。该 GET 有副作用，调用方必须带 `X-Twilight-Client: webui` 与 `X-Twilight-Intent: create-bind-code`，后端会拒绝预取请求。
-
-`GET /users/telegram/register/bind-code/ws?code=<challenge_id>` — 旧 WebSocket 兼容通道；必须携带注册浏览器证明 Cookie。
-
-`GET /users/telegram/register/bind-code/status?code=<challenge_id>` — V1 状态兼容入口。产品前端使用 `GET /api/v2/registration/telegram/bind-code/status`，携带相同浏览器证明 Cookie。
-
-签发返回 `{ bind_code, challenge_id, expires_in: 300 }`。`bind_code` 为仅交给 Bot 的 32 位随机十六进制码，数据库只保存摘要；`challenge_id` 为独立观察 ID。注册签发同时设置 600 秒、Path `/api`、HttpOnly、SameSite=Lax 的主机专用 Cookie，Secure 跟随配置。注册提交保留 `telegram_bind_code` 字段名，前端填写观察 ID，服务端同时复核浏览器证明。签发新码会取消同一所有者尚未消费的旧码。
-
-状态响应包含 `status`、`confirmed`、`terminal`、`retryable`、`expires_in`、`telegram_id`、`telegram_username`、`message`。终态包括确认、过期、取消、已消费、无效和身份冲突；临时资格检查失败仍为 `pending`、`terminal=false`、`retryable=true`。服务端在同一 PostgreSQL 事务创建账号、消费注册码、记录身份历史和消费挑战；失败全部回滚。启动只清理旧 `state.bind_codes` 和过期/孤立记录。有效挑战不进入 Twilight 逻辑备份或迁移包，恢复时清空。登录用户仍在 Bot 确认成功后直接绑定，换绑结束沿用现有流程。
-
-`POST /users/me/telegram/bind-confirm` — 注册流程中确认绑定（路由为 `AuthPublic`，但仅接受回环直连、无转发头且 HMAC 签名有效的内部请求）。
-请求体：
-
-```json
-{ "code": "123456" }
-```
+注册提交 `POST /users/register` 需同时携带 `telegram_link_id` 与 `telegram_link_secret`。服务端在同一 PostgreSQL 事务创建账号、消费注册码、记录身份历史并消费链接；失败全部回滚，已确认的链接在有效期内可重试。有效链接不进入 Twilight 逻辑备份或迁移包，恢复时清空。登录用户在 Bot 确认成功时直接绑定，换绑结束沿用 `rebind-complete`。
 
 #### Emby 注册队列状态
 
@@ -793,13 +558,16 @@ curl -X DELETE "http://localhost:5000/api/v1/users/me/devices/abc123" \
 
 - 认证：登录用户（`AuthUser`）
 
-#### 生成绑定验证码
+#### 签发绑定链接
 
-`GET /users/me/telegram/bind-code`
+`POST /users/me/telegram/link`
 
 - 认证：登录用户（`AuthUser`）
-- 限流：UID，5 / 10 分钟
-- 请求头：`X-Twilight-Client: webui`、`X-Twilight-Intent: create-bind-code`
+- 限流：UID，登录限流（每分钟）
+- 请求头：`X-Twilight-Client: webui`、`X-Twilight-Intent: create-telegram-link`
+- 响应与注册场景相同，但没有 `link_secret`；已绑定账号返回 409 / `TG_ALREADY_BOUND`。
+
+`GET /users/me/telegram/link/{id}/status` — 查询自己签发的链接状态（只能查自己的）。Bot 确认成功即已写入绑定，`telegram_bound=true`。
 
 #### 申请换绑 Telegram
 
@@ -816,7 +584,7 @@ curl -X DELETE "http://localhost:5000/api/v1/users/me/devices/abc123" \
 - 认证：登录用户（`AuthUser`）
 - 限流：UID，5 / 10 分钟
 
-> 注册流程中的绑定确认接口是 `POST /users/me/telegram/bind-confirm`（内部签名保护，见 [6.1](#61-注册与校验)），不能仅凭绑定码从浏览器调用。
+> 绑定确认只由 Bot 在收到 `/start <token>`、`/bind <token>` 或私聊裸 token 后写入共享 PostgreSQL，没有浏览器可调用的确认接口。
 
 ### 6.7 个人设置
 

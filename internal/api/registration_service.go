@@ -17,13 +17,13 @@ import (
 // registrationInput is independent of HTTP so the WebUI and legacy
 // compatibility route can share the same validation and state transition.
 type registrationInput struct {
-	Username         string
-	Email            string
-	Password         string
-	RegCode          string
-	TelegramBindCode string
-	BrowserProof     string
-	Context          context.Context
+	Username           string
+	Email              string
+	Password           string
+	RegCode            string
+	TelegramLinkID     string
+	TelegramLinkSecret string
+	Context            context.Context
 }
 
 type registrationResult struct {
@@ -48,13 +48,13 @@ func (a *App) handleRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := decodeMap(r)
 	input := registrationInput{
-		Username:         stringValue(payload, "username"),
-		Password:         stringValue(payload, "password"),
-		Email:            stringValue(payload, "email"),
-		RegCode:          firstNonEmpty(stringValue(payload, "reg_code"), stringValue(payload, "code")),
-		TelegramBindCode: stringValue(payload, "telegram_bind_code"),
-		BrowserProof:     telegramBrowserProof(r),
-		Context:          r.Context(),
+		Username:           stringValue(payload, "username"),
+		Password:           stringValue(payload, "password"),
+		Email:              stringValue(payload, "email"),
+		RegCode:            firstNonEmpty(stringValue(payload, "reg_code"), stringValue(payload, "code")),
+		TelegramLinkID:     stringValue(payload, "telegram_link_id"),
+		TelegramLinkSecret: stringValue(payload, "telegram_link_secret"),
+		Context:            r.Context(),
 	}
 	if input.RegCode != "" && !a.allowRate(r.Context(), rateKey("register:regcode:", a.clientIP(r)), 10, time.Minute) {
 		failWithCode(w, http.StatusTooManyRequests, ErrRegisterRateLimited, "注册码注册尝试过于频繁")
@@ -164,7 +164,8 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 	input.Username = strings.TrimSpace(input.Username)
 	input.Email = strings.TrimSpace(input.Email)
 	input.RegCode = strings.TrimSpace(input.RegCode)
-	input.TelegramBindCode = strings.ToUpper(strings.TrimSpace(input.TelegramBindCode))
+	input.TelegramLinkID = strings.ToLower(strings.TrimSpace(input.TelegramLinkID))
+	input.TelegramLinkSecret = strings.TrimSpace(input.TelegramLinkSecret)
 	if now == 0 {
 		now = time.Now().Unix()
 	}
@@ -215,22 +216,15 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 
 	var telegramID int64
 	var telegramUsername string
-	if a.cfg().ForceBindTelegram || input.TelegramBindCode != "" {
-		if input.TelegramBindCode == "" {
+	if a.cfg().ForceBindTelegram || input.TelegramLinkID != "" {
+		if input.TelegramLinkID == "" {
 			return registrationResult{}, registrationFail(400, ErrTGBindRequired, "需要先完成 Telegram 绑定")
 		}
-		if !telegramBindCodePattern.MatchString(input.TelegramBindCode) {
-			return registrationResult{}, registrationFail(400, ErrTGBindCodeFormat, "Telegram 绑定码格式不正确")
+		if !telegramLinkIDPattern.MatchString(input.TelegramLinkID) {
+			return registrationResult{}, registrationFail(400, ErrTGBindCodeFormat, "Telegram 绑定链接格式不正确")
 		}
-		c, challengeErr := a.store().TelegramChallenge(input.Context, input.TelegramBindCode)
-		if challengeErr != nil && !errors.Is(challengeErr, store.ErrNotFound) {
-			logTelegramChallengeFailure("registration_read", challengeErr)
-			return registrationResult{}, registrationFail(503, ErrBindCodeSaveFailed, "绑定服务暂不可用，请稍后重试")
-		}
-		if challengeErr != nil || !c.OwnedBy(0, store.TelegramBrowserHash(input.BrowserProof)) {
-			return registrationResult{}, registrationFail(400, ErrTGBindCodeNotFound, "请在生成绑定码的浏览器完成注册")
-		}
-		state := a.telegramBindCodeStateContext(input.Context, input.TelegramBindCode, 0, "register", now)
+		// 所有权由 link_secret 决定：不带或带错 secret 的提交一律视为链接不存在。
+		state := a.telegramLinkStatus(input.Context, input.TelegramLinkID, 0, store.TelegramLinkSecretHash(input.TelegramLinkSecret), "register", now)
 		if state.Status != "confirmed" {
 			status := state.HTTPStatus
 			if status == 0 {
@@ -282,9 +276,9 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 
 	var user store.User
 	var consumed store.RegCode
-	if input.TelegramBindCode != "" {
+	if input.TelegramLinkID != "" {
 		var consumedBind store.BindCode
-		user, consumed, consumedBind, err = a.store().RegisterWithTelegramChallenge(input.Context, newUser, registerReg.Code, input.TelegramBindCode, store.TelegramBrowserHash(input.BrowserProof), applyGrant)
+		user, consumed, consumedBind, err = a.store().RegisterWithTelegramLink(input.Context, newUser, registerReg.Code, input.TelegramLinkID, store.TelegramLinkSecretHash(input.TelegramLinkSecret), applyGrant)
 		if err != nil {
 			return registrationResult{}, a.mapRegistrationStoreError(err, input, consumedBind, registerReg)
 		}
@@ -310,12 +304,12 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 }
 
 func (a *App) mapRegistrationStoreError(err error, input registrationInput, bind store.BindCode, reg store.RegCode) error {
-	if errors.Is(err, store.ErrTelegramChallengeOwner) {
-		return registrationFail(400, ErrTGBindCodeNotFound, "请在生成绑定码的浏览器完成注册")
+	if errors.Is(err, store.ErrTelegramLinkOwner) {
+		return registrationFail(400, ErrTGBindCodeNotFound, "绑定链接不存在或不属于当前浏览器")
 	}
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrExpired) {
-		if input.TelegramBindCode != "" && bind.Code == "" {
-			return registrationFail(400, ErrTGBindCodeExpired, "绑定码无效或已过期")
+		if input.TelegramLinkID != "" && bind.Code == "" {
+			return registrationFail(400, ErrTGBindCodeExpired, "绑定链接无效或已过期")
 		}
 		if bind.Code != "" || reg.Code != "" {
 			return registrationFail(400, ErrRegcodeInvalid, "注册码无效、已用完或已过期")
@@ -337,13 +331,13 @@ func (a *App) mapRegistrationStoreError(err error, input registrationInput, bind
 		if reg.Code != "" {
 			return registrationFail(400, ErrRegcodeInvalid, "注册码无效、已用完或已过期")
 		}
-		if input.TelegramBindCode != "" {
+		if input.TelegramLinkID != "" {
 			return registrationFail(409, ErrTGBindTargetTaken, "该 Telegram 已绑定到其他账号或绑定码状态已变化")
 		}
 		return registrationFail(409, ErrUsernameTaken, "账号信息已被占用，请检查后重试")
 	}
-	if input.TelegramBindCode != "" {
-		logTelegramChallengeFailure("registration_commit", err)
+	if input.TelegramLinkID != "" {
+		logTelegramLinkFailure("registration_commit", err)
 		return registrationFail(503, ErrBindCodeSaveFailed, "注册暂未完成，请稍后重试")
 	}
 	return err

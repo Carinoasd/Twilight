@@ -49,11 +49,12 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useAsyncResource } from "@/hooks/use-async-resource";
-import { useBindCodeStatus } from "@/hooks/use-bind-code-status";
+import { useTelegramLinkStatus } from "@/hooks/use-telegram-link-status";
 import { PageError, PageLoading } from "@/components/layout/page-state";
 import { useAuthStore } from "@/store/auth";
 import { useSystemStore } from "@/store/system";
 import { api, type UserSettings, type TelegramStatus, type EmbyStatus } from "@/lib/api";
+import type { TelegramLinkIssue } from "@/lib/api-types-v2";
 import { ApiError } from "@/lib/api-request";
 import { ErrCodes } from "@/lib/errcode";
 import { localeLabels, supportedLocales, useI18n, type Locale } from "@/lib/i18n";
@@ -82,10 +83,8 @@ export default function SettingsPage() {
   const [embyPasswordEmailRequired, setEmbyPasswordEmailRequired] = useState(false);
   const [embyPasswordOldPasswordRequired, setEmbyPasswordOldPasswordRequired] = useState(false);
 
-  // Telegram bind code
-  const [bindCode, setBindCode] = useState<string | null>(null);
-  const [challengeId, setChallengeId] = useState("");
-  const [bindCodeExpiry, setBindCodeExpiry] = useState<number>(0);
+  // Telegram bind link
+  const [telegramLink, setTelegramLink] = useState<TelegramLinkIssue | null>(null);
   const [isTgLoading, setIsTgLoading] = useState(false);
   const bindCodeRequestId = useRef(0);
   const botUsername = systemInfo?.telegram_bot?.username;
@@ -352,13 +351,13 @@ export default function SettingsPage() {
     execute: loadData,
   } = useAsyncResource(loadSettingsResource, { immediate: true });
 
-  // 生成绑定码后自动轮询，不再要求用户手动刷新页面（刷新会丢掉 bindCode 这块
-  // React 状态、销毁整个绑定流程）。带超时中断 + 请求中断，见 useBindCodeStatus。
-  useBindCodeStatus({
-    code: bindCode ? challengeId : null,
+  // 生成绑定链接后自动轮询，不再要求用户手动刷新页面（刷新会丢掉 telegramLink 这块
+  // React 状态、销毁整个绑定流程）。带超时中断 + 请求中断，见 useTelegramLinkStatus。
+  useTelegramLinkStatus({
+    linkId: telegramLink?.link_id ?? null,
     scene: "user",
-    expiresIn: bindCodeExpiry,
-    enabled: Boolean(bindCode) && !telegramStatus?.bound,
+    expiresIn: telegramLink?.expires_in,
+    enabled: Boolean(telegramLink) && !telegramStatus?.bound,
     onBound: (data) => {
       setTelegramStatus((previous) => ({
         bound: true,
@@ -374,21 +373,18 @@ export default function SettingsPage() {
         rebind_request_id: previous?.rebind_request_id,
         rebinding_in_progress: previous?.rebinding_in_progress,
       }));
-      setBindCode(null);
-      setBindCodeExpiry(0);
+      setTelegramLink(null);
       toast({ title: t("settings.rebindCompleteTitle"), variant: "success" });
       void loadData().catch(() => undefined);
       void fetchUser();
     },
     onTerminalError: (data) => {
-      setBindCode(null);
-      setBindCodeExpiry(0);
+      setTelegramLink(null);
       toast({ title: t("settings.getBindCodeFailed"), description: data.message, variant: "destructive" });
     },
-    // 绑定码 TTL 到期仍未确认：静默清掉过期码（与旧的本地过期计时器行为一致）。
+    // 链接 TTL 到期仍未确认：静默清掉过期链接。
     onTimeout: () => {
-      setBindCode(null);
-      setBindCodeExpiry(0);
+      setTelegramLink(null);
     },
   });
 
@@ -460,15 +456,13 @@ export default function SettingsPage() {
     const requestId = ++bindCodeRequestId.current;
     setIsTgLoading(true);
     try {
-      const res = await api.getBindCode();
+      const res = await api.createTelegramLink();
       if (requestId !== bindCodeRequestId.current) return;
-      if (res.success && res.data?.bind_code) {
-        setBindCode(res.data.bind_code);
-        setChallengeId(res.data.challenge_id);
-        setBindCodeExpiry(res.data.expires_in);
+      if (res.success && res.data?.link_id) {
+        setTelegramLink(res.data);
         toast({
           title: t("settings.bindCodeGenerated"),
-          description: t("settings.bindCodeToastDescription", { minutes: Math.floor(res.data.expires_in / 60), code: res.data.bind_code }),
+          description: t("settings.bindCodeToastDescription", { minutes: Math.floor(res.data.expires_in / 60) }),
           variant: "success",
         });
       } else {
@@ -517,8 +511,7 @@ export default function SettingsPage() {
       const res = await api.unbindTelegram();
       if (res.success) {
         toast({ title: t("settings.unbindSuccess"), variant: "success" });
-        setBindCode(null);
-        setBindCodeExpiry(0);
+        setTelegramLink(null);
         void loadData().catch(() => undefined);
         fetchUser();
       } else {
@@ -1038,7 +1031,7 @@ export default function SettingsPage() {
                 {!telegramStatus?.bound ? (
                   <Button
                     onClick={handleGetBindCode}
-                    disabled={isTgLoading}
+                    disabled={isTgLoading || Boolean(telegramLink)}
                   >
                     {isTgLoading ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -1109,24 +1102,35 @@ export default function SettingsPage() {
                 {t("settings.rebindApprovedHint")}
               </p>
             )}
-            {bindCode && !telegramStatus?.bound && (
-              <div className="rounded-lg bg-blue-500/10 p-4 space-y-2">
+            {telegramLink && !telegramStatus?.bound && (
+              <div className="rounded-lg bg-blue-500/10 p-4 space-y-3">
                 <p className="font-medium text-blue-500">{t("settings.bindCodeGenerated")}</p>
+                {telegramLink.deep_link && (
+                  <Button asChild>
+                    <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">
+                      <Bot className="mr-2 h-4 w-4" />
+                      {t("settings.openTelegramLink", { username: telegramLink.bot_username })}
+                    </a>
+                  </Button>
+                )}
+                <p className="text-sm text-muted-foreground">
+                  {t("settings.sendBindWithin", { minutes: Math.floor((telegramLink.expires_in ?? 0) / 60), bot: telegramLink.bot_username ? `@${telegramLink.bot_username}` : botUsername ? `@${botUsername}` : "Telegram Bot" })}
+                </p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <code className="min-w-0 max-w-full break-all rounded-lg bg-background/50 px-4 py-2 font-mono text-base font-semibold tracking-wide">
-                    {bindCode}
+                  <code className="min-w-0 max-w-full break-all rounded-lg bg-background/50 px-3 py-2 font-mono text-sm">
+                    {telegramLink.manual_command}
                   </code>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      navigator.clipboard.writeText(`/bind ${bindCode}`);
+                      navigator.clipboard.writeText(telegramLink.manual_command);
                       toast({ title: t("settings.copyCommand"), variant: "success" });
                     }}
                   >
                     {t("settings.copyCommand")}
                   </Button>
-                  {botUrl && (
+                  {botUrl && !telegramLink.deep_link && (
                     <Button asChild variant="outline" size="sm">
                       <a
                         href={botUrl}
@@ -1139,14 +1143,13 @@ export default function SettingsPage() {
                     </Button>
                   )}
                 </div>
-                <p className="text-sm text-muted-foreground">
-                  {t("settings.sendBindWithin", { minutes: Math.floor(bindCodeExpiry / 60), bot: systemInfo?.telegram_bot?.username ? `@${systemInfo.telegram_bot.username}` : "Telegram Bot" })}{" "}
-                  <code className="bg-background/50 px-1.5 py-0.5 rounded">/bind {bindCode}</code>
-                </p>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {t("settings.waitingForBind")}
                 </div>
+                <Button variant="ghost" size="sm" className="text-xs" onClick={() => setTelegramLink(null)}>
+                  {t("settings.retryBindCode")}
+                </Button>
               </div>
             )}
           </CardContent>

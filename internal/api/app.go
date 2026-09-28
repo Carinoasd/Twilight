@@ -125,7 +125,6 @@ type App struct {
 	embySessionsUntil          time.Time
 	embySessionsCache          []map[string]any
 	migrationMu                sync.Mutex
-	bindStatus                 *bindStatusHub
 	// schedulerLocks: jobID -> *schedulerProcessRun。BATCH_07 之前在 package 级
 	// 声明 (`var schedulerProcessLocks sync.Map`)，单进程 prod 不显问题，但
 	// 测试 setup 反复 New() 出多个 App 时这张表共享 → 一个 case cancel 的 job
@@ -326,10 +325,10 @@ const (
 	// 让运行日志服务于诊断而不是变成逐请求访问日志。
 	httpRequestSlowLogThreshold = 2 * time.Second
 
-	twilightClientHeader         = "X-Twilight-Client"
-	twilightIntentHeader         = "X-Twilight-Intent"
-	twilightIntentCreateBindCode = "create-bind-code"
-	twilightIntentCompleteSetup  = "complete-setup"
+	twilightClientHeader             = "X-Twilight-Client"
+	twilightIntentHeader             = "X-Twilight-Intent"
+	twilightIntentCreateTelegramLink = "create-telegram-link"
+	twilightIntentCompleteSetup      = "complete-setup"
 )
 
 func New(cfg config.Config, st *store.Store) (*App, error) {
@@ -342,7 +341,6 @@ func New(cfg config.Config, st *store.Store) (*App, error) {
 		developerJSCallbacks: map[string]developerJSCallbackContext{},
 		developerJSWaiters:   map[string]developerJSMessageWaiter{},
 		embyAdminCache:       map[string]embyAdminCacheEntry{},
-		bindStatus:           newBindStatusHub(),
 	}
 	app.runtime.Store(&runtimeState{
 		cfg:            cfg,
@@ -372,8 +370,8 @@ func New(cfg config.Config, st *store.Store) (*App, error) {
 
 func (a *App) repairTelegramBindResidue(source string) {
 	now := time.Now().Unix()
-	challengeExpired := a.cleanupExpiredBindCodes(now)
-	challengeOrphaned := a.cleanupOrphanedUserBindCodes()
+	linksExpired := a.cleanupExpiredTelegramLinks(now)
+	linksOrphaned := a.cleanupOrphanedTelegramLinks()
 	persistedLegacy := 0
 	if st := a.store(); st != nil {
 		deleted, err := st.RepairLegacyTelegramBindResidue()
@@ -383,8 +381,8 @@ func (a *App) repairTelegramBindResidue(source string) {
 		}
 		persistedLegacy = deleted
 	}
-	if challengeExpired > 0 || challengeOrphaned > 0 || persistedLegacy > 0 {
-		zap.L().Info("telegram bind residue repaired", zap.String("source", source), zap.Int("challenge_expired", challengeExpired), zap.Int("challenge_orphaned", challengeOrphaned), zap.Int("persisted_legacy", persistedLegacy))
+	if linksExpired > 0 || linksOrphaned > 0 || persistedLegacy > 0 {
+		zap.L().Info("telegram bind residue repaired", zap.String("source", source), zap.Int("links_expired", linksExpired), zap.Int("links_orphaned", linksOrphaned), zap.Int("persisted_legacy", persistedLegacy))
 	}
 }
 
@@ -1205,7 +1203,7 @@ func (a *App) applyCORS(w http.ResponseWriter, r *http.Request) bool {
 	}
 	// 求片管理员更新使用 If-Match 做 revision 并发保护；它必须包含在
 	// 预检允许头中，否则浏览器会在实际 PUT 发出前直接拦截请求。
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, If-Match, Idempotency-Key, X-Twilight-Client, X-Twilight-Intent")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, If-Match, Idempotency-Key, X-Twilight-Client, X-Twilight-Intent, X-Telegram-Link-Secret")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
 	w.Header().Set("Access-Control-Max-Age", "600")
 	return true

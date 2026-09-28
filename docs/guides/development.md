@@ -134,7 +134,7 @@ pnpm dev
 pnpm typecheck
 
 # TG 绑定码终态、超时与取消回归
-pnpm test:bind-code-status
+pnpm test:telegram-link-status
 
 # Lint
 pnpm lint
@@ -405,13 +405,13 @@ cd webui && BACKEND_URL=http://127.0.0.1:5000 pnpm dev
 - Firefox 的 `IntersectionObserver.rootMargin` 只接受像素或百分比。配置段滚动定位及后续观察器不得使用 `rem`、`em`、视口单位或 `calc()`，避免构造观察器时直接让页面进入错误边界。
 - 设备/IP 表格、求片处理队列、工单会话与附件条、注册码结果与使用记录、邮箱表格、公告预览和运行日志必须在自身的 Firefox 滚动区域中显示并阻断滚动链。Flex 工单会话正文要保留 `min-h-0`，否则窄屏时 Firefox 可能让内容撑开容器而不是内部滚动；长表格固定表头并在自身处理横向滚动。
 
-### TG 挑战持久化开发约定
+### Telegram 绑定链接开发约定
 
-`internal/store/telegram_challenge_schema.go` 维护版本 1 专用表，`telegram_challenges.go` 管理签发、验证、取消旧码、过期和容量；`registration.go` 将账号创建、注册码权益、身份历史及挑战消费放在同一事务。锁顺序固定为进程 Store → 主状态行 → 挑战行，外部资格校验必须在进入事务前结束。重试错误只更新观察到的 pending revision。
+`internal/store/telegram_links.go` 维护 `twilight_telegram_links` 建表（并丢弃上一代挑战表）、签发、Bot 确认、取消旧链接、过期与容量；`registration.go` 将账号创建、注册码权益、身份历史及链接消费放在同一事务。锁顺序固定为进程 Store → 主状态行 → 链接行。`internal/api/telegram_link.go` 是 API 侧的全部实现：签发（含 deep link 拼装）、状态投影、Bot 确认入口 `confirmTelegramLink`、清理与脱敏日志。
 
-Bot 和签名 HTTP 适配器共用 `confirmTelegramChallenge`。产品前端统一使用 `useBindCodeStatus` 并把 `challenge_id` 传给状态接口；Bot 码只用于展示/复制，注册浏览器证明只能由 HttpOnly Cookie 携带。新挑战不写 `State.BindCodes`，不进入导出，恢复时必须清空。新增表已加入两套测试库清理列表。
+Bot 的 `/start <token>`、`/bind <token>` 与私聊裸 token 共用 `confirmTelegramLink`。产品前端统一使用 `useTelegramLinkStatus` 并把 `link_id`（注册场景连同 `link_secret` 请求头）传给状态接口；token 只出现在 deep link 与手动命令里。链接不写 `State.BindCodes`，不进入导出，恢复时清空。
 
-真实 PostgreSQL 回归：`go test -p 1 ./internal/store ./internal/api -run TestTelegramChallenge -count=1`；全仓库使用 `go test -p 1 ./...`。不要把未设置 `TWILIGHT_TEST_DSN` 的跳过当作数据库通过。
+真实 PostgreSQL 回归：`go test -p 1 ./internal/store ./internal/api -run TelegramLink -count=1`；全仓库使用 `go test -p 1 ./...`。不要把未设置 `TWILIGHT_TEST_DSN` 的跳过当作数据库通过。
 
 
 ### Scheduler / 配置回归与发布

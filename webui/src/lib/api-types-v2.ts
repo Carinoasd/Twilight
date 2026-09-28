@@ -233,19 +233,41 @@ export interface V2TelegramLoginResponse {
 }
 
 /**
- * V2 创建 Telegram 绑定码请求（注册用）
+ * Telegram 绑定链接签发响应（注册与已登录场景共用）。
+ *
+ * - `deep_link`：`https://t.me/<bot>?start=<token>`，Bot 身份暂不可用时为空串；
+ * - `manual_command`：无法打开链接时手动发给 Bot 的 `/bind <token>`；
+ * - `link_secret`：仅注册场景返回，状态查询与注册提交时带回，证明是同一浏览器。
  */
-export interface V2CreateRegistrationBindCodeRequest {
-  regcode?: string;
+export interface TelegramLinkIssue {
+  link_id: string;
+  start_token: string;
+  deep_link: string;
+  bot_username: string;
+  manual_command: string;
+  expires_in: number;
+  poll_interval?: number;
+  link_secret?: string;
 }
 
 /**
- * V2 创建 Telegram 绑定码响应
+ * Telegram 绑定链接状态。终态由 `terminal` 表示；`invalid` 区分失败终态与确认终态。
+ * 临时的加群 / 上游失败保持 `pending` 并带 `retryable=true`。
  */
-export interface V2CreateRegistrationBindCodeResponse {
-  bind_code: string;
-  expires_in: number;
-  challenge_id: string;
+export interface TelegramLinkStatus {
+  link_id?: string;
+  status?: string;
+  error_code?: string;
+  message?: string;
+  confirmed?: boolean;
+  expires_in?: number;
+  invalid?: boolean;
+  terminal?: boolean;
+  retryable?: boolean;
+  telegram_bound?: boolean;
+  telegram_id?: number;
+  telegram_username?: string;
+  poll_interval?: number;
 }
 
 // ==================== 用户管理模块 ====================

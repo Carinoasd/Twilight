@@ -8,7 +8,7 @@ const ts = require("typescript");
 // Execute the actual hook with a small effect/timer host. No browser or network
 // is needed to exercise response ordering, terminal envelopes and cleanup.
 const source = fs.readFileSync(
-  path.join(__dirname, "../src/hooks/use-bind-code-status.ts"),
+  path.join(__dirname, "../src/hooks/use-telegram-link-status.ts"),
   "utf8",
 );
 const compiled = ts.transpileModule(source, {
@@ -22,6 +22,7 @@ function mount(read, overrides = {}) {
   let cleanup;
   const bound = [];
   const failed = [];
+  const calls = [];
   const exports = {};
   const context = {
     exports,
@@ -31,7 +32,10 @@ function mount(read, overrides = {}) {
         useEffect: (effect) => { cleanup = effect(); },
       };
       if (name === "@/lib/api") return {
-        api: { getRegisterBindCodeStatus: read, getBindCodeStatus: read },
+        api: {
+          getRegisterTelegramLinkStatus: (id, secret, signal) => { calls.push({ scene: "register", id, secret }); return read(id, signal); },
+          getTelegramLinkStatus: (id, signal) => { calls.push({ scene: "user", id }); return read(id, signal); },
+        },
       };
       throw new Error(`Unexpected import: ${name}`);
     },
@@ -49,16 +53,23 @@ function mount(read, overrides = {}) {
     clearTimeout: (id) => timers.delete(id),
   };
   vm.runInNewContext(compiled, context);
-  exports.useBindCodeStatus({
-    code: "ABCDEF12",
+  exports.useTelegramLinkStatus({
+    linkId: "0123456789abcdef0123456789abcdef",
     onBound: (data) => bound.push(data),
     onTerminalError: (data) => failed.push(data),
     ...overrides,
   });
-  return { bound, failed, timers, listeners, cleanup: () => cleanup?.() };
+  return { bound, failed, calls, timers, listeners, cleanup: () => cleanup?.() };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("register scene forwards the browser secret to the status endpoint", async () => {
+  const state = mount(async () => ({ success: true, data: { status: "pending" } }), { scene: "register", secret: "s3cret" });
+  await flush();
+  assert.deepEqual(state.calls[0], { scene: "register", id: "0123456789abcdef0123456789abcdef", secret: "s3cret" });
+  state.cleanup();
+});
 
 test("HTTP 200 success=false still delivers a terminal business failure", async () => {
   const state = mount(async () => ({
@@ -86,9 +97,9 @@ test("invalid identity must not trigger the confirmed callback", async () => {
 
 test("confirmed state stops polling and cancels the request", async () => {
   let signal;
-  const state = mount(async (_code, requestSignal) => {
+  const state = mount(async (_id, requestSignal) => {
     signal = requestSignal;
-    return { success: true, data: { status: "bound", telegram_bound: true, terminal: true } };
+    return { success: true, data: { status: "confirmed", telegram_bound: true, terminal: true } };
   });
   await flush();
   assert.equal(state.bound.length, 1);
@@ -101,7 +112,7 @@ test("confirmed state stops polling and cancels the request", async () => {
 test("cleanup aborts reads and ignores a late response", async () => {
   let resolve;
   let signal;
-  const state = mount((_code, requestSignal) => {
+  const state = mount((_id, requestSignal) => {
     signal = requestSignal;
     return new Promise((done) => { resolve = done; });
   });
@@ -131,19 +142,34 @@ test("pending continues polling while the overall deadline stays bounded", async
   state.cleanup();
 });
 
-
 test("retryable membership failure continues polling to confirmation", async () => {
   let attempts = 0;
   const state = mount(async () => ({ success: true, data: ++attempts === 1
-    ? { status: "pending", terminal: false, error_code: "TG_BIND_GROUP_CHECK_FAILED" }
-    : { status: "confirmed", terminal: true, confirmed: true } }), { scene: "register" });
+    ? { status: "pending", terminal: false, retryable: true, error_code: "TG_BIND_GROUP_CHECK_FAILED" }
+    : { status: "confirmed", terminal: true, confirmed: true } }), { scene: "register", secret: "s" });
   await flush();
   assert.equal(state.failed.length, 0);
-  const poll = [...state.timers.values()].find((timer) => timer.delay === 2500);
+  const poll = [...state.timers.values()].find((timer) => timer.delay === 3000);
   assert.ok(poll);
   poll.callback();
   await flush();
   assert.equal(state.bound.length, 1);
   assert.equal(state.failed.length, 0);
+  state.cleanup();
+});
+
+test("transport failures keep polling instead of surfacing a terminal error", async () => {
+  let attempts = 0;
+  const state = mount(async () => {
+    if (++attempts === 1) throw new Error("503");
+    return { success: true, data: { status: "confirmed", terminal: true, confirmed: true } };
+  });
+  await flush();
+  assert.equal(state.failed.length, 0);
+  const poll = [...state.timers.values()].find((timer) => timer.delay === 3000);
+  assert.ok(poll);
+  poll.callback();
+  await flush();
+  assert.equal(state.bound.length, 1);
   state.cleanup();
 });
