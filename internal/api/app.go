@@ -823,7 +823,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bodyLimit := a.cfg().MaxUploadSize
-	if strings.HasPrefix(r.URL.Path, "/api/v1/system/admin/migration/") {
+	// V2 导入路由同样放宽：旧实现只认 v1 前缀，/api/v2/admin/migration/import 仍被
+	// 默认 5MB 上限截断，稍大的迁移包根本传不上来。
+	if strings.HasPrefix(r.URL.Path, "/api/v1/system/admin/migration/") || r.URL.Path == "/api/v2/admin/migration/import" {
 		// Migration archives are bounded by the archive parser rather than the
 		// ordinary image-upload limit. The route still authenticates as admin
 		// before reading the body in its handler.

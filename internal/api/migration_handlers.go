@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
@@ -144,11 +144,12 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 	if !a.migrationEnabled(w) {
 		return
 	}
-	archiveBytes, options, err := readMigrationMultipart(r)
+	archiveFile, archiveSize, options, err := readMigrationMultipart(r)
 	if err != nil {
 		failWithCode(w, http.StatusBadRequest, ErrMigrationUploadBad, "迁移包上传无效")
 		return
 	}
+	defer archiveFile.Close()
 	if options.ResourceMode == "" {
 		options.ResourceMode = migrationResourceModePreserve
 	}
@@ -159,7 +160,7 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 
 	a.migrationMu.Lock()
 	defer a.migrationMu.Unlock()
-	archive, err := migration.Open(archiveBytes, options.Password, migration.DefaultLimits())
+	archive, err := migration.OpenReaderAt(archiveFile, archiveSize, options.Password, migration.DefaultLimits())
 	if err != nil {
 		failWithCode(w, http.StatusBadRequest, ErrMigrationArchiveBad, "迁移包校验失败或密码不正确")
 		return
@@ -321,24 +322,24 @@ func (a *App) createMigrationArchive(r *http.Request, password string) ([]byte, 
 	return archive, manifest, len(files), err
 }
 
-func readMigrationMultipart(r *http.Request) ([]byte, migrationImportOptions, error) {
+// readMigrationMultipart 返回上传的封包文件句柄而不是整份字节：ParseMultipartForm
+// 超过 migrationMultipartMemory 的部分已落到临时文件，multipart.File 实现了
+// io.ReaderAt，交给 migration.OpenReaderAt 直接读取，避免再复制一份到内存。
+// 调用方负责 Close；临时文件由 net/http 在请求结束后清理。
+func readMigrationMultipart(r *http.Request) (multipart.File, int64, migrationImportOptions, error) {
 	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data;") {
-		return nil, migrationImportOptions{}, errors.New("multipart form required")
+		return nil, 0, migrationImportOptions{}, errors.New("multipart form required")
 	}
 	if err := r.ParseMultipartForm(migrationMultipartMemory); err != nil {
-		return nil, migrationImportOptions{}, err
+		return nil, 0, migrationImportOptions{}, err
 	}
 	file, header, err := r.FormFile("archive")
 	if err != nil {
-		return nil, migrationImportOptions{}, err
+		return nil, 0, migrationImportOptions{}, err
 	}
-	defer file.Close()
-	if header.Size > migration.MaxArchiveBytes {
-		return nil, migrationImportOptions{}, migration.ErrArchiveLimit
-	}
-	data, err := io.ReadAll(io.LimitReader(file, migration.MaxArchiveBytes+1))
-	if err != nil || int64(len(data)) > migration.MaxArchiveBytes {
-		return nil, migrationImportOptions{}, migration.ErrArchiveLimit
+	if header.Size <= 0 || header.Size > migration.MaxArchiveBytes {
+		_ = file.Close()
+		return nil, 0, migrationImportOptions{}, migration.ErrArchiveLimit
 	}
 	options := migrationImportOptions{
 		Password:     r.FormValue("password"),
@@ -347,7 +348,7 @@ func readMigrationMultipart(r *http.Request) ([]byte, migrationImportOptions, er
 		ApplyConfig:  boolFormValue(r.FormValue("apply_config")),
 		ResourceMode: strings.ToLower(strings.TrimSpace(r.FormValue("resource_mode"))),
 	}
-	return data, options, nil
+	return file, header.Size, options, nil
 }
 
 func boolFormValue(value string) bool {
