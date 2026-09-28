@@ -13,17 +13,17 @@ import (
 	"github.com/prejudice-studio/twilight/internal/store"
 )
 
-// fakeEmbyPolicyServer 记录每个 Emby 用户当前的 IsDisabled。
-type fakeEmbyPolicyServer struct {
+// rebindEmbyPolicyServer 记录每个 Emby 用户当前的 IsDisabled。
+type rebindEmbyPolicyServer struct {
 	*httptest.Server
 	mu       sync.Mutex
 	disabled map[string]bool
 	posts    int
 }
 
-func newFakeEmbyPolicyServer(t *testing.T, app *App, ids ...string) *fakeEmbyPolicyServer {
+func newRebindEmbyPolicyServer(t *testing.T, app *App, ids ...string) *rebindEmbyPolicyServer {
 	t.Helper()
-	f := &fakeEmbyPolicyServer{disabled: map[string]bool{}}
+	f := &rebindEmbyPolicyServer{disabled: map[string]bool{}}
 	for _, id := range ids {
 		f.disabled[id] = false
 	}
@@ -54,13 +54,13 @@ func newFakeEmbyPolicyServer(t *testing.T, app *App, ids ...string) *fakeEmbyPol
 	return f
 }
 
-func (f *fakeEmbyPolicyServer) isDisabled(id string) bool {
+func (f *rebindEmbyPolicyServer) isDisabled(id string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.disabled[id]
 }
 
-func (f *fakeEmbyPolicyServer) setDisabled(id string, disabled bool) {
+func (f *rebindEmbyPolicyServer) setDisabled(id string, disabled bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.disabled[id] = disabled
@@ -94,7 +94,7 @@ func approvedRebindUser(t *testing.T, app *App, username, embyID string, embyDis
 func TestTelegramRebindSuspendsEmbyUntilNewTelegramConfirmed(t *testing.T) {
 	app := newTestApp(t)
 	adminCookies := registerAndLogin(t, app, "admin", "Admin123456")
-	emby := newFakeEmbyPolicyServer(t, app, "emby-rebind")
+	emby := newRebindEmbyPolicyServer(t, app, "emby-rebind")
 	newFakeTelegramServer(t, app)
 	u, cookies := approvedRebindUser(t, app, "rebinder", "emby-rebind", false)
 	headers := map[string]string{"X-Twilight-Client": "webui"}
@@ -144,7 +144,7 @@ func TestTelegramRebindSuspendsEmbyUntilNewTelegramConfirmed(t *testing.T) {
 func TestTelegramRebindKeepsPreviouslyDisabledEmbyDisabled(t *testing.T) {
 	app := newTestApp(t)
 	_ = registerAndLogin(t, app, "admin", "Admin123456")
-	emby := newFakeEmbyPolicyServer(t, app, "emby-banned")
+	emby := newRebindEmbyPolicyServer(t, app, "emby-banned")
 	emby.setDisabled("emby-banned", true)
 	newFakeTelegramServer(t, app)
 	u, cookies := approvedRebindUser(t, app, "banned", "emby-banned", true)
@@ -174,7 +174,7 @@ func TestTelegramRebindKeepsPreviouslyDisabledEmbyDisabled(t *testing.T) {
 func TestTelegramRebindCompleteEndpointFinishesAfterMembershipRecovers(t *testing.T) {
 	app := newTestApp(t)
 	_ = registerAndLogin(t, app, "admin", "Admin123456")
-	emby := newFakeEmbyPolicyServer(t, app, "emby-late")
+	emby := newRebindEmbyPolicyServer(t, app, "emby-late")
 	tg := newFakeTelegramServer(t, app)
 	u, cookies := approvedRebindUser(t, app, "latecomer", "emby-late", false)
 	headers := map[string]string{"X-Twilight-Client": "webui"}
@@ -211,7 +211,7 @@ func TestTelegramRebindCompleteEndpointFinishesAfterMembershipRecovers(t *testin
 func TestAdminUnbindStartsRebindWhenTelegramBindingForced(t *testing.T) {
 	app := newTestApp(t)
 	adminCookies := registerAndLogin(t, app, "admin", "Admin123456")
-	emby := newFakeEmbyPolicyServer(t, app, "emby-admin-unbind")
+	emby := newRebindEmbyPolicyServer(t, app, "emby-admin-unbind")
 	_ = registerAndLogin(t, app, "member", "User123456")
 	app.cfg().ForceBindTelegram = true
 	u, _ := app.store().FindUserByUsername("member")
