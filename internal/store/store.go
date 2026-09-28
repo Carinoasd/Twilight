@@ -1239,19 +1239,44 @@ FROM twilight_state WHERE id = 1`, s.stateVersion).Scan(&data, &version)
 	return nil
 }
 
+// Snapshot 生成备份/迁移用的完整状态快照。
+//
+// 旧实现全程持有 Store 写锁做 runtime/audit（上限百万行）/roster 全表扫描与
+// MarshalIndent；每个 HTTP 请求都要经过 refreshStoreForRequest 的读锁，于是备份
+// 期间整个进程停止响应。现在完全不持 Store 锁：主状态行与各专表都在同一个
+// REPEATABLE READ 只读事务里读取，既不阻塞其他请求，又天然得到同一时点的一致
+// 快照（旧实现主状态与专表之间并不保证同一时点）。
 func (s *Store) Snapshot() ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store is not open")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return nil, err
 	}
-	state := s.state
+	defer tx.Rollback()
+	var state State
+	var data []byte
+	err = tx.QueryRowContext(ctx, `SELECT state FROM twilight_state WHERE id = 1`).Scan(&data)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		state = emptyState()
+	case err != nil:
+		return nil, err
+	default:
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &state); err != nil {
+				return nil, err
+			}
+		}
+	}
 	state.ensure()
 	// runtime logs 落在独立表 `twilight_runtime_logs`，不会进入 `twilight_state`
 	// 的 jsonb。Snapshot 必须把它们也读出来塞进 State，否则备份/恢复时 state 与
-	// runtime 两条线时点错位（admin 看到"已恢复"但日志仍是恢复点之后的最新数据）。
-	// 这里持锁期间额外做一次 SELECT，不影响并发写（只读快照）。
-	logs, nextID, err := s.snapshotRuntimeLogsLocked()
+	// runtime 两条线时点错位。
+	logs, nextID, err := snapshotRuntimeLogs(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -1261,7 +1286,7 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	// Audit logs also live in a dedicated high-write table. Merge them into the
 	// exported State so JSON backups remain complete and portable.
-	auditLogs, nextAuditID, err := s.snapshotAuditLogsLocked()
+	auditLogs, nextAuditID, err := snapshotAuditLogs(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -1270,15 +1295,16 @@ func (s *Store) Snapshot() ([]byte, error) {
 	// Telegram roster is another dedicated runtime table. Merge it only for the
 	// portable JSON snapshot; the Store's live State keeps no historical roster
 	// map resident on the Go heap.
-	roster, err := s.snapshotTelegramRosterLocked()
+	roster, err := snapshotTelegramRoster(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	state.TelegramRoster = roster
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	runs, err := schedulerQueueRows(ctx, s.db)
+	runs, err := schedulerQueueRows(ctx, tx)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	state.SchedulerRuns = mergeSchedulerHistory(state.SchedulerRuns, runs)
@@ -1290,18 +1316,11 @@ func (s *Store) Snapshot() ([]byte, error) {
 	return json.MarshalIndent(state, "", "  ")
 }
 
-// snapshotRuntimeLogsLocked 必须在持有 s.mu 的情况下调用，从 PG 拉出所有
-// runtime_logs（按 id 升序）以及 next_id（max(id)+1）。limit 暂不裁剪：
-// 备份要求时点完整，超大表的取舍交由保留策略（PruneRuntimeLogs）控制。
-//
-// 这里走显式 5min 超时：备份场景容忍时间长一些，但不能裸
-// context.Background 让备份卡死时把整个 store 写锁也卡死（Snapshot 由
-// s.mu.Lock 持有写锁调用本函数）。超时回 caller 让 admin 看到错误信息，
-// 比让全站登录 / 注册排队挂起强。
-func (s *Store) snapshotRuntimeLogsLocked() ([]RuntimeLogEntry, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+// snapshotRuntimeLogs 在 Snapshot 的只读事务里拉出所有 runtime_logs（按 id 升序）
+// 以及 next_id（max(id)+1）。limit 暂不裁剪：备份要求时点完整，超大表的取舍交由
+// 保留策略（PruneRuntimeLogs）控制。超时由调用方的 ctx 控制。
+func snapshotRuntimeLogs(ctx context.Context, q schedulerQueryer) ([]RuntimeLogEntry, int64, error) {
+	rows, err := q.QueryContext(ctx, `
 SELECT id, time, level, message, COALESCE(attrs, '{}'::jsonb)::text
 FROM twilight_runtime_logs
 ORDER BY id ASC`)
@@ -1335,10 +1354,8 @@ ORDER BY id ASC`)
 	return out, nextID, nil
 }
 
-func (s *Store) snapshotAuditLogsLocked() ([]AuditLog, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+func snapshotAuditLogs(ctx context.Context, q schedulerQueryer) ([]AuditLog, int64, error) {
+	rows, err := q.QueryContext(ctx, `
 SELECT id, uid, username, action, category, source, method, target_uid,
        COALESCE(detail, '{}'::jsonb)::text, ip, created_at
 FROM twilight_audit_logs ORDER BY id ASC`)
