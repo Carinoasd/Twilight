@@ -600,6 +600,8 @@ Go Bot 使用纯文本发送消息，不依赖 Markdown 转义。
 - 只有明确的用户层级错误（`user not found`、`PARTICIPANT_ID_INVALID` 等）或成员状态为 `left` / `kicked` 才算不在群。`chat not found`、Bot 被踢出群、没有权限等群组层级错误会让整轮中止并标记为失败，不停用任何人。
 - 熔断：单轮拟停用人数超过扫描人数的 `Telegram.membership_breaker_percent`（默认 20%，且至少 3 人），或超过 `Telegram.membership_breaker_max`（默认 50 人）时整轮中止，不停用任何人；摘要里 `circuit_breaker_tripped=true` 并列出 `would_disable_uids`。两项都可设 0 关闭，也可在任务参数里用 `breaker_percent` / `breaker_max` 临时覆盖。
 - 支持 `dry_run`：只回报会停用的名单（`would_disable_uids`），不做任何写入。
+- 巡检停用会在用户上记 `disabled_reason = "telegram_membership"`；回群自动启用（`auto_enable_rejoined`）和人工复核名单都只处理带这个原因的账号，管理员手动停权的账号不会被放出来。任何其他路径改动启用状态都会清掉这个原因。升级前已被巡检停用的旧账号没有该标记，需要管理员手动启用。
+- 回群自动启用时，若 Emby 当初是随 Web 一起被系统停用（`emby_auto_disabled`），会一并重新启用 Emby；管理员单独封禁的 Emby 保持不动。启用失败由「Emby 状态对账」任务收敛。
 - 退群停用写系统稽核 `disable_telegram_users_on_leave`，回群自动启用写 `enable_telegram_users_on_rejoin`，都附 uid 清单。
 
 强制加群 / 订阅、退群封禁（`ban_on_leave`）、重新入群自动恢复（`auto_enable_rejoined`）、群成员校验并发度等行为属于 Bot 运行策略而非命令，配置字段集中在 `[Telegram]` 段，详见 [Go 后端架构与配置](../reference/backend.md)。其它功能文档参见 [文档导航](../README.md)。

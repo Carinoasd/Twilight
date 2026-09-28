@@ -1076,7 +1076,7 @@ func configSectionDefs() []configSectionDef {
 			{Key: "group_user_panel_template", Label: "/twguser 面板模板", Type: "textarea", Description: telegramGroupUserPanelTemplateDescription, PlaceholderHints: placeholderHintsGroupPanel},
 			{Key: "require_group_membership", Label: "强制群成员", Type: "bool", Description: "巡检发现退群时禁用本地或 Emby"},
 			{Key: "ban_on_leave", Label: "退群封禁", Type: "bool", Description: "退群后在群组永久封禁"},
-			{Key: "auto_enable_rejoined", Label: "回群自动启用", Type: "bool", Description: "退群后重新加入且未过期时，巡检自动重新启用 Web 账号；Emby 需单独启用，关闭时进入人工复核"},
+			{Key: "auto_enable_rejoined", Label: "回群自动启用", Type: "bool", Description: "因退群被巡检停用的账号重新入群且未过期时，巡检自动重新启用 Web 账号，并恢复当时随之停用的 Emby；管理员手动停权的账号不受影响；关闭时进入人工复核"},
 			{Key: "group_check_concurrency", Label: "巡检并发", Type: "int", Description: "getChatMember 并发数"},
 			{Key: "membership_breaker_percent", Label: "巡检熔断比例（%）", Type: "int", Description: "单轮拟停用人数超过扫描人数的该百分比（且至少 3 人）时整轮中止、不停用任何人；0 关闭"},
 			{Key: "membership_breaker_max", Label: "巡检熔断人数", Type: "int", Description: "单轮拟停用人数超过该值时整轮中止、不停用任何人；0 关闭"},

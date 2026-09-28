@@ -173,6 +173,12 @@ func (a *App) enforceTelegramMembershipWithOptions(ctx context.Context, opts tel
 			continue
 		}
 		if !u.Active && len(missing) == 0 && (u.ExpiredAt <= 0 || u.ExpiredAt > now) {
+			// 只有「因退群被巡检停用」的账号才进入回群流程；管理员手动停权或其他原因
+			// 停用的账号即使人在群里也不处理，避免被自动放出来。
+			if u.DisabledReason != store.DisabledReasonTelegramMembership {
+				result["skipped_other_disabled"] = int(numeric(result["skipped_other_disabled"])) + 1
+				continue
+			}
 			toRejoin = append(toRejoin, u)
 		}
 	}
@@ -249,14 +255,43 @@ func (a *App) enforceTelegramMembershipWithOptions(ctx context.Context, opts tel
 	rejoinedUsers := []map[string]any{}
 	for _, u := range toRejoin {
 		if autoEnableRejoined && !a.cfg().TelegramBanOnLeave {
-			updated, err := a.store().UpdateUser(u.UID, func(u *store.User) error { u.Active = true; return nil })
+			// 在写锁内再确认一次停用原因：巡检期间管理员可能已手动改过状态。
+			updated, err := a.store().UpdateUser(u.UID, func(u *store.User) error {
+				if u.Active || u.DisabledReason != store.DisabledReasonTelegramMembership {
+					return errTelegramRejoinNoLongerEligible
+				}
+				u.Active = true
+				return nil
+			})
+			if errors.Is(err, errTelegramRejoinNoLongerEligible) {
+				result["skipped_other_disabled"] = int(numeric(result["skipped_other_disabled"])) + 1
+				continue
+			}
 			if err != nil {
 				result["failed"] = int(numeric(result["failed"])) + 1
 				continue
 			}
 			result["rejoined_enabled"] = int(numeric(result["rejoined_enabled"])) + 1
+			// 退群时 Emby 是随 Web 一起被系统停用的（EmbyAutoDisabled），回群时一并恢复；
+			// 管理员单独封禁的 Emby（无该标记）保持不动。失败留给 Emby 状态对账任务收敛。
+			embyEnabled := false
+			if updated.EmbyID != "" && updated.EmbyDisabled && updated.EmbyAutoDisabled && a.embyConfigured() && a.embyShouldEnableUser(updated) {
+				sideCtx, sideCancel := schedulerSideEffectContext(ctx)
+				if err := embyRetryOn5xx(sideCtx, func(c context.Context) error {
+					return a.embyApplyEnabledState(c, updated.UID, updated.EmbyID, true)
+				}); err != nil {
+					result["rejoined_emby_enable_failed"] = int(numeric(result["rejoined_emby_enable_failed"])) + 1
+					if len(logs) < 50 {
+						logs = append(logs, fmt.Sprintf("failed to re-enable Emby uid=%d: %s", updated.UID, redactSensitiveText(err.Error())))
+					}
+				} else {
+					embyEnabled = true
+					result["rejoined_emby_enabled"] = int(numeric(result["rejoined_emby_enabled"])) + 1
+				}
+				sideCancel()
+			}
 			if len(rejoinedUsers) < auditUIDListLimit {
-				rejoinedUsers = append(rejoinedUsers, map[string]any{"uid": updated.UID, "username": updated.Username, "telegram_id": updated.TelegramID})
+				rejoinedUsers = append(rejoinedUsers, map[string]any{"uid": updated.UID, "username": updated.Username, "telegram_id": updated.TelegramID, "emby_enabled": embyEnabled})
 			}
 			if len(logs) < 50 {
 				logs = append(logs, fmt.Sprintf("re-enabled uid=%d username=%s", updated.UID, updated.Username))
@@ -298,6 +333,9 @@ func (a *App) enforceTelegramMembershipWithOptions(ctx context.Context, opts tel
 	}
 	return result, logs, nil
 }
+
+// errTelegramRejoinNoLongerEligible 表示写锁内复查时账号已不再是「因退群停用」。
+var errTelegramRejoinNoLongerEligible = errors.New("telegram rejoin no longer eligible")
 
 // auditUIDListLimit 是系统稽核 detail 里名单的上限，避免超出 8KB detail 限制。
 const auditUIDListLimit = 64

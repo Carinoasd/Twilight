@@ -186,7 +186,11 @@ type User struct {
 	// EmbyDisabled 是远端 Emby 账号「当前是否被禁用」的尽力镜像（true=已禁用）。
 	// 由每次启停 Emby 时回写、并在强制刷新时按远端真值校正。让用户列表无需逐行
 	// 查 Emby 即可区分「Web 正常但 Emby 被单独禁用」。仅在 EmbyID 非空时有意义。
-	EmbyDisabled                            bool     `json:"emby_disabled"`
+	EmbyDisabled bool `json:"emby_disabled"`
+	// EmbyAutoDisabled 表示当前的 Emby 停用是本系统按 Web 状态（停用 / 过期）自动做的，
+	// 而不是管理员单独封禁 Emby。Emby 状态对账任务只会把带这个标记、且 Web 已恢复的
+	// 账号重新启用；EmbyDisabled=false 时恒为 false。
+	EmbyAutoDisabled                        bool     `json:"emby_auto_disabled,omitempty"`
 	Avatar                                  string   `json:"avatar,omitempty"`
 	Background                              string   `json:"background,omitempty"`
 	BGMMode                                 bool     `json:"bgm_mode"`
@@ -212,9 +216,32 @@ type User struct {
 	LegacyAPIKeyStatus                      bool     `json:"legacy_api_key_status"`
 	LegacyPermissions                       []string `json:"legacy_permissions,omitempty"`
 	PasswordHash                            string   `json:"password_hash"`
-	RebindingInProgress                     bool     `json:"rebinding_in_progress"`
-	RebindingSince                          int64    `json:"rebinding_since,omitempty"`
-	SeenAnnouncementIDs                     []int64  `json:"seen_announcement_ids,omitempty"`
+	// DisabledReason 记录 Web 账号被系统自动停用的原因（空 = 管理员手动或未知）。
+	// 目前只有群成员巡检写 DisabledReasonTelegramMembership；回群自动启用只处理
+	// 这个原因，绝不会把管理员手动停权的人重新放出来。Active 由其他路径改变时
+	// 由 normalizeUserDisabledReason 自动清空，避免旧原因残留。
+	DisabledReason      string  `json:"disabled_reason,omitempty"`
+	RebindingInProgress bool    `json:"rebinding_in_progress"`
+	RebindingSince      int64   `json:"rebinding_since,omitempty"`
+	SeenAnnouncementIDs []int64 `json:"seen_announcement_ids,omitempty"`
+}
+
+// DisabledReasonTelegramMembership 表示账号因退出要求的 Telegram 群组而被巡检停用。
+const DisabledReasonTelegramMembership = "telegram_membership"
+
+// normalizeUserDisabledReason 维护 DisabledReason 的不变量：Active 状态变化、而本次
+// 修改没有同时显式设置新原因时，清空旧原因。这样管理员手动启停、续期启用等任何
+// 其他路径都会自然抹掉「群成员巡检停用」标记。
+func normalizeUserDisabledReason(old User, u *User) {
+	if old.Active != u.Active && u.DisabledReason == old.DisabledReason {
+		u.DisabledReason = ""
+	}
+	if u.Active {
+		u.DisabledReason = ""
+	}
+	if !u.EmbyDisabled {
+		u.EmbyAutoDisabled = false
+	}
 }
 
 type UserSummaryCounts struct {
@@ -2131,6 +2158,7 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 		if err := fn(&u); err != nil {
 			return err
 		}
+		normalizeUserDisabledReason(old, &u)
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
@@ -2188,6 +2216,7 @@ func (s *Store) UpdateUsers(uids []int64, fn func(*User) error) (map[int64]error
 			results[uid] = ferr
 			continue
 		}
+		normalizeUserDisabledReason(old, &u)
 		if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
 			results[uid] = ErrConflict
 			continue
@@ -2494,7 +2523,9 @@ func (s *Store) SetUserActiveAtomic(uid int64, active bool) (User, error) {
 				return ErrLastAdmin
 			}
 		}
+		old := u
 		u.Active = active
+		normalizeUserDisabledReason(old, &u)
 		s.state.Users[uid] = u
 		updated = u
 		return nil
@@ -2569,6 +2600,8 @@ func (s *Store) DisableUserForTelegramMembership(uid int64) (User, bool, string,
 			}
 		}
 		u.Active = false
+		// 标记停用原因，回群自动启用只会处理带这个标记的账号。
+		u.DisabledReason = DisabledReasonTelegramMembership
 		s.state.Users[uid] = u
 		updated = u
 		disabled = true

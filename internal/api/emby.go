@@ -381,15 +381,31 @@ func (a *App) embyApplyEnabledState(ctx context.Context, uid int64, embyID strin
 }
 
 // mirrorEmbyDisabled 仅在值变化时回写 EmbyDisabled，避免无谓写盘。
+//
+// 同时维护 EmbyAutoDisabled（「这次停用是系统按 Web 状态做的」）：
+//   - 启用：清掉标记；
+//   - 停用：若本地已是「管理员单独封禁」（已停用且无标记），保持无标记，封禁优先；
+//     否则按当下 Web 状态判断——Web 已停用或已过期即为系统停用，Web 正常则视为
+//     管理员单独封禁 Emby。Emby 状态对账只会重新启用带标记的账号。
 func (a *App) mirrorEmbyDisabled(uid int64, disabled bool) {
 	if uid == 0 {
 		return
 	}
-	if cur, ok := a.store().User(uid); ok && cur.EmbyDisabled == disabled {
+	cur, ok := a.store().User(uid)
+	if !ok {
+		return
+	}
+	auto := false
+	if disabled {
+		manualBan := cur.EmbyDisabled && !cur.EmbyAutoDisabled
+		auto = !manualBan && embyShouldDisableForWebState(cur)
+	}
+	if cur.EmbyDisabled == disabled && cur.EmbyAutoDisabled == auto {
 		return
 	}
 	_, _ = a.store().UpdateUser(uid, func(u *store.User) error {
 		u.EmbyDisabled = disabled
+		u.EmbyAutoDisabled = auto
 		return nil
 	})
 }

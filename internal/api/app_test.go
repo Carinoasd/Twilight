@@ -2948,7 +2948,12 @@ func TestTelegramMembershipRejoinManualReviewAndAutoEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error { u.Active = false; return nil }); err != nil {
+	// 只有因退群被巡检停用（DisabledReason=telegram_membership）的账号才会进入回群流程。
+	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error {
+		u.Active = false
+		u.DisabledReason = store.DisabledReasonTelegramMembership
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -117,6 +117,7 @@ func (s *Store) SpendSigninPointsAndUpdateUser(uid int64, cost int, fn func(*Use
 			if err := fn(&u); err != nil {
 				return err
 			}
+			normalizeUserDisabledReason(old, &u)
 		}
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
