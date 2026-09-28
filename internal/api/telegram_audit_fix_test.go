@@ -264,3 +264,50 @@ func TestTelegramDelAccountEmailReasonIsNotCode(t *testing.T) {
 		t.Fatalf("delete audit missing email-flow reason: %#v", logs)
 	}
 }
+
+// 灾难性回溯的正则必须被限时；修复前 regexp2 不检查中断，这类调用要跑一分钟以上。
+func TestDeveloperJSRegexpBacktrackingIsBounded(t *testing.T) {
+	app := newTestApp(t)
+	user := mustCreateTGUser(t, app, store.User{Username: "js-regex", Role: store.RoleNormal, Active: true, TelegramID: 5201, PasswordHash: "unused"})
+	code := `var r = new RegExp("^(?=a)(a+)+$"); reply(String(r.test("a".repeat(34) + "!")));`
+	done := make(chan string, 1)
+	start := time.Now()
+	go func() {
+		out, _, _ := app.telegramRunJSCustomCommand(code, telegramCommandCtx{FromID: user.TelegramID}, true)
+		done <- out
+	}()
+	select {
+	case out := <-done:
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("regex took %s", elapsed)
+		}
+		if strings.TrimSpace(out) != "false" {
+			t.Fatalf("timed-out regex should behave as no match, got %q", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("catastrophic regex was not bounded by the sandbox")
+	}
+}
+
+// 单条 update 卡住时，批处理必须在上限后放行，不能拖住其它聊天室。
+func TestTelegramUpdateBatchBoundsSingleUpdate(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	handle := telegramBoundedUpdateHandler(50*time.Millisecond, func(ctx context.Context, _ *telegramUpdate) {
+		select {
+		case <-release:
+		case <-time.After(time.Minute):
+		}
+	})
+	updates := []telegramUpdate{telegramTestMessageUpdate(1, 100), telegramTestMessageUpdate(2, 200)}
+	done := make(chan struct{})
+	go func() {
+		processTelegramUpdateBatch(context.Background(), updates, 2, handle)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stuck update blocked the whole batch")
+	}
+}
