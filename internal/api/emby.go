@@ -456,6 +456,12 @@ func (a *App) embyShouldEnableUser(u store.User) bool {
 }
 
 func embyAccessExpired(u store.User) bool {
+	// 管理员与白名单不受到期约束（check_expired 同样跳过他们）。升级为白名单时
+	// 旧的有限 ExpiredAt 会原样留下，若这里不排除，emby_sync / 管理员刷新 / 对账
+	// 会把他们的 Emby 停掉。
+	if u.Role == store.RoleAdmin || u.Role == store.RoleWhitelist {
+		return false
+	}
 	return u.EmbyID != "" && u.ExpiredAt > 0 && !expiryIsPermanent(u.ExpiredAt) && u.ExpiredAt < time.Now().Unix()
 }
 
