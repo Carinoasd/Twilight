@@ -34,6 +34,9 @@ func writeJSONWithCode(w http.ResponseWriter, status int, success bool, errorCod
 	if resolvedCode == "" {
 		resolvedCode = defaultErrorCode(status, success)
 	}
+	if sw, ok := w.(*statusResponseWriter); ok && !success {
+		sw.errorCode = resolvedCode
+	}
 	_ = json.NewEncoder(w).Encode(envelope{
 		Success:   success,
 		Code:      status,

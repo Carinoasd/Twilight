@@ -290,6 +290,7 @@ func (a *App) registerAdminRoutes() {
 	a.add(http.MethodDelete, "/api/v1/admin/ticket-types", AuthAdmin, a.handleAdminDeleteTicketType)
 	a.add(http.MethodPut, "/api/v1/admin/ticket-types", AuthAdmin, a.handleAdminRenameTicketType)
 	a.add(http.MethodGet, "/api/v1/admin/audit-logs", AuthAdmin, a.handleListAuditLogs)
+	a.add(http.MethodGet, "/api/v1/admin/audit-logs/actions", AuthAdmin, a.handleListAuditActions)
 	a.add(http.MethodDelete, "/api/v1/admin/audit-logs/:log_id", AuthAdmin, a.handleDeleteAuditLog)
 	a.add(http.MethodPost, "/api/v1/admin/audit-logs/clear", AuthAdmin, a.handleClearAuditLogs)
 	a.add(http.MethodPost, "/api/v1/admin/audit-logs/prune", AuthAdmin, a.handlePruneAuditLogs)

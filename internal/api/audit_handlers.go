@@ -2,16 +2,19 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/prejudice-studio/twilight/internal/store"
+	"go.uber.org/zap"
 )
 
 const (
@@ -58,6 +61,10 @@ func (a *App) auditWithUser(r *http.Request, uid int64, username, action, catego
 
 func (a *App) auditEntry(r *http.Request, uid int64, username, action, category string, targetUID int64, detail map[string]any) {
 	markRequestAuditWritten(r)
+	// 用户自助操作的 target 记成本人，按 target_uid 筛某个用户时才能查到他的自助记录。
+	if targetUID <= 0 && uid > 0 && normalizeAuditCategory(category) == "user" {
+		targetUID = uid
+	}
 	entry := store.AuditLog{
 		UID:       uid,
 		Username:  username,
@@ -70,6 +77,65 @@ func (a *App) auditEntry(r *http.Request, uid int64, username, action, category 
 		IP:        a.clientIP(r),
 	}
 	a.writeAuditEntry(entry)
+}
+
+// markAuditDryRun 让 handler 显式声明本次请求是否为预览（dry-run）。
+// payload 未带 dry_run、而 handler 默认按预览执行时应调用它，fallback 审计才能区分。
+func markAuditDryRun(r *http.Request, dryRun bool) {
+	if r == nil {
+		return
+	}
+	state, _ := r.Context().Value(auditRequestKey).(*auditRequestState)
+	if state == nil {
+		return
+	}
+	if dryRun {
+		state.dryRun.Store(2)
+	} else {
+		state.dryRun.Store(1)
+	}
+}
+
+// noteAuditDryRunFromPayload 在 decodeMap 解出 payload 后，若显式带了 dry_run 就记下。
+func noteAuditDryRunFromPayload(r *http.Request, payload map[string]any) {
+	if raw, exists := payload["dry_run"]; exists {
+		markAuditDryRun(r, auditTruthy(raw))
+	}
+}
+
+func auditTruthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return false
+}
+
+// requestAuditDryRun 返回本次请求的 dry_run 状态；known=false 表示无法判断。
+// 优先 handler / payload 的标记，其次 query 的 dry_run。
+func requestAuditDryRun(r *http.Request) (dryRun bool, known bool) {
+	if r == nil {
+		return false, false
+	}
+	if state, _ := r.Context().Value(auditRequestKey).(*auditRequestState); state != nil {
+		switch state.dryRun.Load() {
+		case 1:
+			return false, true
+		case 2:
+			return true, true
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("dry_run")); raw != "" {
+		return auditTruthy(raw), true
+	}
+	return false, false
 }
 
 func markRequestAuditWritten(r *http.Request) {
@@ -103,7 +169,7 @@ func (a *App) auditHTTPMutationConfigured() bool {
 	return a.cfg().AuditLogEnabled
 }
 
-func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Params, p *principal, status int) {
+func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Params, p *principal, status int, errorCode string) {
 	// 审计总开关关闭时，本次请求的 fallback 审计已无意义，直接短路。
 	// 配置在每请求只读一次（auditHTTPMutationConfigured，见 writeAuditEntry 对
 	// AuditLogEnabled 的同口径）；关闭期间热路径不再为「是否该补审计」反复装配
@@ -111,7 +177,11 @@ func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Param
 	if !a.auditHTTPMutationConfigured() {
 		return
 	}
-	if route == nil || !shouldFallbackAuditHTTPMutation(r, route, status) || requestAuditWritten(r) {
+	if route == nil || requestAuditWritten(r) {
+		return
+	}
+	kind := fallbackAuditKind(r, route, status)
+	if kind == fallbackAuditSkip {
 		return
 	}
 	uid, username := int64(0), ""
@@ -124,41 +194,77 @@ func (a *App) maybeAuditHTTPMutation(r *http.Request, route *Route, params Param
 			category = "admin"
 		} else {
 			category = "user"
+		}
+		// 自助路由（User / APIKey）的操作对象就是本人，管理员自己改自己的设置也一样。
+		if route.Auth == AuthUser || route.Auth == AuthAPIKey {
 			targetUID = p.User.UID
 		}
 	}
 	if target := safeAuditTargetUID(params); target > 0 {
 		targetUID = target
 	}
-	a.auditEntry(r, uid, username, fallbackAuditAction(route), category, targetUID, map[string]any{
+	action := fallbackAuditAction(route)
+	detail := map[string]any{
 		"fallback":      true,
 		"path_template": route.Pattern,
 		"status":        status,
 		"params":        safeAuditRouteParams(params),
-	})
+	}
+	if dryRun, known := requestAuditDryRun(r); known {
+		detail["dry_run"] = dryRun
+	}
+	if kind == fallbackAuditFailed {
+		// 管理员写操作失败（403/409/5xx 等）也留痕，action 加 _failed 后缀。
+		action += "_failed"
+		if errorCode != "" {
+			detail["error_code"] = errorCode
+		}
+	}
+	a.auditEntry(r, uid, username, action, category, targetUID, detail)
 }
 
-func shouldFallbackAuditHTTPMutation(r *http.Request, route *Route, status int) bool {
-	if r == nil || route == nil || status < 200 || status >= 300 {
-		return false
+type fallbackAuditDecision int
+
+const (
+	fallbackAuditSkip fallbackAuditDecision = iota
+	fallbackAuditSuccess
+	fallbackAuditFailed
+)
+
+// fallbackAuditKind 判断 handler 返回后是否需要补写 fallback 审计：
+//   - 2xx：User / Admin / APIKey 路由的写请求记成功；
+//   - 4xx / 5xx：只有 AuthAdmin 路由记失败（401 未登录、429 限流除外），
+//     普通用户的失败请求量大且多为输入错误，不记。
+func fallbackAuditKind(r *http.Request, route *Route, status int) fallbackAuditDecision {
+	if r == nil || route == nil {
+		return fallbackAuditSkip
 	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
-		return false
+		return fallbackAuditSkip
 	}
 	pattern := route.Pattern
 	// V1 and V2 share the audit store, so both prefixes must be exempted.
-	// Without the V2 branch, clearing or pruning audit logs writes new audit
-	// rows that immediately become candidates for the next prune.
+	// 审计日志维护接口在成功时已写不可删的自保记录；失败（如缺确认短语）不再补记，
+	// 避免裁剪 / 清空时产生新的待裁剪记录。
 	if strings.HasPrefix(pattern, "/api/v1/admin/audit-logs") ||
 		strings.HasPrefix(pattern, "/api/v2/admin/audit-logs") {
-		return false
+		return fallbackAuditSkip
 	}
 	if pattern == "/api/v1/auth/refresh" || pattern == "/api/v2/auth/refresh" {
-		return false
+		return fallbackAuditSkip
 	}
-	return route.Auth == AuthUser || route.Auth == AuthAdmin || route.Auth == AuthAPIKey
+	if status >= 200 && status < 300 {
+		if route.Auth == AuthUser || route.Auth == AuthAdmin || route.Auth == AuthAPIKey {
+			return fallbackAuditSuccess
+		}
+		return fallbackAuditSkip
+	}
+	if status >= 400 && status != http.StatusUnauthorized && status != http.StatusTooManyRequests && route.Auth == AuthAdmin {
+		return fallbackAuditFailed
+	}
+	return fallbackAuditSkip
 }
 
 func fallbackAuditAction(route *Route) string {
@@ -274,9 +380,29 @@ func (a *App) writeAuditEntry(entry store.AuditLog) {
 		limit = 10000
 	}
 	if err := a.store().AddAuditLog(entry, limit); err != nil {
-		// Do not recurse into runtime logging with the full detail payload. The
-		// persistence error is already sanitized by the shared text redactor.
-		fmt.Printf("audit log persistence failed: %s\n", redactSensitiveText(err.Error()))
+		// 审计写入失败不能静默吞掉：走 zap 运行日志并累计计数，计数经
+		// /system/stats 与数据库健康检查暴露。日志里只放 action 等元数据，不放 detail。
+		auditWriteFailures.Add(1)
+		auditWriteLastFailureAt.Store(time.Now().Unix())
+		zap.L().Error("audit log persistence failed",
+			zap.String("action", entry.Action),
+			zap.String("category", entry.Category),
+			zap.String("source", entry.Source),
+			zap.String("error", redactSensitiveText(err.Error())))
+	}
+}
+
+// 审计写入失败计数（进程级）。多实例部署时各实例各自计数。
+var (
+	auditWriteFailures      atomic.Int64
+	auditWriteLastFailureAt atomic.Int64
+)
+
+// auditWriteFailureStats 返回审计写入失败的累计次数与最近一次失败时间（unix 秒，0 表示从未失败）。
+func auditWriteFailureStats() map[string]any {
+	return map[string]any{
+		"failures":        auditWriteFailures.Load(),
+		"last_failure_at": auditWriteLastFailureAt.Load(),
 	}
 }
 
@@ -505,6 +631,7 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	presetFilter := strings.ToLower(r.URL.Query().Get("preset"))
 	categoryFilter := strings.ToLower(r.URL.Query().Get("category"))
 	actionFilter := strings.ToLower(r.URL.Query().Get("action"))
+	sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 	search := strings.ToLower(r.URL.Query().Get("search"))
 	from := auditLogUnixQuery(r, "from", "start")
 	to := auditLogUnixQuery(r, "to", "end")
@@ -520,6 +647,12 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	}
 	if actionFilter == "all" {
 		actionFilter = ""
+	}
+	// source 只接受已知取值，其它值（含 all）视为不筛选。
+	switch sourceFilter {
+	case "http", "telegram", "scheduler", "system":
+	default:
+		sourceFilter = ""
 	}
 	actionKeywords := []string(nil)
 	switch presetFilter {
@@ -549,6 +682,7 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	result := a.store().QueryAuditLogs(store.AuditLogQuery{
 		Category:       categoryFilter,
 		Action:         actionFilter,
+		Source:         sourceFilter,
 		UID:            uid,
 		TargetUID:      targetUID,
 		From:           from,
@@ -571,6 +705,20 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 		"per_page": perPage,
 		"sort":     sortBy,
 		"order":    order,
+	})
+}
+
+// handleListAuditActions 返回审计表中出现过的 action 列表，前端据此生成筛选下拉。
+func (a *App) handleListAuditActions(w http.ResponseWriter, _ *http.Request, _ Params) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	actions, err := a.store().ListAuditActions(2000)
+	if err != nil {
+		failWithCode(w, http.StatusInternalServerError, ErrInternal, "读取审计 action 失败")
+		return
+	}
+	ok(w, "OK", map[string]any{
+		"actions": actions,
+		"sources": []string{"http", "telegram", "scheduler", "system"},
 	})
 }
 
@@ -630,10 +778,30 @@ func (a *App) handleDeleteAuditLog(w http.ResponseWriter, r *http.Request, param
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "无效的日志 ID")
 		return
 	}
-	if err := a.store().DeleteAuditLog(id); err != nil {
+	// 单条删除也要求确认短语（body 的 confirm 或 query 的 confirm 均可）。
+	if firstNonEmpty(stringValue(decodeMap(r), "confirm"), r.URL.Query().Get("confirm")) != confirmDeleteAuditLog {
+		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "需要确认短语 confirm="+confirmDeleteAuditLog)
+		return
+	}
+	deleted, err := a.store().DeleteAuditLog(id)
+	if errors.Is(err, store.ErrAuditLogProtected) {
+		failWithCode(w, http.StatusForbidden, ErrForbidden, "该审计记录不可删除")
+		return
+	}
+	if err != nil {
 		failWithCode(w, http.StatusNotFound, ErrNotFound, "日志不存在")
 		return
 	}
+	// 删除成功后再写一条不可删除的自保记录，记下被删记录的关键信息。
+	a.auditAuditLogMaintenance(r, "delete_audit_log", deleted.UID, map[string]any{
+		"log_id":             deleted.ID,
+		"deleted_action":     deleted.Action,
+		"deleted_category":   deleted.Category,
+		"deleted_uid":        deleted.UID,
+		"deleted_username":   deleted.Username,
+		"deleted_target_uid": deleted.TargetUID,
+		"deleted_created_at": deleted.CreatedAt,
+	})
 	ok(w, "已删除", nil)
 }
 
@@ -643,16 +811,17 @@ func (a *App) handleClearAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "需要确认短语 confirm="+confirmClearAuditLogs)
 		return
 	}
-	removed := a.store().AuditLogCount()
-	if err := a.store().ClearAuditLogs(); err != nil {
+	removed, err := a.store().ClearAuditLogs()
+	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrInternal, "清空失败")
 		return
 	}
+	a.auditAuditLogMaintenance(r, "clear_audit_logs", 0, map[string]any{"removed": removed})
 	ok(w, "审计日志已清空", map[string]any{"removed": removed})
 }
 
 // handlePruneAuditLogs 条件清理审计日志：支持按条数裁剪（max_entries）和按天数裁剪（retention_days），
-// 两者可同时指定。需要确认短语。preserve_admin 控制是否保留管理员操作日志（仅对天数裁剪有效）。
+// 两者可同时指定。需要确认短语。preserve_admin 控制是否保留管理员操作日志（对条数与天数裁剪都生效）。
 func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	if stringValue(payload, "confirm") != confirmPruneAuditLogs {
@@ -680,9 +849,16 @@ func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusInternalServerError, ErrInternal, "裁剪失败")
 		return
 	}
+	a.auditAuditLogMaintenance(r, "prune_audit_logs", 0, map[string]any{
+		"max_entries":      maxEntries,
+		"retention_days":   retentionDays,
+		"preserve_admin":   preserveAdmin,
+		"removed_by_limit": result.RemovedByLimit,
+		"removed_by_age":   result.RemovedByAge,
+	})
 	logs := []string{}
 	if maxEntries > 0 {
-		logs = append(logs, fmt.Sprintf("保留最近 %d 条，删除 %d 条", maxEntries, result.RemovedByLimit))
+		logs = append(logs, fmt.Sprintf("保留最近 %d 条，删除 %d 条（保留管理员=%v）", maxEntries, result.RemovedByLimit, preserveAdmin))
 	}
 	if retentionDays > 0 {
 		logs = append(logs, fmt.Sprintf("删除 %d 天前 %d 条（保留管理员=%v）", retentionDays, result.RemovedByAge, preserveAdmin))
@@ -691,6 +867,19 @@ func (a *App) handlePruneAuditLogs(w http.ResponseWriter, r *http.Request, _ Par
 		"current": a.store().AuditLogCount(),
 		"logs":    logs,
 	})
+}
+
+// auditAuditLogMaintenance 在删除 / 清空 / 裁剪审计日志之后写自保记录。这些 action
+// 在 store 层受保护，不会被后续任何删除操作带走。审计总开关关闭时仍写一条 zap
+// 运行日志，保证至少留下操作者与范围。
+func (a *App) auditAuditLogMaintenance(r *http.Request, action string, targetUID int64, detail map[string]any) {
+	p := current(r)
+	zap.L().Warn("audit log maintenance",
+		zap.String("action", action),
+		zap.Int64("operator_uid", p.User.UID),
+		zap.String("operator", p.User.Username),
+		zap.Any("detail", detail))
+	a.audit(r, action, "admin", targetUID, detail)
 }
 
 func auditLogDTO(log store.AuditLog) map[string]any {

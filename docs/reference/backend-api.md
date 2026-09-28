@@ -889,7 +889,9 @@ V2 Bangumi 页面使用公开资源 `GET /api/v2/bangumi/covers/{subject_id}` �
 
 管理员公告页面使用 `/api/v2/admin/announcements` 资源集合及其单公告写操作。列表筛选、分页和 no-store 响应由后端执行；创建、更新、显示/隐藏、置顶和删除仍走同一套 Store、字段归一化、渲染模式白名单与审计逻辑。正文在页面中按文本显示，不执行未审查的 Markdown/BBCode HTML。
 
-管理员操作日志页面使用 `/api/v2/admin/audit-logs` 资源。列表只返回有界分页，筛选和排序在 PostgreSQL 查询边界完成；删除、清空和裁剪仍要求管理员及固定确认短语。审计维护操作不会在刚清理的同一审计表中递归追加新记录，避免“清空后又出现一条维护日志”。
+管理员操作日志页面使用 `/api/v2/admin/audit-logs` 资源。列表只返回有界分页，筛选（含 `source=http|telegram|scheduler|system`）和排序在 PostgreSQL 查询边界完成；`GET /api/v2/admin/audit-logs/actions` 返回表中出现过的全部 action 供筛选下拉使用。删除单条（`DELETE_AUDIT_LOG`）、清空（`CLEAR_AUDIT_LOGS`）和裁剪（`PRUNE_AUDIT_LOGS`）都要求管理员及固定确认短语，并在操作完成后各写一条 `delete_audit_log` / `clear_audit_logs` / `prune_audit_logs` 自保记录（排程裁剪写 `cleanup_audit_logs`）；这些记录不会被单条删除、清空或任何裁剪带走，因此清空后日志中会保留一条“谁清空了日志”的记录。写入时的 `max_entries` 上限只裁剪非管理员记录，手动与排程按条数裁剪同样遵守 `preserve_admin`。
+
+未写明确审计的写请求由 fallback 审计兜底：User / Admin / APIKey 路由的 2xx 写请求记为 `<method>_<path>`；Admin 路由的 4xx / 5xx（401、429 除外）记为 `<method>_<path>_failed`，detail 带 `status` 与 `error_code`；请求显式带 `dry_run`（JSON 或 query）时 detail 带 `dry_run`。自助路由的 `target_uid` 记为本人。审计写入失败会写 zap 错误日志并累计计数，可在 `/api/v2/admin/stats` 与 `/api/v2/admin/health/database` 的 `audit_log.failures` 查看。
 
 #### 查询用户列表
 

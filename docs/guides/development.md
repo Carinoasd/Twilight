@@ -171,6 +171,7 @@ bash start_backend_dev.sh
 |------|----------|--------|------|
 | `NEXT_PUBLIC_API_URL` | 构建期 | 空 | Go API 基址；留空则由 rewrite 代理 `/api/*` 到 `BACKEND_URL` |
 | `NEXT_PUBLIC_CSP_CONNECT` | 构建期 | 空 | 追加到 CSP `connect-src` 的额外 origin 白名单，每项都会过 origin 校验 |
+| `NEXT_PUBLIC_CSP_IMG` | 构建期 | 空 | 追加到 CSP `img-src` 的额外 origin 白名单（空格分隔，每项过 origin 校验）。`img-src` 默认只放行本站、API 源、`image.tmdb.org` 与 Bangumi 图床；自建 TMDB 图片代理（`tmdb_image_url`）、后端配置的外部 `server_icon` / 登录背景地址必须写在这里，否则图片会被浏览器拦截。`NEXT_PUBLIC_AUTH_ICON_URL` / `NEXT_PUBLIC_SITE_ICON` / `NEXT_PUBLIC_LANDING_ICON` 的源会自动放行 |
 | `NEXT_PUBLIC_USE_V1_COMPAT` | 构建期 | `false` | 设为 `true` 时前端回退调用 `/api/v1/*`，仅用于紧急回滚 |
 | `BACKEND_URL` | 运行期 | `http://127.0.0.1:5000` | rewrite 的上游地址，仅在 `NEXT_PUBLIC_API_URL` 为空时参与 |
 | `HOSTNAME` / `PORT` | 运行期 | `127.0.0.1` / `3001` | standalone 服务监听地址与端口 |

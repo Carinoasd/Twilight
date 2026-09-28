@@ -1,5 +1,6 @@
 import type { ApiResponse } from "./api-types";
 import { deepClone } from "./deep-clone";
+import { emitSessionExpired, shouldTreatAsSessionExpired } from "./session-events";
 
 export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 
@@ -545,6 +546,9 @@ export async function apiRequest<T>(
     }
 
     if (!response.ok) {
+      if (shouldTreatAsSessionExpired(response.status, data?.error_code, endpoint)) {
+        emitSessionExpired({ endpoint, status: response.status, errorCode: data?.error_code });
+      }
       throw new ApiError({
         status: response.status,
         endpoint,
@@ -624,6 +628,9 @@ export async function apiRequestForm<T>(
     const { data } = await parseApiResponse<T>(response, endpoint, methodName, apiVersion);
 
     if (!response.ok) {
+      if (shouldTreatAsSessionExpired(response.status, data?.error_code, endpoint)) {
+        emitSessionExpired({ endpoint, status: response.status, errorCode: data?.error_code });
+      }
       throw new ApiError({
         status: response.status,
         endpoint,

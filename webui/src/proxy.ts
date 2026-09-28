@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { buildContentSecurityPolicy } from "@/lib/csp";
 
 /**
  * Proxy：只注入 CSP，不再根据 session cookie 做服务端跳转。
@@ -30,100 +31,20 @@ import { NextRequest, NextResponse } from "next/server";
  * SameSite 或浏览器持久化差异时容易把已登录用户反复送回 `/login`。
  */
 
-// safeOrigin 把 NEXT_PUBLIC_API_URL（可能是完整 URL，也可能配了路径）规约为
-// scheme + host + port 的纯 origin，用于 connect-src 白名单。
-//   - 拼路径会让浏览器解析失败：CSP source-list 不接受 path；
-//   - 解析失败 / 非 http(s) / 是 'self' 同义词时返回空串，让上层退化到默认列表，
-//     避免把无效 token 塞进 CSP 让整条 directive 静默失效。
-function safeOrigin(raw: string | undefined): string {
-  const trimmed = raw?.trim();
-  if (!trimmed) return "";
-  try {
-    const u = new URL(trimmed);
-    if (u.protocol !== "https:" && u.protocol !== "http:") return "";
-    return u.origin;
-  } catch {
-    return "";
-  }
-}
-
-function webSocketOriginFromHTTPOrigin(origin: string): string {
-  try {
-    const u = new URL(origin);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    return u.origin;
-  } catch {
-    return "";
-  }
-}
-
 export function proxy(request: NextRequest) {
-  void request;
-  const isDev = process.env.NODE_ENV !== "production";
-  // dev 下 Next 用 eval 做 HMR / RSC payload 解析；生产构建后丢掉 unsafe-eval。
-  const scriptExtras = isDev ? " 'unsafe-eval'" : "";
-
-  // connect-src 推导：
-  //   - 'self' 覆盖同域 fetch；
-  //   - NEXT_PUBLIC_API_URL 是 webui 在生产环境直连的后端基址（典型部署是
-  //     webui=twilight.example.com / api=twilightapi.example.com 两个子域），
-  //     其 origin 必须显式列入 connect-src，否则浏览器会以
-  //     "Refused to connect to '...' because it violates 'connect-src 'self''"
-  //     拒绝所有登录 / 鉴权 / 拉数据请求；这里直接从同一份构建期变量推导，
-  //     避免运维同时维护 NEXT_PUBLIC_API_URL 与 NEXT_PUBLIC_CSP_CONNECT 两份；
-  //   - Cloudflare Web Analytics 的 beacon：脚本走 static.cloudflareinsights.com、
-  //     回传走 cloudflareinsights.com/cdn-cgi/rum，部署在 CF Pages 上时 CF 会
-  //     自动注入，所以默认就放进允许列表（不开 CF Analytics 时浏览器只是不发请求，
-  //     无副作用）；
-  //   - NEXT_PUBLIC_CSP_CONNECT 留作运维兜底，可塞额外白名单（如对接的第三方
-  //     metrics / sentry / OAuth 跳转回调）。
-  const apiOrigin = safeOrigin(process.env.NEXT_PUBLIC_API_URL);
-  const selfWsOrigin = webSocketOriginFromHTTPOrigin(request.nextUrl.origin);
-  const apiWsOrigin = apiOrigin ? webSocketOriginFromHTTPOrigin(apiOrigin) : "";
-  const extraConnect = process.env.NEXT_PUBLIC_CSP_CONNECT?.trim();
-  const connectParts = new Set<string>(["'self'"]);
-  if (apiOrigin) connectParts.add(apiOrigin);
-  if (selfWsOrigin) connectParts.add(selfWsOrigin);
-  if (apiWsOrigin) connectParts.add(apiWsOrigin);
-  connectParts.add("https://cloudflareinsights.com");
-  if (extraConnect) {
-    // 允许 NEXT_PUBLIC_CSP_CONNECT，但每条都要过 safeOrigin 校验：
-    //   - "*" / "https:" / "data:" 这种全通配会让 connect-src 沦为摆设；
-    //   - 误粘的路径 / 带查询串的 URL 会让浏览器整条 directive 静默失效；
-    //   - 静默失败比硬失败危险，操作员通常不会回头检查 CSP 头部。
-    // 这里强制每个 token 必须解析成 http(s) origin，剩下的全丢，让运维错配
-    // 的代价仅限于"那条额外白名单没生效"，而不是"整套 CSP 解封"。
-    for (const piece of extraConnect.split(/\s+/)) {
-      const origin = safeOrigin(piece);
-      if (origin) connectParts.add(origin);
-    }
-  }
-  const connectSrc = Array.from(connectParts).join(" ");
-
-  // script-src 见文件顶部注释：Next 16 的内联 bootstrap 与 nonce-source 互斥
-  // （CSP3 规范要求 source-list 含 nonce-source 时忽略 'unsafe-inline'），
-  // 走 'self' 'unsafe-inline' 是当前最稳的策略——同源 + frame-ancestors 'none'
-  // + object-src 'none' 已挡掉框架嵌入与对象注入，纵深防御交给 HttpOnly cookie
-  // / 后端输入校验。
-  // static.cloudflareinsights.com 是 CF Pages 自动注入的 RUM 脚本来源；不放进
-  // 允许列表会在控制台刷出 "Refused to load the script ... beacon.min.js"。
-  const csp = [
-    "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com${scriptExtras}`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
-    `connect-src ${connectSrc}`,
-    "media-src 'self' https:",
-    "frame-ancestors 'none'",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "worker-src 'self' blob:",
-    "manifest-src 'self'",
-    "upgrade-insecure-requests",
-  ].join("; ");
-
+  const csp = buildContentSecurityPolicy({
+    isDev: process.env.NODE_ENV !== "production",
+    requestOrigin: request.nextUrl.origin,
+    apiUrl: process.env.NEXT_PUBLIC_API_URL,
+    extraConnect: process.env.NEXT_PUBLIC_CSP_CONNECT,
+    // 构建期配置的外部图标地址自动放行；后端配置的外部 server_icon / 登录背景需写进 NEXT_PUBLIC_CSP_IMG。
+    extraImg: [
+      process.env.NEXT_PUBLIC_CSP_IMG,
+      process.env.NEXT_PUBLIC_AUTH_ICON_URL,
+      process.env.NEXT_PUBLIC_SITE_ICON,
+      process.env.NEXT_PUBLIC_LANDING_ICON,
+    ].filter(Boolean).join(" "),
+  });
   const response = NextResponse.next();
   response.headers.set("Content-Security-Policy", csp);
   return response;

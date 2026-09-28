@@ -78,12 +78,12 @@ func (s *securityService) listIPBlacklist() []store.IPBlacklistEntry {
 	return s.app.store().ListIPBlacklist()
 }
 
-func (s *securityService) addIPBlacklist(ip, reason string, hours int) error {
+func (s *securityService) addIPBlacklist(ip, reason string, hours int) (int64, error) {
 	expireAt := int64(-1)
 	if hours > 0 {
 		expireAt = time.Now().Add(time.Duration(hours) * time.Hour).Unix()
 	}
-	return s.app.store().AddIPBlacklist(ip, reason, expireAt)
+	return expireAt, s.app.store().AddIPBlacklist(ip, reason, expireAt)
 }
 
 func (s *securityService) removeIPBlacklist(ip string) error {

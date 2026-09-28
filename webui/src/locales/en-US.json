@@ -135,7 +135,6 @@
       "siteBot": "Site Bot: ",
       "gettingBindCode": "Getting bind code…",
       "bindCodeInstruction": "Send /bind <code>",
-      "remainingTime": "{minutes} min remaining",
       "verified": "Verified",
       "afterBindingTip": "Your Telegram will be bound after registration.",
       "forceBindTip": "This site requires binding a Telegram account before registration.",
@@ -610,7 +609,10 @@
     "libraryStatsUnavailable": "Library stats are disabled or unavailable.",
     "serverNetworkStatus": "On-demand line checks; no automatic probes",
     "retest": "Test lines",
-    "notApplicable": "Not applicable"
+    "notApplicable": "Not applicable",
+    "viewLines": "View lines ({count})",
+    "publicLinesCount": "{count} public line(s)",
+    "dedicatedLinesCount": "{count} dedicated line(s)"
   },
   "playRank": {
     "title": "Play Ranking",
@@ -805,9 +807,6 @@
     "latencyLabel": "Latency: {value}",
     "noLines": "No available lines",
     "lineCopiedDescription": "Line address copied to clipboard",
-    "viewLines": "View lines ({count})",
-    "publicLinesCount": "{count} public line(s)",
-    "dedicatedLinesCount": "{count} dedicated line(s)",
     "linesHiddenUntilOpened": "Open to view line details and latency results",
     "lineDetailsDescription": "View the lines available to this account and test them on demand.",
     "lineAddressShownHere": "Line addresses are shown only after opening the details.",
@@ -2694,7 +2693,15 @@
     "prunePreserveAdmin": "Preserve admin operation logs (age-based only)",
     "pruneConfirm": "Confirm Prune",
     "pruneDone": "Prune completed",
-    "pruneFailed": "Prune failed"
+    "pruneFailed": "Prune failed",
+    "deleteConfirmTitle": "Delete this audit log entry?",
+    "deleteConfirmDescription": "Entry #{id} ({action}) will be deleted. The deletion itself is recorded in a protected entry that cannot be removed.",
+    "filterSource": "Source",
+    "allSources": "All sources",
+    "sourceHttp": "Web / API",
+    "sourceTelegram": "Telegram",
+    "sourceScheduler": "Scheduler",
+    "sourceSystem": "System"
   },
   "embyActivityLogs": {
     "title": "Emby Activity Logs",
@@ -2719,5 +2726,43 @@
   },
   "deviceAuditPatch": {
     "refreshedAt": "Updated {time}"
+  },
+  "passwordStrength": {
+    "defaultLabel": "New password",
+    "required": "{label} is required",
+    "tooLong": "{label} is too long (max 128 characters)",
+    "tooShort": "{label} is too weak: use at least 8 characters with upper- and lowercase letters and a digit",
+    "needLower": "{label} is too weak: include at least one lowercase letter",
+    "needUpper": "{label} is too weak: include at least one uppercase letter",
+    "needDigit": "{label} is too weak: include at least one digit",
+    "ok": "Strong enough",
+    "levelWeak": "Weak",
+    "levelFair": "Fair",
+    "levelGood": "Good",
+    "levelStrong": "Strong"
+  },
+  "asyncHandler": {
+    "status401": "Your session has expired. Please sign in again.",
+    "status403": "Permission denied",
+    "status404": "The requested resource does not exist",
+    "status409": "Conflict detected. Refresh and try again.",
+    "status413": "The upload is too large",
+    "status429": "Too many requests. Please try again later.",
+    "status5xx": "The server ran into a problem. Please try again later.",
+    "defaultErrorTitle": "Operation failed",
+    "requestFailed": "Request failed",
+    "networkError": "Network error"
+  },
+  "errorPage": {
+    "title": "Something went wrong",
+    "description": "Sorry, this page hit an unexpected error. Try again; if it keeps failing, refresh or go back home.",
+    "errorId": "Error ID: ",
+    "retry": "Retry",
+    "home": "Back to home"
+  },
+  "authStore": {
+    "sessionChanged": "Your sign-in state changed. Please check and try again.",
+    "userPayloadInvalid": "The server returned malformed user information",
+    "defaultRoleName": "User"
   }
 }

@@ -135,6 +135,7 @@ func (a *App) registerV2Routes() {
 	a.add(http.MethodPut, "/api/v2/admin/announcements/:announcement_id", AuthAdmin, a.handleV2UpdateAnnouncement)
 	a.add(http.MethodDelete, "/api/v2/admin/announcements/:announcement_id", AuthAdmin, a.handleV2DeleteAnnouncement)
 	a.add(http.MethodGet, "/api/v2/admin/audit-logs", AuthAdmin, a.handleV2ListAuditLogs)
+	a.add(http.MethodGet, "/api/v2/admin/audit-logs/actions", AuthAdmin, a.handleListAuditActions)
 	a.add(http.MethodDelete, "/api/v2/admin/audit-logs/:log_id", AuthAdmin, a.handleV2DeleteAuditLog)
 	a.add(http.MethodPost, "/api/v2/admin/audit-logs/clear", AuthAdmin, a.handleV2ClearAuditLogs)
 	a.add(http.MethodPost, "/api/v2/admin/audit-logs/prune", AuthAdmin, a.handleV2PruneAuditLogs)

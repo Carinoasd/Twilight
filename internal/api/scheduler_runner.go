@@ -755,18 +755,31 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "reason": "auto cleanup disabled"}, nil, nil
 		}
 		logs := []string{}
-		// 按条数裁剪（保留最新 N 条）
+		preserveAdmin := jobParamBool(params, "preserve_admin", true)
+		detail := map[string]any{"preserve_admin": preserveAdmin}
+		// 按条数裁剪（保留最新 N 条）；preserve_admin 同样作用于条数裁剪，错误不再吞掉。
 		if maxEntries := jobParamInt(params, "max_entries", 0); maxEntries > 0 {
-			_ = a.store().PruneAuditLogs(maxEntries)
-			logs = append(logs, fmt.Sprintf("enforced max %d entries (current: %d)", maxEntries, a.store().AuditLogCount()))
+			removed, err := a.store().PruneAuditLogs(maxEntries, preserveAdmin)
+			if err != nil {
+				return map[string]any{"success": false}, logs, fmt.Errorf("prune audit logs by count: %w", err)
+			}
+			detail["max_entries"] = maxEntries
+			detail["removed_by_limit"] = removed
+			logs = append(logs, fmt.Sprintf("enforced max %d entries, removed %d (preserve_admin=%v, current: %d)", maxEntries, removed, preserveAdmin, a.store().AuditLogCount()))
 		}
 		// 按天数裁剪
 		if retentionDays := jobParamInt(params, "retention_days", 0); retentionDays > 0 {
-			preserveAdmin := jobParamBool(params, "preserve_admin", true)
 			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
-			removed := a.store().PruneAuditLogsByAge(cutoff, preserveAdmin)
+			removed, err := a.store().PruneAuditLogsByAge(cutoff, preserveAdmin)
+			if err != nil {
+				return map[string]any{"success": false}, logs, fmt.Errorf("prune audit logs by age: %w", err)
+			}
+			detail["retention_days"] = retentionDays
+			detail["removed_by_age"] = removed
 			logs = append(logs, fmt.Sprintf("removed %d entries older than %d days (preserve_admin=%v)", removed, retentionDays, preserveAdmin))
 		}
+		// 排程裁剪同样写一条不可删除的自保记录。
+		a.auditSystem("scheduler", "cleanup_audit_logs", 0, detail)
 		return map[string]any{"success": true, "current": a.store().AuditLogCount()}, logs, nil
 	case "cleanup_unlinked_emby":
 		if !a.embyConfigured() {

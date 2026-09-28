@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"strings"
+
+	"github.com/prejudice-studio/twilight/internal/store"
 )
 
 func (a *App) handleV2UserDevices(w http.ResponseWriter, r *http.Request, params Params) {
@@ -90,6 +92,12 @@ func (a *App) handleV2AddIPBlacklist(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
 	}
+	normalizedIP, validIP := store.NormalizeIPBlacklistEntry(ip)
+	if !validIP {
+		failWithCode(w, http.StatusBadRequest, ErrIPInvalid, "IP 或 CIDR 格式无效")
+		return
+	}
+	ip = normalizedIP
 
 	const maxBlacklistHours = 24 * 365 * 10
 	hours := intValue(payload, "hours", -1)
@@ -103,15 +111,12 @@ func (a *App) handleV2AddIPBlacklist(w http.ResponseWriter, r *http.Request, _ P
 	}
 
 	reason := stringValue(payload, "reason")
-	if err := a.security().addIPBlacklist(ip, reason, hours); statusFromError(w, err) {
+	expireAt, err := a.security().addIPBlacklist(ip, reason, hours)
+	if statusFromError(w, err) {
 		return
 	}
-
-	expireAt := int64(-1)
-	if hours > 0 {
-		expireAt = int64(hours)
-	}
-	a.audit(r, "add_ip_blacklist", "admin", 0, map[string]any{"ip": ip, "expire_at": expireAt, "reason": reason})
+	// expire_at 记真实的过期时间戳（原实现误记成小时数）。
+	a.audit(r, "add_ip_blacklist", "admin", 0, map[string]any{"ip": ip, "expire_at": expireAt, "hours": hours, "reason": reason})
 	ok(w, "IP 已加入黑名单", nil)
 }
 

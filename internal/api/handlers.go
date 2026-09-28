@@ -1407,11 +1407,18 @@ func (a *App) handleIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params
 
 func (a *App) handleAddIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
-	ip := stringValue(payload, "ip")
+	ip := strings.TrimSpace(stringValue(payload, "ip"))
 	if ip == "" {
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
 	}
+	// 校验并规范化（支持 CIDR），格式错误直接拒绝，避免写入永远匹配不到的条目。
+	normalizedIP, validIP := store.NormalizeIPBlacklistEntry(ip)
+	if !validIP {
+		failWithCode(w, http.StatusBadRequest, ErrIPInvalid, "IP 或 CIDR 格式无效")
+		return
+	}
+	ip = normalizedIP
 	// hours 上限：10 年。time.Duration 是 int64 纳秒，hours * time.Hour 在 hours
 	// 接近 math.MaxInt32 时会整数溢出，得到一个绕到过去的 expireAt（负数）。
 	// admin 误填或 admin 凭据被盗时可借此构造"永久封禁"或"立即解封"的歧义状态，
@@ -1439,7 +1446,7 @@ func (a *App) handleAddIPBlacklist(w http.ResponseWriter, r *http.Request, _ Par
 }
 
 func (a *App) handleDeleteIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params) {
-	ip := stringValue(decodeMap(r), "ip")
+	ip := strings.TrimSpace(stringValue(decodeMap(r), "ip"))
 	if ip == "" {
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
@@ -1777,6 +1784,8 @@ func (a *App) systemStatsData() map[string]any {
 		},
 		"routes": len(a.routes),
 		"uptime": int64(time.Since(runtimeStartedAt).Seconds()),
+		// 审计写入失败计数，便于发现操作日志静默丢失。
+		"audit_log": auditWriteFailureStats(),
 	}
 }
 
@@ -1803,6 +1812,7 @@ func (a *App) databaseHealth(parent context.Context) map[string]any {
 		"storage_warning":   a.databaseMismatchWarning(),
 		"state_read_ok":     true,
 		"user_count":        userCount,
+		"audit_log":         auditWriteFailureStats(),
 	}
 	if storageMismatch {
 		result["status"] = "configuration_mismatch"

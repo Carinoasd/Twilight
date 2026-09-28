@@ -280,5 +280,53 @@
     "noTimedJobsWarning": "当前没有自动调度。手动任务也需要运行中的 scheduler 或 all 进程。",
     "editorFootnote": "修改适用于之后入队的任务；已入队和运行中的任务保留原参数。重置会恢复配置文件默认值。",
     "description": "管理任务调度、执行和历史记录。"
+  },
+  "adminAuditLog": {
+    "deleteConfirmTitle": "删除这条审计日志？",
+    "deleteConfirmDescription": "将删除 #{id}（{action}）。删除操作本身会留下一条不可删除的记录。",
+    "filterSource": "来源",
+    "allSources": "全部来源",
+    "sourceHttp": "网页 / API",
+    "sourceTelegram": "Telegram",
+    "sourceScheduler": "定时任务",
+    "sourceSystem": "系统"
+  },
+  "passwordStrength": {
+    "defaultLabel": "新密码",
+    "required": "请提供{label}",
+    "tooLong": "{label}过长，最多 128 位",
+    "tooShort": "{label}强度不足：至少 8 位，且包含大小写字母和数字",
+    "needLower": "{label}强度不足：至少包含一个小写字母",
+    "needUpper": "{label}强度不足：至少包含一个大写字母",
+    "needDigit": "{label}强度不足：至少包含一个数字",
+    "ok": "强度合格",
+    "levelWeak": "弱",
+    "levelFair": "一般",
+    "levelGood": "良好",
+    "levelStrong": "强"
+  },
+  "asyncHandler": {
+    "status401": "登录态已失效，请重新登录",
+    "status403": "权限不足",
+    "status404": "请求的资源不存在",
+    "status409": "操作冲突，请刷新后重试",
+    "status413": "上传内容过大",
+    "status429": "请求过于频繁，请稍后再试",
+    "status5xx": "服务器开小差了，请稍后再试",
+    "defaultErrorTitle": "操作失败",
+    "requestFailed": "请求失败",
+    "networkError": "网络异常"
+  },
+  "errorPage": {
+    "title": "页面崩溃了",
+    "description": "抱歉，页面遇到未预期错误。可以先重试；如果反复失败，请刷新或回到首页。",
+    "errorId": "错误 ID：",
+    "retry": "重试",
+    "home": "回到首页"
+  },
+  "authStore": {
+    "sessionChanged": "登录状态已变化，请重新确认",
+    "userPayloadInvalid": "服务器返回的用户信息格式异常",
+    "defaultRoleName": "普通用户"
   }
 }

@@ -189,7 +189,8 @@ func (a *App) handleAdminBindUserEmail(w http.ResponseWriter, r *http.Request, p
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "用户 ID 无效")
 		return
 	}
-	if _, ok := a.store().User(uid); !ok {
+	before, found := a.store().User(uid)
+	if !found {
 		failWithCode(w, http.StatusNotFound, ErrUserNotFound, userNotFoundMessage)
 		return
 	}
@@ -223,6 +224,12 @@ func (a *App) handleAdminBindUserEmail(w http.ResponseWriter, r *http.Request, p
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "admin_bind_email", "admin", uid, map[string]any{
+		"old_email_masked": maskEmail(before.Email),
+		"new_email_masked": maskEmail(u.Email),
+		"mark_verified":    markVerified,
+		"force":            force,
+	})
 	ok(w, "已绑定邮箱", publicUser(u))
 }
 
@@ -253,6 +260,7 @@ func (a *App) handleAdminSetUserEmailVerified(w http.ResponseWriter, r *http.Req
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "admin_set_email_verified", "admin", uid, map[string]any{"verified": verified, "old_verified": target.EmailVerified, "force": force})
 	ok(w, "已更新邮箱验证状态", publicUser(u))
 }
 
@@ -280,10 +288,12 @@ func (a *App) handleAdminEmailTest(w http.ResponseWriter, r *http.Request, _ Par
 	subject := site + " 邮件发送测试"
 	body := "这是一封来自 " + site + " 的 SMTP 测试邮件。\n\n如果你收到了它，说明邮件发送配置正常。"
 	if err := smtpDeliver(ctx, *cfg, to, subject, body); err != nil {
+		a.audit(r, "admin_test_email", "admin", 0, map[string]any{"to_masked": maskEmail(to), "success": false})
 		results = append(results, map[string]any{"target": "SMTP 发信", "success": false, "error": err.Error()})
 		ok(w, "测试完成", map[string]any{"results": results})
 		return
 	}
+	a.audit(r, "admin_test_email", "admin", 0, map[string]any{"to_masked": maskEmail(to), "success": true})
 	results = append(results, map[string]any{"target": "SMTP 发信", "success": true, "to": maskEmail(to)})
 	ok(w, "测试完成", map[string]any{"results": results})
 }

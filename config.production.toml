@@ -412,8 +412,11 @@ new_media_notify = false
 [BangumiSync]
 # 开启后看完 Emby 自动在 BGM 标记进度（每个用户必须配置自己的 Token）
 enabled = false
-# Emby Webhook 共享密钥；建议设置并在通知 URL 后追加 ?token=该值
+# Webhook 密钥。推荐用它对 "timestamp.body" 做 HMAC-SHA256，放在 X-Twilight-Bangumi-Signature: sha256=<hex>，
+# 并带 X-Twilight-Bangumi-Timestamp；旧的 X-Twilight-Bangumi-Token 头 / ?token= 只在兼容期可用
 webhook_secret = ""
+# 兼容期开关：true 时仍接受共享 token 鉴权（记警告，无法防重放）；确认改用签名后设为 false
+webhook_allow_legacy_token = true
 auto_add_collection = true
 private_collection = true
 # 命中关键词的条目不同步

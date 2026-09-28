@@ -9,7 +9,23 @@ import (
 	"github.com/prejudice-studio/twilight/internal/security"
 	"github.com/prejudice-studio/twilight/internal/store"
 	"github.com/prejudice-studio/twilight/internal/validate"
+	"go.uber.org/zap"
 )
+
+// emailPasswordResetSendTimeout 限制后台寄信（含 SMTP）的最长时间。
+const emailPasswordResetSendTimeout = 2 * time.Minute
+
+// emailPasswordResetDispatch 在后台执行寄信；测试可替换为同步执行。
+var emailPasswordResetDispatch = func(task func()) {
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				zap.L().Error("password reset email task panicked", zap.Any("panic", recovered))
+			}
+		}()
+		task()
+	}()
+}
 
 type emailPasswordResetResult struct {
 	ResendAfter int
@@ -22,7 +38,16 @@ func (a *App) requestEmailPasswordReset(ctx context.Context, ip, email string) (
 		return emailPasswordResetResult{}, passwordResetFail(http.StatusBadRequest, ErrEmailInvalid, err.Error())
 	}
 	if user, found := a.store().FindUserByEmailVerified(email); found && user.Active {
-		_, _, _, _ = a.issueEmailCode(ctx, ip, emailPurposeResetPassword, email, user.UID)
+		// 寄信放到后台：原实现在信箱存在时同步走 SMTP（数百毫秒到十秒），不存在时
+		// 立即返回，响应时间差可用来枚举已注册信箱。后台任务脱离请求 ctx，独立限时。
+		uid := user.UID
+		emailPasswordResetDispatch(func() {
+			bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), emailPasswordResetSendTimeout)
+			defer cancel()
+			if _, _, code, _ := a.issueEmailCode(bg, ip, emailPurposeResetPassword, email, uid); code != "" {
+				zap.L().Warn("password reset email not sent", zap.Int64("uid", uid), zap.String("error_code", string(code)))
+			}
+		})
 	}
 	cfg := a.cfg()
 	return emailPasswordResetResult{

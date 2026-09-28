@@ -60,6 +60,7 @@ export function MediaPoster({
       alt={alt}
       loading={eager ? "eager" : "lazy"}
       decoding="async"
+      referrerPolicy="no-referrer"
       draggable={false}
       onError={() => setFailed(true)}
       onLoad={(event) => {

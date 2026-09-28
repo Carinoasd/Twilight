@@ -287,6 +287,7 @@ const (
 	ErrDeviceIDInvalid            ErrCode = "DEVICE_ID_INVALID"
 	ErrDeviceBlocked              ErrCode = "DEVICE_BLOCKED"
 	ErrIPRequired                 ErrCode = "IP_REQUIRED"
+	ErrIPInvalid                  ErrCode = "IP_INVALID"
 	ErrIPBlacklistDurationInvalid ErrCode = "IP_BLACKLIST_DURATION_INVALID"
 	ErrUploadRateLimited          ErrCode = "UPLOAD_RATE_LIMITED"
 	ErrUploadInvalidPayload       ErrCode = "UPLOAD_INVALID_PAYLOAD"
