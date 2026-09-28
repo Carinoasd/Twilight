@@ -589,8 +589,13 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun, "scope": "all"}, []string{fmt.Sprintf("cleared %d pending Emby entitlements", cleared)}, nil
 	case "enforce_group_membership":
-		autoEnableRejoined := jobParamBool(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined)
-		result, logs, err := a.enforceTelegramMembership(r.Context(), autoEnableRejoined)
+		// dry_run 只列出会停用 / 会启用的名单；breaker_* 允许管理员临时调整熔断阈值。
+		result, logs, err := a.enforceTelegramMembershipWithOptions(r.Context(), telegramMembershipOptions{
+			AutoEnableRejoined: jobParamBool(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined),
+			DryRun:             jobParamBool(params, "dry_run", false),
+			BreakerPercent:     clamp(jobParamInt(params, "breaker_percent", a.cfg().TelegramMembershipBreakerPercent), 0, 100),
+			BreakerMax:         max(jobParamInt(params, "breaker_max", a.cfg().TelegramMembershipBreakerMax), 0),
+		})
 		result["success"] = err == nil
 		return result, logs, err
 	case "check_telegram_bindings":

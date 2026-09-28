@@ -146,6 +146,11 @@ require_group_membership = false
 group_check_interval_minutes = 30
 # 群组巡检 get_chat_member 并发数；过高可能触发 Telegram 限流
 group_check_concurrency = 24
+# 群组巡检熔断：单轮拟停用人数超过扫描人数的该百分比（且至少 3 人），或超过绝对人数时，
+# 整轮中止、不停用任何人，并把任务标记为失败。群 ID 配错、Bot 被踢出群导致的
+# "chat not found" 等群组层级错误同样会让整轮中止。0 表示关闭对应的一项。
+membership_breaker_percent = 20
+membership_breaker_max = 50
 # 群组禁用/踢出/封禁等写操作并发数；建议低于巡检并发
 group_action_concurrency = 8
 # 退群完全封禁模式：开启后巡检发现退群用户会在所有 GROUP_ID 群里被永久 ban

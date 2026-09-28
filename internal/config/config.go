@@ -180,31 +180,35 @@ type Config struct {
 	TelegramGroupActionConcurrency int
 	TelegramBanOnLeave             bool
 	TelegramAutoEnableRejoined     bool
-	TelegramEnablePanel            bool
-	TelegramBotStartText           string
-	TelegramBotGroupStartText      string
-	TelegramBotStartTitle          string
-	TelegramBotStartIntro          string
-	TelegramBotBindPromptText      string
-	TelegramBotHelpText            string
-	TelegramBotAdminHelpText       string
-	TelegramBotHelpHeader          string
-	TelegramBotHelpFooter          string
-	TelegramBotAbout               string
-	TelegramGroupUserPanelTemplate string
-	TelegramCustomCommands         []TelegramCommandReply
-	TelegramDisabledCommands       []string // 被禁用的内置指令列表
-	TelegramParseMode              string   // 消息解析模式：""（纯文本）、Markdown、MarkdownV2、HTML
-	BotInternalSecret              string
-	BangumiEnabled                 bool
-	BangumiManageEnabled           bool
-	BangumiWebhookSecret           string
-	TMDBAPIKey                     string
-	TMDBAPIURL                     string
-	TMDBImageURL                   string
-	BangumiToken                   string
-	BangumiAPIURL                  string
-	BangumiAppID                   string
+	// 群成员巡检熔断：本轮拟停用人数超过扫描人数的百分比（0=关闭），或超过绝对人数
+	// （0=关闭）时整轮中止、不做任何停用。防止群 ID 配错 / Bot 被踢时一轮禁用全站。
+	TelegramMembershipBreakerPercent int
+	TelegramMembershipBreakerMax     int
+	TelegramEnablePanel              bool
+	TelegramBotStartText             string
+	TelegramBotGroupStartText        string
+	TelegramBotStartTitle            string
+	TelegramBotStartIntro            string
+	TelegramBotBindPromptText        string
+	TelegramBotHelpText              string
+	TelegramBotAdminHelpText         string
+	TelegramBotHelpHeader            string
+	TelegramBotHelpFooter            string
+	TelegramBotAbout                 string
+	TelegramGroupUserPanelTemplate   string
+	TelegramCustomCommands           []TelegramCommandReply
+	TelegramDisabledCommands         []string // 被禁用的内置指令列表
+	TelegramParseMode                string   // 消息解析模式：""（纯文本）、Markdown、MarkdownV2、HTML
+	BotInternalSecret                string
+	BangumiEnabled                   bool
+	BangumiManageEnabled             bool
+	BangumiWebhookSecret             string
+	TMDBAPIKey                       string
+	TMDBAPIURL                       string
+	TMDBImageURL                     string
+	BangumiToken                     string
+	BangumiAPIURL                    string
+	BangumiAppID                     string
 
 	RegisterEnabled                 bool
 	RegisterCodeLimit               bool
@@ -443,6 +447,8 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.TelegramGroupActionConcurrency = reader.intValue(cfg.TelegramGroupActionConcurrency, "Telegram.group_action_concurrency", "group_action_concurrency")
 	cfg.TelegramBanOnLeave = reader.boolValue(cfg.TelegramBanOnLeave, "Telegram.ban_on_leave", "ban_on_leave")
 	cfg.TelegramAutoEnableRejoined = reader.boolValue(cfg.TelegramAutoEnableRejoined, "Telegram.auto_enable_rejoined", "auto_enable_rejoined")
+	cfg.TelegramMembershipBreakerPercent = reader.intValue(cfg.TelegramMembershipBreakerPercent, "Telegram.membership_breaker_percent", "membership_breaker_percent")
+	cfg.TelegramMembershipBreakerMax = reader.intValue(cfg.TelegramMembershipBreakerMax, "Telegram.membership_breaker_max", "membership_breaker_max")
 	cfg.TelegramEnablePanel = reader.boolValue(cfg.TelegramEnablePanel, "Telegram.enable_tg_panel", "enable_tg_panel")
 	cfg.TelegramBotStartText = reader.stringValue(cfg.TelegramBotStartText, "Telegram.bot_start_text", "bot_start_text")
 	cfg.TelegramBotGroupStartText = reader.stringValue(cfg.TelegramBotGroupStartText, "Telegram.bot_group_start_text", "bot_group_start_text")
@@ -649,13 +655,15 @@ func defaults() Config {
 		// CookieSecure 默认 true：HTTPS 是生产基线，HTTP 调试场景显式
 		// 改 toml 或 env 关掉。旧默认 false 在 HTTP 部署时也不告警，
 		// 一旦运维忘改 production toml 即等于 session 明文走线。
-		CookieSecure:                   true,
-		SessionTTL:                     7 * 24 * time.Hour,
-		CookieSameSite:                 "lax",
-		TelegramAPIURL:                 "https://api.telegram.org",
-		TelegramGroupCheckConcurrency:  24,
-		TelegramGroupActionConcurrency: 8,
-		TelegramGroupUserPanelTemplate: DefaultTelegramGroupUserPanelTemplate,
+		CookieSecure:                     true,
+		SessionTTL:                       7 * 24 * time.Hour,
+		CookieSameSite:                   "lax",
+		TelegramAPIURL:                   "https://api.telegram.org",
+		TelegramGroupCheckConcurrency:    24,
+		TelegramGroupActionConcurrency:   8,
+		TelegramMembershipBreakerPercent: 20,
+		TelegramMembershipBreakerMax:     50,
+		TelegramGroupUserPanelTemplate:   DefaultTelegramGroupUserPanelTemplate,
 		// RegisterEnabled / EmbyDirectRegisterEnabled / AllowPendingRegister 都
 		// 默认 false——secure-by-default。空配置首次启动（dev 镜像、配置被误删、
 		// docker volume 丢配置）不再"自动开放注册 + Emby 直登"。运营要让外部
