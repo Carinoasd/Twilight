@@ -71,41 +71,43 @@ func (a *App) embyCapacityReached(excludeUID int64) (bool, int, int) {
 
 func (a *App) embyCapacityReachedExcluding(excludeUID int64, excludeRegCode, excludeInviteCode string) (bool, int, int) {
 	limit := a.cfg().EmbyUserLimit
-	current := 0
-	now := time.Now().Unix()
-	users := a.store().ListUsers()
-	for _, u := range users {
-		if u.UID == excludeUID {
-			continue
-		}
-		if u.EmbyID != "" || u.PendingEmby || (a.cfg().EmbyDirectRegisterEnabled && u.Active) {
-			current++
-		}
-	}
+	// 口径统一在 store.EmbyOccupancy（锁内复核 embyCapacityExceededHeldLock 共用）：
+	// 已绑定 / 待开通用户（自由开通开启时再加活跃用户）+ 管理员签发的有效
+	// type1/3 注册码剩余次数。
 	// 未使用的邀请码不预占 Emby 名额：普通用户可自行生成邀请码（默认每人 10 张、
 	// 不过期），旧实现每张都占 1 个名额，少数账号囤码即可让持码用户开通 Emby 时
-	// 报"已达上限"。邀请码被使用后受邀者进入 PendingEmby，由上方用户循环计入；
-	// 使用时（handleInviteUse / handleUseCode）也会先做容量检查。
-	// 管理员签发的注册码仍按剩余次数预占，保持"批量发码不超卖"的原意。
+	// 报"已达上限"。邀请码被使用后受邀者进入 PendingEmby 才计入；使用时
+	// （handleInviteUse / handleUseCode）也会先做容量检查。
 	_ = excludeInviteCode
-	for _, code := range a.store().ListRegCodes() {
-		slots := remainingRegCodeEmbySlots(code, now)
-		if excludeRegCode != "" && strings.EqualFold(code.Code, excludeRegCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
+	current := a.store().EmbyOccupancy(store.EmbyOccupancyOptions{
+		ExcludeUID:       excludeUID,
+		ExcludeRegCode:   excludeRegCode,
+		CountActiveUsers: a.cfg().EmbyDirectRegisterEnabled,
+	})
 	return limit > 0 && current >= limit, current, limit
 }
 
-func remainingRegCodeEmbySlots(code store.RegCode, now int64) int {
-	if !code.Active || code.IsDecoy || store.RegCodeExpired(code, now) {
-		return 0
+// embyCapacityExceededHeldLock 在 store 写锁回调内（卡码已消费、本用户尚未写回）
+// 复核 Emby 名额，超限返回 store.ErrEmbyCapacityReached 让整笔消费回滚。
+// 锁外的 embyCapacityReachedExcluding 与消费之间有 TOCTOU：多名用户同时兑换同一张
+// 无限次码（剩余名额只算 1）时，各自扣掉自己那 1 个后看到的占用相同，会全部通过。
+// 锁内时其他并发者已写入的 PendingEmby 都可见，码的 UseCount 也已包含本次消费，
+// 因此有限次码不再额外扣减（consumedRegCode 仅用于无限次码扣掉本次 1 个）。
+// 只能在 store 回调中调用。
+func (a *App) embyCapacityExceededHeldLock(excludeUID int64, consumedRegCode string) error {
+	limit := a.cfg().EmbyUserLimit
+	if limit <= 0 {
+		return nil
 	}
-	if code.Type != 1 && code.Type != 3 {
-		return 0
+	current := a.store().EmbyOccupancyHeldLock(store.EmbyOccupancyOptions{
+		ExcludeUID:       excludeUID,
+		ConsumedRegCode:  consumedRegCode,
+		CountActiveUsers: a.cfg().EmbyDirectRegisterEnabled,
+	})
+	if current >= limit {
+		return store.ErrEmbyCapacityReached
 	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
+	return nil
 }
 
 func remainingUseSlots(used, limit int) int {

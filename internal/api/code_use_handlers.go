@@ -143,6 +143,13 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 		if grantsEmby && u.EmbyID == "" && u.EmbyGrantLocked && !u.PendingEmby {
 			return store.ErrGrantLocked
 		}
+		// 锁内复核 Emby 名额（锁外预检与消费之间有 TOCTOU，无限次码尤甚）。
+		// 替换已有待开通资格的不新增占用，跳过。
+		if grantsEmby && u.EmbyID == "" && !u.PendingEmby {
+			if err := a.embyCapacityExceededHeldLock(u.UID, reg.Code); err != nil {
+				return err
+			}
+		}
 		if currentReplacesPendingEntitlement {
 			u.PendingEmby = false
 			u.PendingEmbyDays = nil
@@ -204,6 +211,10 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 	}
 	if errors.Is(err, store.ErrGrantLocked) {
 		failWithCode(w, http.StatusBadRequest, ErrCodeRegistrationGrantAlreadyUsed, "当前账号已经使用过 Emby 注册资格，不能重复使用注册码或邀请码")
+		return
+	}
+	if errors.Is(err, store.ErrEmbyCapacityReached) {
+		failWithCode(w, http.StatusConflict, ErrEmbyCapacityReached, "Emby 用户数量已达上限")
 		return
 	}
 	if errors.Is(err, store.ErrRegCodeAlreadyUsedByUser) {

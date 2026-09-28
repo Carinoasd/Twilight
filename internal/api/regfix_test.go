@@ -208,3 +208,41 @@ func TestUseRegcodeDoesNotDemoteAdmin(t *testing.T) {
 		t.Fatalf("admin expiry should stay unchanged: before=%d after=%d", admin.ExpiredAt, updated.ExpiredAt)
 	}
 }
+
+// 无限次码在容量计算里只预占 1 个名额：锁外预检看到的是旧状态时，锁内必须复核，
+// 否则并发兑换会超出 emby_user_limit。
+func TestUseUnlimitedRegcodeRechecksCapacityInsideLock(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().EmbyUserLimit = 2
+	if _, err := app.store().CreateUser(store.User{Username: "cap-bound", Role: store.RoleNormal, Active: true, EmbyID: "cap-emby"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := app.store().CreateUser(store.User{Username: "cap-first", Role: store.RoleNormal, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.store().CreateUser(store.User{Username: "cap-second", Role: store.RoleNormal, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store().UpsertRegCode(store.RegCode{Code: "CAP-UNLIMITED-01", Type: 1, Days: 30, ValidityTime: -1, UseCountLimit: -1, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	// 另一进程先让 first 兑换成功（占满最后 1 个名额），本进程内存仍是旧状态。
+	other := reopenTestStore(t)
+	if _, _, err := other.ConsumeRegCodeAndUpdateUser("CAP-UNLIMITED-01", first.UID, 0, func(u *store.User, _ store.RegCode) error {
+		u.PendingEmby = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	app.handleUseCode(rr, staleRegcodeAdminRequest(http.MethodPost, "/api/v1/users/me/use-code", `{"code":"CAP-UNLIMITED-01"}`, second), nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("second redemption must be rejected by in-lock capacity check, status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	updated, _ := app.store().User(second.UID)
+	if updated.PendingEmby {
+		t.Fatalf("capacity overflow: second user got pending entitlement: %#v", updated)
+	}
+}

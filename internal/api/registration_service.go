@@ -258,6 +258,10 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 		if consumed.Code == "" {
 			return nil
 		}
+		// 锁内复核 Emby 名额（新用户尚未写入 state，无需排除）。
+		if err := a.embyCapacityExceededHeldLock(0, consumed.Code); err != nil {
+			return err
+		}
 		days := normalizeRegCodeDays(consumed.Days)
 		user.PendingEmby = true
 		user.PendingEmbyDays = &days
@@ -304,6 +308,9 @@ func (a *App) registerUserLocked(input registrationInput, now int64) (registrati
 }
 
 func (a *App) mapRegistrationStoreError(err error, input registrationInput, bind store.BindCode, reg store.RegCode) error {
+	if errors.Is(err, store.ErrEmbyCapacityReached) {
+		return registrationFail(409, ErrEmbyCapacityReached, "Emby 用户数量已达上限")
+	}
 	if errors.Is(err, store.ErrTelegramLinkOwner) {
 		return registrationFail(400, ErrTGBindCodeNotFound, "绑定链接不存在或不属于当前浏览器")
 	}
