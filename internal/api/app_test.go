@@ -6672,8 +6672,9 @@ func TestInviteChildCanDetachSelfAfterExpiryAndDeleteOwnEmby(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain after self detach")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("self detach should clear invite code usage so relation cannot be rebuilt: %#v", invite)
+	// 断开只清使用者引用：码保持已用，不退次数、不重新启用（防小号重复使用）。
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("self detach should drop the usage reference and keep the code consumed: %#v", invite)
 	}
 	updated, ok := app.store().User(child.UID)
 	if !ok || !updated.Active || updated.EmbyID != "" || updated.EmbyUsername != "" || updated.EmbyDisabled || updated.PendingEmby {
@@ -7098,8 +7099,8 @@ func TestAdminBatchDetachInviteRelation(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("invite usage should be rolled back after batch detach: %#v", invite)
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("batch detach should drop the usage reference and keep the code consumed: %#v", invite)
 	}
 }
 
