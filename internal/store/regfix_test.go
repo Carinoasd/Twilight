@@ -107,3 +107,37 @@ func TestRepairRegistrationResidueSkipsRevokedGrant(t *testing.T) {
 		t.Fatalf("pending entitlement re-issued for revoked user: %#v", got)
 	}
 }
+
+// 批量删除注册码遇到版本冲突重放时，deleted / missing 不得重复累加。
+func TestDeleteRegCodesReplayDoesNotDuplicateResults(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	for _, code := range []string{"DEL-A", "DEL-B"} {
+		if err := st.UpsertRegCode(RegCode{Code: code, Type: 1, Days: 30, UseCountLimit: 1, Active: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := reopenTestStore(t)
+	fired := false
+	beforeSaveHookForTest = func(attempt int) {
+		// 钩子是包级变量，other 的写入也会触发它：只在第一次触发，避免递归自锁。
+		if attempt == 0 && !fired {
+			fired = true
+			// 另一进程抢先提交一次写入，制造版本冲突迫使闭包重放。
+			if _, err := other.CreateUser(User{Username: "conflict-writer", PasswordHash: "x"}); err != nil {
+				t.Errorf("conflict writer: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { beforeSaveHookForTest = nil })
+	deleted, missing, err := st.DeleteRegCodes([]string{"DEL-A", "DEL-B", "DEL-MISSING"})
+	beforeSaveHookForTest = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(deleted, []string{"DEL-A", "DEL-B"}) || !slices.Equal(missing, []string{"DEL-MISSING"}) {
+		t.Fatalf("replay duplicated results: deleted=%v missing=%v", deleted, missing)
+	}
+	if _, ok := st.FindUserByUsername("conflict-writer"); !ok {
+		t.Fatal("conflict writer's user should survive the replay")
+	}
+}

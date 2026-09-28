@@ -1068,6 +1068,9 @@ func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(cont
 			s.restoreStateLocked(prev)
 			return err
 		}
+		if beforeSaveHookForTest != nil {
+			beforeSaveHookForTest(attempt)
+		}
 		if persist == nil {
 			err = s.saveLocked()
 		} else {
@@ -5232,11 +5235,20 @@ func (s *Store) DeleteRegCode(code string) error {
 	})
 }
 
+// beforeSaveHookForTest 仅供测试注入：在 mutate 成功后、落盘前调用，用来稳定制造
+// 版本冲突以验证闭包重放。生产代码中恒为 nil。
+var beforeSaveHookForTest func(attempt int)
+
 func (s *Store) DeleteRegCodes(codes []string) (deleted []string, missing []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	deletedSet := map[string]bool{}
+	var deletedSet map[string]bool
 	mutErr := s.mutateAndSaveLocked(func() error {
+		// 版本冲突时 mutateAndSaveLocked 会重放本闭包：闭包外的累加变数必须在开头
+		// 重置，否则 deleted / missing 会重复，甚至同一个码同时出现在两边
+		// （第一次删掉的码在重放时被判为 missing）。
+		deleted, missing = nil, nil
+		deletedSet = map[string]bool{}
 		seen := map[string]bool{}
 		for _, code := range codes {
 			code = strings.TrimSpace(code)
