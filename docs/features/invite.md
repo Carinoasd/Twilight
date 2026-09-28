@@ -183,7 +183,7 @@ V2 管理资源：`GET /api/v2/admin/invite/tree` 返回 `data.item`，其中 `r
 2. 邀请人账号 `Active`（否则「账号已被禁用」）。
 3. `userEntitlementOK`：账号未过期（`Active=true` 且 `ExpiredAt` 不在过去）。这是与 `maxCodeDays` 重叠的显式防御纵深，确保「Active 但已过期」的账号无法签发邀请码。
 4. 若 `invite_require_emby = true`，邀请人必须已绑定 Emby。
-5. `maxCodeDays(user) > 0`：邀请人剩余有效期足以分配天数（永久号取 `permanent_invite_max_days`）。
+5. `maxCodeDays(user) > 0`：邀请人剩余有效期足以分配天数（永久号取 `permanent_invite_max_days`）。尚未开通 Emby 的普通用户 `expired_at=-1` 只表示「未设置」，不按永久号处理：持有待开通资格时以待开通天数封顶，没有待开通资格则不能发码。
 6. 当前层级 `inviteDepth(uid) < invite_max_depth`。
 7. 若 `invite_root_user_limit > 0`，整棵树的后代数量未达上限（`inviteDescendantCount(rootUID)`）。
 8. 若 `invite_limit != -1`，未使用的邀请码数量未达 `invite_limit`（仅统计 `active && use_count==0 && 未过期` 的码）。
@@ -196,7 +196,7 @@ V2 管理资源：`GET /api/v2/admin/invite/tree` 返回 `data.item`，其中 `r
 
 - 实际开通天数 `effectiveDays` 取邀请码的 `days`，若 `<=0` 或超过邀请人剩余天数则收敛到 `maxDays`。
 - **原子消费**：`store.ConsumeInviteCodeAndUpdateUser` 在一次加锁的状态变更里完成「`use_count++` / 标记 `used` / 达到 `use_count_limit` 时置 `active=false`」、写入 `invite_relations[childUID]`（指向邀请人）以及更新被邀请人权益。其中再次校验邀请码 `active`、未超用量上限、未过期、邀请人不等于使用者，任一不满足即整体失败回滚。
-- 被邀请人会被标记为 `PendingEmby`（待开通），写入用户级 `emby_grant_locked=true`，并把过期时间按 `effectiveDays` 顺延，且不会超过邀请人的过期时间（`boundedInviteExpiry`）。该锁不会因后续删除邀请码或断开邀请关系而解除。
+- 被邀请人会被标记为 `PendingEmby`（待开通），写入用户级 `emby_grant_locked=true`，并把过期时间按 `effectiveDays` 顺延，且不会超过邀请人的过期时间（`boundedInviteExpiry`）。真正开通 Emby（自助注册、自助绑定或管理员绑定）时会按邀请人当时的到期时间再封顶一次；邀请人已到期时自助开通会被拒绝（`INVITER_DAYS_SHORT`）。该锁不会因后续删除邀请码或断开邀请关系而解除。
 
 > 邀请码生成时即固定 `use_count_limit = 1`，因此每张邀请码只能被使用一次；用过的码自动失效。被本人删除时，`store.DeleteInviteCode` 会把该邀请码从状态文档物理移除，即使它已经被使用过也不再保留在邀请码列表里。删除码不会解除已经建立的邀请关系，避免“删码”误伤历史上下级；需要断开关系时使用自助 / 管理员 detach 入口。
 
