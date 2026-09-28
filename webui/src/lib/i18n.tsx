@@ -137,6 +137,14 @@ export function translate(key: MessageKey, params?: MessageParams): string {
 export function LocaleProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(defaultLocale);
   const [initialized, setInitialized] = useState(false);
+  // 语言字典是按需 dynamic import 的。加载完成前 t() 只能回退 basic.json（简中），
+  // 若加载完不触发重绘，页面会停在“一半目标语言、一半简中”的状态，按钮/标题的
+  // 字数差会让切换语言后的版面比例前后不一致。这里在字典就绪后递增版本号，
+  // 让 t 的引用变化、所有使用者重新渲染。
+  const [catalogVersion, setCatalogVersion] = useState(0);
+  const loadCatalog = useCallback((target: Locale) => {
+    void preloadLocale(target).then(() => setCatalogVersion((value) => value + 1));
+  }, []);
 
 	useEffect(() => {
 		const stored = normalizeLocale(window.localStorage.getItem(localeStorageKey));
@@ -144,13 +152,13 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
 		activeLocale = next;
 		setLocaleState(next);
 		setInitialized(true);
-		void preloadLocale(next);
-	}, []);
+		loadCatalog(next);
+	}, [loadCatalog]);
 
 	const setLocale = (nextLocale: Locale) => {
 		activeLocale = nextLocale;
 		setLocaleState(nextLocale);
-		void preloadLocale(nextLocale);
+		loadCatalog(nextLocale);
 	};
 
   useEffect(() => {
@@ -162,7 +170,9 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
 
   const t = useCallback((key: MessageKey, params?: MessageParams) => {
     return formatMessage(lookupMessage(locale, key), params);
-  }, [locale]);
+    // catalogVersion 不在函数体里使用，但字典加载完成后必须换一个 t 引用触发重绘。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locale, catalogVersion]);
 
   return <LocaleContext.Provider value={{ locale, setLocale, t }}>{children}</LocaleContext.Provider>;
 }

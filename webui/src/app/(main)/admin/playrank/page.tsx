@@ -18,7 +18,9 @@ import { api, type PlayRankGroupBy, type PlayRankRange, type PlayRankResponse, t
 import { PlayRankMediaLabel } from "@/components/play-rank-media-label";
 
 const rankRanges: PlayRankRange[] = ["day", "week", "month", "all"];
-const rankGroups: PlayRankGroupBy[] = ["item", "series"];
+// 三个榜单一次只看一个：剧集榜、电影榜、用户榜。单集明细不再在界面上展示。
+type RankBoard = "series" | "movie" | "users";
+const rankBoards: RankBoard[] = ["series", "movie", "users"];
 const rankSorts: PlayRankSortBy[] = ["plays", "duration"];
 
 // 当前排序指标用正常字重显示，另一个压暗。不这么做的话，两列数字并排、
@@ -48,7 +50,9 @@ export default function AdminPlayRankPage() {
   const { toast } = useToast();
 
   const [range, setRange] = useState<PlayRankRange>("day");
-  const [groupBy, setGroupBy] = useState<PlayRankGroupBy>("item");
+  const [board, setBoard] = useState<RankBoard>("series");
+  // 用户榜不依赖媒体分组，沿用剧集口径请求即可，切到用户榜不会多打一次接口。
+  const groupBy: PlayRankGroupBy = board === "movie" ? "movie" : "series";
   const [sortBy, setSortBy] = useState<PlayRankSortBy>("plays");
   const [data, setData] = useState<PlayRankResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -200,23 +204,22 @@ export default function AdminPlayRankPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t("playRank.groupBy")}</span>
-            {rankGroups.map((item) => (
+            {rankBoards.map((item) => (
               <button
                 key={item}
                 type="button"
-                onClick={() => setGroupBy(item)}
-                className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
-                  groupBy === item
+                onClick={() => setBoard(item)}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  board === item
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground hover:text-foreground"
                 }`}
               >
-                {item === "item" ? t("playRank.groupItem") : t("playRank.groupSeries")}
+                {item === "series" ? t("playRank.boardSeries") : item === "movie" ? t("playRank.boardMovie") : t("playRank.boardUsers")}
               </button>
             ))}
             <span className="self-center text-xs text-muted-foreground">
-              {groupBy === "item" ? t("playRank.groupItemHint") : t("playRank.groupSeriesHint")}
+              {board === "series" ? t("playRank.boardSeriesHint") : board === "movie" ? t("playRank.boardMovieHint") : t("playRank.boardUsersHint")}
             </span>
           </div>
 
@@ -301,41 +304,8 @@ export default function AdminPlayRankPage() {
             </Button>
           </CardContent>
         </Card>
-      ) : (
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card className="border-border/60">
-            <CardContent className="p-0">
-              <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
-                <Trophy className="h-4 w-4 text-primary" />
-                <h2 className="text-sm font-semibold">
-                  {groupBy === "series" ? t("playRank.mediaTitleSeries") : t("playRank.mediaTitle")}
-                </h2>
-                <Badge variant="secondary" className="ml-auto text-xs">{media.length}</Badge>
-              </div>
-              <div className="flex items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground">
-                <span className="w-6 shrink-0 text-center">{t("playRank.rank")}</span>
-                <span className="min-w-0 flex-1">{t("playRank.media")}</span>
-                <span className="w-14 shrink-0 text-right">{t("playRank.viewers")}</span>
-                <span className={`shrink-0 ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
-                <span className={`w-20 shrink-0 text-right ${sortBy === "duration" ? "text-foreground" : ""}`}>{t("playRank.duration")}</span>
-              </div>
-              {media.length === 0 ? (
-                <Empty hint={emptyHint} />
-              ) : (
-                media.map((item, index) => (
-                  <div key={`${item.item_id || item.title}-${index}`} className="flex items-center gap-3 border-t border-border/50 px-3 py-2.5">
-                    <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
-                    <PlayRankMediaLabel item={item} groupBy={groupBy} />
-                    <span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{item.viewers}</span>
-                    <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
-                    <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
-                  </div>
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="border-border/60">
+      ) : board === "users" ? (
+        <Card className="border-border/60">
             <CardContent className="p-0">
               <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
                 <Trophy className="h-4 w-4 text-primary" />
@@ -369,7 +339,38 @@ export default function AdminPlayRankPage() {
               )}
             </CardContent>
           </Card>
-        </div>
+      ) : (
+        <Card className="border-border/60">
+            <CardContent className="p-0">
+              <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
+                <Trophy className="h-4 w-4 text-primary" />
+                <h2 className="text-sm font-semibold">
+                  {board === "movie" ? t("playRank.mediaTitleMovie") : t("playRank.mediaTitleSeries")}
+                </h2>
+                <Badge variant="secondary" className="ml-auto text-xs">{media.length}</Badge>
+              </div>
+              <div className="flex items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground">
+                <span className="w-6 shrink-0 text-center">{t("playRank.rank")}</span>
+                <span className="min-w-0 flex-1">{t("playRank.media")}</span>
+                <span className="w-14 shrink-0 text-right">{t("playRank.viewers")}</span>
+                <span className={`shrink-0 ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
+                <span className={`w-20 shrink-0 text-right ${sortBy === "duration" ? "text-foreground" : ""}`}>{t("playRank.duration")}</span>
+              </div>
+              {media.length === 0 ? (
+                <Empty hint={emptyHint} />
+              ) : (
+                media.map((item, index) => (
+                  <div key={`${item.item_id || item.title}-${index}`} className="flex items-center gap-3 border-t border-border/50 px-3 py-2.5">
+                    <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
+                    <PlayRankMediaLabel item={item} groupBy={groupBy} />
+                    <span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{item.viewers}</span>
+                    <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
+                    <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
       )}
     </div>
   );

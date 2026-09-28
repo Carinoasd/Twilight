@@ -720,15 +720,36 @@ const (
 const (
 	PlaybackRankGroupItem   = "item"
 	PlaybackRankGroupSeries = "series"
+	// PlaybackRankGroupMovie 只统计电影，每部一行；series 只统计剧集，按剧名归并。
+	// 两个榜单互不混入对方的类型。
+	PlaybackRankGroupMovie = "movie"
 )
 
 // PlaybackRankGroup 把外部传入的分组参数收敛成两个枚举值之一。空值与未知值一律
 // 按 item 处理：宁可退回逐条明细，也不要让未过滤的字符串进到 SQL 的 GROUP BY 里。
 func PlaybackRankGroup(value string) string {
-	if value == PlaybackRankGroupSeries {
-		return PlaybackRankGroupSeries
+	switch value {
+	case PlaybackRankGroupSeries, PlaybackRankGroupMovie:
+		return value
 	}
 	return PlaybackRankGroupItem
+}
+
+// 电影与剧集的判定口径，PG 与内存兜底共用：同步时 media_type 已规范成小写，
+// 历史数据可能有大小写差异，统一 LOWER 比较；带剧名的条目一律算剧集。
+const (
+	playbackMovieFilterSQL  = `LOWER(COALESCE(media_type, '')) = 'movie' AND COALESCE(series_name, '') = ''`
+	playbackSeriesFilterSQL = `(LOWER(COALESCE(media_type, '')) = 'episode' OR COALESCE(series_name, '') <> '')`
+)
+
+func playbackRecordInGroup(groupBy string, record PlaybackRecord) bool {
+	switch groupBy {
+	case PlaybackRankGroupMovie:
+		return strings.EqualFold(record.MediaType, "movie") && record.SeriesName == ""
+	case PlaybackRankGroupSeries:
+		return strings.EqualFold(record.MediaType, "episode") || record.SeriesName != ""
+	}
+	return true
 }
 
 // 榜单的排序口径。两个指标回答的不是同一个问题：
@@ -880,14 +901,23 @@ WHERE played_at >= $1 AND item_id <> ''
 GROUP BY item_id
 ORDER BY ` + playbackRankOrderBy(opts.SortBy, "item_id") + `
 LIMIT $2`
-	if opts.GroupBy == PlaybackRankGroupSeries {
+	switch opts.GroupBy {
+	case PlaybackRankGroupSeries:
 		query = `SELECT '' AS item_id, MAX(` + playbackSeriesKey + `) AS title, '' AS series_name,
 COALESCE(MAX(media_type), '') AS media_type,
 COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id)
 FROM twilight_playback_records
-WHERE played_at >= $1 AND item_id <> '' AND ` + playbackSeriesKey + ` <> ''
+WHERE played_at >= $1 AND item_id <> '' AND ` + playbackSeriesKey + ` <> '' AND ` + playbackSeriesFilterSQL + `
 GROUP BY ` + playbackSeriesKey + `
 ORDER BY ` + playbackRankOrderBy(opts.SortBy, "2") + `
+LIMIT $2`
+	case PlaybackRankGroupMovie:
+		query = `SELECT item_id, MAX(title), '' AS series_name, COALESCE(MAX(media_type), ''),
+COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id)
+FROM twilight_playback_records
+WHERE played_at >= $1 AND item_id <> '' AND ` + playbackMovieFilterSQL + `
+GROUP BY item_id
+ORDER BY ` + playbackRankOrderBy(opts.SortBy, "item_id") + `
 LIMIT $2`
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pgPlaybackReadTimeout)
@@ -956,7 +986,7 @@ func (s *Store) playbackRankFromMemory(opts PlaybackRankOptions) ([]PlaybackMedi
 		if since > 0 && record.PlayedAt < since {
 			continue
 		}
-		if record.ItemID != "" {
+		if record.ItemID != "" && playbackRecordInGroup(groupBy, record) {
 			// series 模式按剧名归并：剧集用 series_name，电影没有剧名就用自己
 			// 的标题，与 PG 路径的 playbackSeriesKey 完全一致。
 			key := record.ItemID

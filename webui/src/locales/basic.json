@@ -786,7 +786,9 @@
     "movieCount": "电影",
     "seriesCount": "剧集",
     "episodeCount": "集数",
-    "libraryStatsUnavailable": "媒体库统计未开启或暂不可用。"
+    "libraryStatsUnavailable": "媒体库统计未开启或暂不可用。",
+    "copyLine": "复制线路地址",
+    "copyAllLines": "复制全部线路"
   },
   "playRank": {
     "title": "观看排行",
@@ -809,7 +811,7 @@
     "summaryViewers": "观看人数",
     "summaryItems": "媒体数量",
     "mediaTitle": "单集 / 影片榜",
-    "mediaTitleSeries": "整部剧榜",
+    "mediaTitleSeries": "剧集榜",
     "groupBy": "聚合方式",
     "groupItem": "按单集",
     "groupSeries": "按整部剧",
@@ -857,7 +859,14 @@
     "sourceActivityLog": "墙上时长（含暂停）",
     "sourcePluginHint": "时长来自 Emby 的 Playback Reporting 插件：PlayDuration 减去 PauseDuration，暂停与挂机不计入。活动中看不到这条徽标，说明插件未安装或探测失败，已回退活动日志。",
     "sourceActivityLogHint": "时长由活动日志的播放开始/停止事件配对得出，暂停时间也算在内。想扣除暂停，请在 Emby 安装 Playback Reporting 插件并在配置里开启对应开关。",
-    "sourceProbeFailed": "插件探测失败，已回退活动日志：{message}"
+    "sourceProbeFailed": "插件探测失败，已回退活动日志：{message}",
+    "boardSeries": "剧集榜",
+    "boardMovie": "电影榜",
+    "boardUsers": "用户榜",
+    "boardSeriesHint": "一部剧的所有集合并成一行",
+    "boardMovieHint": "只统计电影，每部一行",
+    "boardUsersHint": "按用户统计观看次数与时长",
+    "mediaTitleMovie": "电影榜"
   },
   "adminStats": {
     "unknown": "未知",

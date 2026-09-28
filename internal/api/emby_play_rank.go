@@ -71,6 +71,7 @@ func playRankWindow(now time.Time, rangeKey string) int64 {
 const (
 	playRankGroupItem   = "item"
 	playRankGroupSeries = "series"
+	playRankGroupMovie  = "movie"
 )
 
 // 排序口径：plays 是播放次数，duration 是累计时长。
@@ -128,9 +129,11 @@ func playRankQuery(r *http.Request) playRankRequest {
 	if limit > playRankMaxLimit {
 		limit = playRankMaxLimit
 	}
-	groupBy := playRankGroupItem
-	if query.Get("group_by") == playRankGroupSeries {
-		groupBy = playRankGroupSeries
+	// 默认看剧集榜：单集明细（item）只为兼容旧客户端保留，产品界面不再展示。
+	groupBy := playRankGroupSeries
+	switch query.Get("group_by") {
+	case playRankGroupItem, playRankGroupMovie:
+		groupBy = query.Get("group_by")
 	}
 	// 排序只有两个合法值，其余（含大小写不同的 "Plays"）一律回退 plays。
 	sortBy := playRankSortPlays
@@ -201,7 +204,11 @@ func (a *App) buildPlayRank(ctx context.Context, req playRankRequest, includeIde
 	// 季号/集号不落在播放记录表里，而是每次构建榜单时向 Emby 批量取回来补上。
 	// 这样历史记录不需要迁移就能显示集数；Emby 不可用时拿不到编号，只是少了
 	// 一个标识，榜单本身照常返回。
-	episodes := a.playRankEpisodes(ctx, media)
+	// 只有单集明细才需要季/集号；剧集榜一行是整部剧、电影榜没有集数，不必问 Emby。
+	episodes := map[string]playRankEpisode{}
+	if req.groupBy == playRankGroupItem {
+		episodes = a.playRankEpisodes(ctx, media)
+	}
 
 	mediaItems := make([]map[string]any, 0, len(media))
 	for _, item := range media {

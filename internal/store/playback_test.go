@@ -90,8 +90,9 @@ func TestPlaybackRankGroupBySeriesMergesEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bySeries) != 2 {
-		t.Fatalf("series mode should merge the two episodes into one row, got %d: %#v", len(bySeries), bySeries)
+	// 剧集榜只统计剧集：电影不再混进来。
+	if len(bySeries) != 1 {
+		t.Fatalf("series mode should only contain the merged series row, got %d: %#v", len(bySeries), bySeries)
 	}
 	// 两集合计 2 次播放，排在最前。
 	top := bySeries[0]
@@ -102,8 +103,20 @@ func TestPlaybackRankGroupBySeriesMergesEpisodes(t *testing.T) {
 	if top.ItemID != "" || top.SeriesName != "" {
 		t.Fatalf("series row must not carry per-episode identity: %+v", top)
 	}
-	if bySeries[1].Title != "某部电影" || bySeries[1].Episodes != 1 {
-		t.Fatalf("unexpected movie row: %+v", bySeries[1])
+
+	// 电影榜只统计电影，一部一行。
+	byMovie, _, err := st.PlaybackRank(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupMovie})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byMovie) != 1 || byMovie[0].Title != "某部电影" || byMovie[0].ItemID != "movie" || byMovie[0].Plays != 1 {
+		t.Fatalf("movie board should only contain the movie: %#v", byMovie)
+	}
+	// 内存兜底路径与 PG 口径一致。
+	memMovie, _, _ := st.playbackRankFromMemory(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupMovie, SortBy: PlaybackRankSortPlays})
+	memSeries, _, _ := st.playbackRankFromMemory(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupSeries, SortBy: PlaybackRankSortPlays})
+	if len(memMovie) != 1 || len(memSeries) != 1 {
+		t.Fatalf("memory fallback must filter by type too: movie=%#v series=%#v", memMovie, memSeries)
 	}
 
 	// 未知分组值必须退回逐条明细，绝不能把未过滤的字符串带进 GROUP BY。
@@ -173,8 +186,16 @@ func TestPlaybackRankSortBySeparatesPlaysFromDuration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(seriesByDuration) == 0 || seriesByDuration[0].Title != "长片" {
-		t.Fatalf("series mode with duration sort failed: %+v", seriesByDuration)
+	// 测试数据全是电影：剧集榜必须为空（不再混入电影），但 SQL 本身要能执行。
+	if len(seriesByDuration) != 0 {
+		t.Fatalf("series board must not contain movies: %+v", seriesByDuration)
+	}
+	movieByDuration, _, err := st.PlaybackRank(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupMovie, SortBy: PlaybackRankSortDuration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(movieByDuration) != 2 || movieByDuration[0].Title != "长片" {
+		t.Fatalf("movie board with duration sort failed: %+v", movieByDuration)
 	}
 
 	// 未知取值回退 plays，绝不能把未过滤的字符串带进 ORDER BY。

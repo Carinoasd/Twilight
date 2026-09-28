@@ -22,6 +22,19 @@ export function PlayRankMediaLabel({
 }) {
   const { t } = useI18n();
 
+  if (groupBy === "movie") {
+    return (
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium" title={item.title}>
+          {item.title || t("playRank.unknown")}
+        </p>
+        {showViewers ? (
+          <p className="truncate text-xs text-muted-foreground">{`${t("playRank.viewers")} ${item.viewers}`}</p>
+        ) : null}
+      </div>
+    );
+  }
+
   if (groupBy === "series") {
     const episodes = item.episodes ?? 0;
     return (

@@ -280,5 +280,19 @@
     "noTimedJobsWarning": "当前没有自动调度。手动任务也需要运行中的 scheduler 或 all 进程。",
     "editorFootnote": "修改适用于之后入队的任务；已入队和运行中的任务保留原参数。重置会恢复配置文件默认值。",
     "description": "管理任务调度、执行和历史记录。"
+  },
+  "playRank": {
+    "boardSeries": "剧集榜",
+    "boardMovie": "电影榜",
+    "boardUsers": "用户榜",
+    "boardSeriesHint": "一部剧的所有集合并成一行",
+    "boardMovieHint": "只统计电影，每部一行",
+    "boardUsersHint": "按用户统计观看次数与时长",
+    "mediaTitleMovie": "电影榜",
+    "mediaTitleSeries": "剧集榜"
+  },
+  "dashboard": {
+    "copyLine": "复制线路地址",
+    "copyAllLines": "复制全部线路"
   }
 }

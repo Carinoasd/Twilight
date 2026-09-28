@@ -27,6 +27,8 @@ import {
   Flame,
   Sparkles,
   UserPlus,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -101,6 +103,8 @@ export default function DashboardPage() {
   const [lineLatencyMap, setLineLatencyMap] = useState<Record<string, LineLatencyInfo>>({});
   const [isLatencyTesting, setIsLatencyTesting] = useState(false);
   const [showLineDetails, setShowLineDetails] = useState(false);
+  // 最近一次复制成功的线路 key（或 "__all__"），用于在按钮上短暂显示对勾。
+  const [copiedLineKey, setCopiedLineKey] = useState<string | null>(null);
   const [signinSummary, setSigninSummary] = useState<SigninSummary | null>(null);
   const [signingIn, setSigningIn] = useState(false);
   const [renewingWithPoints, setRenewingWithPoints] = useState(false);
@@ -422,6 +426,17 @@ export default function DashboardPage() {
     if (info.status === "error") return 11_000_000;
     return 12_000_000;
   }, [lineLatencyMap]);
+
+  const copyLineText = useCallback(async (key: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedLineKey(key);
+      toast({ title: t("common.copiedToClipboard"), variant: "success" });
+      window.setTimeout(() => setCopiedLineKey((current) => (current === key ? null : current)), 1500);
+    } catch {
+      toast({ title: t("common.copyFailed"), variant: "destructive" });
+    }
+  }, [t, toast]);
 
   const sortedLineSlots = useMemo(
     () => [...lineSlots].sort((a, b) => getLatencyRank(a.key) - getLatencyRank(b.key)),
@@ -1206,9 +1221,22 @@ export default function DashboardPage() {
                     <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-bold tabular-nums ${renderLatencyToneClass(slot.key)}`}>
                       {renderLatencyText(slot.key)}
                     </span>
-                    <p className="mt-1 max-w-[12rem] break-all text-left font-mono text-[11px] text-muted-foreground sm:max-w-[15rem]">
-                      {slot.url}
-                    </p>
+                    <div className="mt-1 flex items-start gap-1">
+                      <p className="max-w-[12rem] break-all text-left font-mono text-[11px] text-muted-foreground sm:max-w-[15rem]">
+                        {slot.url}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0"
+                        aria-label={t("dashboard.copyLine")}
+                        title={t("dashboard.copyLine")}
+                        onClick={() => void copyLineText(slot.key, slot.url)}
+                      >
+                        {copiedLineKey === slot.key ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                      </Button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1216,10 +1244,20 @@ export default function DashboardPage() {
           </div>
           <DialogFooter className="flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-left text-xs text-muted-foreground">{t("dashboard.lineAddressShownHere")}</p>
+            <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void copyLineText("__all__", sortedLineSlots.map((slot) => `${slot.name}: ${slot.url}`).join("\n"))}
+              disabled={lineSlots.length === 0}
+            >
+              {copiedLineKey === "__all__" ? <Check className="mr-2 h-4 w-4 text-emerald-500" /> : <Copy className="mr-2 h-4 w-4" />}
+              {t("dashboard.copyAllLines")}
+            </Button>
             <Button variant="outline" onClick={() => void runLineLatencyTests()} disabled={isLatencyTesting || lineSlots.length === 0}>
               {isLatencyTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
               {t("dashboard.retest")}
             </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
