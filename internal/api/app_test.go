@@ -6057,6 +6057,11 @@ func TestRegisterEmbyDoesNotOverwriteConcurrentBinding(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/New":
 			created = true
 			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created"}`))
+		// 新建账号后必须能收紧策略（GET 用户 + POST Policy），否则创建会整体失败。
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/race-created":
+			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created","Policy":{}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Policy":
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Password":
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/Users/race-created":

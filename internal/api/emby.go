@@ -274,7 +274,19 @@ func (a *App) embyCreateUser(ctx context.Context, username, password string) (ma
 	if id == "" {
 		return nil, fmt.Errorf("Emby did not return a user id")
 	}
-	_ = a.embyUpdatePolicy(ctx, id, func(policy map[string]any) {})
+	// 新建账号在 Emby 端带着默认策略（通常允许下载 / 转码等）。收紧失败时不能留下
+	// 这个权限过宽的账号：先按 5xx 重试，仍失败就删掉新账号并回错，让调用方整体失败。
+	if err := embyRetryOn5xx(ctx, func(c context.Context) error {
+		return a.embyUpdatePolicy(c, id, func(policy map[string]any) {})
+	}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if delErr := a.embyDelete(cleanupCtx, "/Users/"+urlPathEscape(id)); delErr != nil {
+			zap.L().Error("failed to delete Emby user after policy hardening failure",
+				zap.String("emby_user_id", id), zap.String("error", redactSensitiveText(delErr.Error())))
+		}
+		return nil, fmt.Errorf("apply Emby policy for new user: %w", err)
+	}
 	if password != "" {
 		if err := a.embySetPassword(ctx, id, password); err != nil {
 			_ = a.embyDelete(ctx, "/Users/"+urlPathEscape(id))

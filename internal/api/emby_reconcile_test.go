@@ -152,3 +152,34 @@ func TestEmbySyncMaxUsersUsesCursor(t *testing.T) {
 		t.Fatalf("third user should be synced in the second batch: %#v", cur)
 	}
 }
+
+// TestEmbyCreateUserDeletesAccountWhenPolicyFails 回归审查 L11：新建 Emby 账号后收紧权限
+// 失败时，旧实现忽略错误、留下带默认（过宽）权限的账号；现在要删掉并回错。
+func TestEmbyCreateUserDeletesAccountWhenPolicyFails(t *testing.T) {
+	app := newTestApp(t)
+	deleted := false
+	app.cfg().EmbyToken = "emby-token"
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/New":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"Id":"fresh","Name":"fresh"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/fresh":
+			w.WriteHeader(http.StatusForbidden)
+		case r.Method == http.MethodDelete && r.URL.Path == "/Users/fresh":
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected Emby request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer emby.Close()
+	app.cfg().EmbyURL = emby.URL
+	if _, err := app.embyCreateUser(context.Background(), "fresh", "Passw0rd!x"); err == nil {
+		t.Fatal("policy hardening failure must fail user creation")
+	}
+	if !deleted {
+		t.Fatal("new Emby user with default policy must be deleted")
+	}
+}
