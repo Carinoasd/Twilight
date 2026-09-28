@@ -148,13 +148,20 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 			u.PendingEmbyDays = nil
 		}
 		if source == "regcode" {
+			// 只提升"更低"的角色，不改写管理员（及 type1 下的白名单）：旧实现无条件
+			// 改写 Role，未绑 Emby 的唯一管理员兑换一张注册码就被降为普通用户，
+			// 绕过 SetUserRoleAtomic 的 last-admin 保护。
 			switch reg.Type {
 			case 1:
-				u.Role = store.RoleNormal
+				if u.Role == store.RoleUnrecognized {
+					u.Role = store.RoleNormal
+				}
 				u.PendingEmby = u.EmbyID == ""
 				u.PendingEmbyDays = &days
 			case 3:
-				u.Role = store.RoleWhitelist
+				if u.Role == store.RoleUnrecognized || u.Role == store.RoleNormal {
+					u.Role = store.RoleWhitelist
+				}
 				u.Active = true
 				u.ExpiredAt = permanentExpiryUnix
 				if u.EmbyID == "" {
@@ -180,7 +187,8 @@ func (a *App) handleUseCode(w http.ResponseWriter, r *http.Request, _ Params) {
 			// invite 续期：上限 = 邀请人剩余天数。统一走 renewExpiryAndReactivate
 			// 让"过期 invitee 重新使用 invite 码"路径自动重新激活账号。
 			renewExpiryAndReactivate(u, boundedInviteExpiry(addDaysToExpiry(u.ExpiredAt, days, time.Now()), inviterForUse.ExpiredAt))
-		} else if u.Role != store.RoleWhitelist {
+		} else if u.Role != store.RoleWhitelist && u.Role != store.RoleAdmin {
+			// 管理员保持原到期（通常为永久），不因兑换卡码被改成有限期。
 			renewExpiryAndReactivate(u, addDaysToExpiry(u.ExpiredAt, days, time.Now()))
 		}
 		return nil

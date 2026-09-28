@@ -184,3 +184,27 @@ func TestUnusedInviteCodesDoNotReserveCapacity(t *testing.T) {
 		t.Fatalf("unused invite codes must not reserve Emby slots: reached=%v current=%d", reached, current)
 	}
 }
+
+// 未绑 Emby 的唯一管理员兑换注册码 / 白名单码时，角色不得被改写降级。
+func TestUseRegcodeDoesNotDemoteAdmin(t *testing.T) {
+	app := newTestApp(t)
+	cookies := registerAndLogin(t, app, "admin", "AdminPassw0rd123")
+	admin, ok := app.store().FindUserByUsername("admin")
+	if !ok || admin.Role != store.RoleAdmin {
+		t.Fatalf("test admin not provisioned: %#v", admin)
+	}
+	if err := app.store().UpsertRegCode(store.RegCode{Code: "DEMOTE-TYPE1-0001", Type: 1, Days: 30, ValidityTime: -1, UseCountLimit: 1, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	resp := doJSON(app, http.MethodPost, "/api/v1/users/me/use-code", `{"code":"DEMOTE-TYPE1-0001"}`, cookies)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("use-code status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	updated, _ := app.store().User(admin.UID)
+	if updated.Role != store.RoleAdmin {
+		t.Fatalf("sole admin was demoted by redeeming a regcode: role=%d", updated.Role)
+	}
+	if updated.ExpiredAt != admin.ExpiredAt {
+		t.Fatalf("admin expiry should stay unchanged: before=%d after=%d", admin.ExpiredAt, updated.ExpiredAt)
+	}
+}
