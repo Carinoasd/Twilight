@@ -88,6 +88,10 @@ const SUMMARY_LABEL_KEYS = [
   "duplicate_telegram_ids", "rebind_state_mismatch", "configured", "candidates",
   "max_workers", "skipped_no_id", "skipped_twilight", "skipped_protected",
   "current", "removed", "reason",
+  "would_disable", "circuit_breaker_tripped", "aborted", "abort_reason", "skipped_other_disabled",
+  "rejoined_emby_enabled", "rejoined_emby_enable_failed", "emby_disable_failed", "partial",
+  "planned", "mirror_fixed", "skipped_manual_ban", "skipped_emby_admin", "skipped_recent",
+  "next_after_uid", "truncated",
 ] as const;
 
 const SUMMARY_LABEL_KEY_SET = new Set<string>(SUMMARY_LABEL_KEYS);
@@ -168,6 +172,8 @@ function secondsToUnit(seconds: number): { value: number; unit: IntervalUnit } {
 
 interface ScheduleEditorProps {
   job: SchedulerJobItem | null;
+  // 后端调度时区（Scheduler.timezone）；每日任务的时、分按它解释。
+  timezone?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<unknown> | unknown;
@@ -183,7 +189,7 @@ function cleanupSchedulerRuntimeConfig(t: TFunc, jobID: string) {
   }
   if (jobID === "cleanup_pending_emby_entitlements") {
     return {
-      hasDays: false,
+      hasDays: true,
       title: t("adminScheduler.cleanupPendingTitle"),
       description: t("adminScheduler.cleanupPendingDescription"),
     };
@@ -224,7 +230,7 @@ function cleanupSchedulerRuntimeConfig(t: TFunc, jobID: string) {
   return null;
 }
 
-function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProps) {
+function ScheduleEditor({ job, timezone, open, onOpenChange, onSaved }: ScheduleEditorProps) {
   const { toast } = useToast();
   const { t } = useI18n();
   const [type, setType] = useState<SchedulerTriggerSpec["type"]>("cron_daily");
@@ -406,6 +412,11 @@ function ScheduleEditor({ job, open, onOpenChange, onSaved }: ScheduleEditorProp
             </div>
           ) : type === "cron_daily" ? (
             <div className="grid grid-cols-2 gap-3">
+              {timezone && (
+                <p className="col-span-2 text-xs text-muted-foreground">
+                  {t("adminScheduler.timezoneHint", { tz: timezone })}
+                </p>
+              )}
               <div className="space-y-2">
                 <Label>{t("adminScheduler.hourLabel")}</Label>
                 <Input
@@ -659,12 +670,16 @@ function jobIsRunning(job: SchedulerJobItem, running: Record<string, boolean>) {
 }
 
 // 哪些任务在手动触发时支持参数面板
-const PARAMETERIZED_JOBS = new Set(["cleanup_no_emby", "cleanup_pending_emby_entitlements", "cleanup_audit_logs", "kick_unknown_group_members", "cleanup_unlinked_emby", "cleanup_emby_devices"]);
+const PARAMETERIZED_JOBS = new Set(["cleanup_no_emby", "cleanup_pending_emby_entitlements", "cleanup_audit_logs", "kick_unknown_group_members", "cleanup_unlinked_emby", "cleanup_emby_devices", "enforce_group_membership", "emby_state_reconcile"]);
+
+// 手动执行时提供「仅预览」开关的任务（后端都接受 dry_run）
+const PREVIEW_JOBS = new Set(["cleanup_no_emby", "cleanup_pending_emby_entitlements", "enforce_group_membership", "emby_state_reconcile"]);
 
 export default function AdminSchedulerPage() {
   const { toast } = useToast();
   const { t } = useI18n();
   const [jobs, setJobs] = useState<SchedulerJobItem[]>([]);
+  const [schedulerTimezone, setSchedulerTimezone] = useState<string>("");
   const [running, setRunning] = useState<Record<string, boolean>>({});
   const [terminating, setTerminating] = useState<Record<string, boolean>>({});
   const [rejoinEnabling, setRejoinEnabling] = useState(false);
@@ -685,6 +700,8 @@ export default function AdminSchedulerPage() {
   const [paramPreserveTg, setParamPreserveTg] = useState(true);
   const [paramIgnoreEnabled, setParamIgnoreEnabled] = useState(true);
   const [paramKickDryRun, setParamKickDryRun] = useState(true);
+  // 会改用户状态的任务手动执行时默认先预览（dry_run），确认名单后再取消勾选实跑。
+  const [paramPreview, setParamPreview] = useState(true);
   const [paramKickMaxPerRun, setParamKickMaxPerRun] = useState("200");
   const jobsAbortRef = useRef<AbortController | null>(null);
   const logsAbortRef = useRef<AbortController | null>(null);
@@ -700,6 +717,7 @@ export default function AdminSchedulerPage() {
       const res = await api.listSchedulerJobs(controller.signal);
       if (!controller.signal.aborted && res.success && res.data) {
         setJobs(res.data.jobs || []);
+        setSchedulerTimezone(res.data.timezone || "");
         setRunning({});
       }
       return true;
@@ -799,6 +817,7 @@ export default function AdminSchedulerPage() {
       setParamIgnoreEnabled(Boolean((job.runtime_params as Record<string, unknown> | undefined)?.["enabled"] ?? (job.runtime_params as Record<string, unknown> | undefined)?.["auto_enabled"] ?? true));
       setParamKickDryRun(Boolean((job.runtime_params as Record<string, unknown> | undefined)?.["dry_run"] ?? true));
       setParamKickMaxPerRun(String(Number((job.runtime_params as Record<string, unknown> | undefined)?.[job.id === "cleanup_emby_devices" ? "max_workers" : "max_per_run"] ?? (job.id === "cleanup_emby_devices" ? 10 : 200)) || (job.id === "cleanup_emby_devices" ? 10 : 200)));
+      setParamPreview(true);
       setParamJob(job);
       return;
     }
@@ -860,6 +879,9 @@ export default function AdminSchedulerPage() {
         dry_run: paramKickDryRun,
         max_per_run: Number.isFinite(mpr) && mpr > 0 ? Math.trunc(mpr) : 200,
       };
+    }
+    if (PREVIEW_JOBS.has(paramJob.id)) {
+      params.dry_run = paramPreview;
     }
     const job = paramJob;
     setParamJob(null);
@@ -941,6 +963,11 @@ export default function AdminSchedulerPage() {
               </div>
             </div>
             <div className="flex flex-col gap-2 sm:flex-row lg:items-center">
+              {schedulerTimezone && (
+                <Badge variant="outline" className="justify-center py-2 text-xs">
+                  {t("adminScheduler.timezoneLabel", { tz: schedulerTimezone })}
+                </Badge>
+              )}
               <Badge variant={anyRunning ? "outline" : "secondary"} className="justify-center py-2 text-xs">
                 {anyRunning ? t("adminScheduler.pollingActive") : t("adminScheduler.noRunning")}
               </Badge>
@@ -1176,6 +1203,7 @@ export default function AdminSchedulerPage() {
       <ScheduleEditor
         job={scheduleJob}
         open={Boolean(scheduleJob)}
+        timezone={schedulerTimezone}
         onOpenChange={(open) => { if (!open) setScheduleJob(null); }}
         onSaved={refresh}
       />
@@ -1232,21 +1260,40 @@ export default function AdminSchedulerPage() {
                   </span>
                 </label>
               )}
-              <label className="flex items-start gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={paramIgnoreEnabled}
-                  onChange={(e) => setParamIgnoreEnabled(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-border accent-primary"
-                />
-                <span>
-                  {t("adminScheduler.ignoreEnabledLabel")}
-                  <span className="block text-xs text-muted-foreground">
-                    {t("adminScheduler.ignoreEnabledHint")}
+              {paramJob.id !== "enforce_group_membership" && (
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={paramIgnoreEnabled}
+                    onChange={(e) => setParamIgnoreEnabled(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-border accent-primary"
+                  />
+                  <span>
+                    {t("adminScheduler.ignoreEnabledLabel")}
+                    <span className="block text-xs text-muted-foreground">
+                      {t("adminScheduler.ignoreEnabledHint")}
+                    </span>
                   </span>
-                </span>
-              </label>
+                </label>
+              )}
             </div>
+          )}
+
+          {paramJob && PREVIEW_JOBS.has(paramJob.id) && (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={paramPreview}
+                onChange={(e) => setParamPreview(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-border accent-primary"
+              />
+              <span>
+                {t("adminScheduler.dryRunLabel")}
+                <span className="block text-xs text-muted-foreground">
+                  {t("adminScheduler.previewHint")}
+                </span>
+              </span>
+            </label>
           )}
 
           {(paramJob?.id === "kick_unknown_group_members" || paramJob?.id === "cleanup_emby_devices") && (

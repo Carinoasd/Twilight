@@ -279,6 +279,30 @@
     "triggeredDescription": "等待可用的调度进程执行。",
     "noTimedJobsWarning": "当前没有自动调度。手动任务也需要运行中的 scheduler 或 all 进程。",
     "editorFootnote": "修改适用于之后入队的任务；已入队和运行中的任务保留原参数。重置会恢复配置文件默认值。",
-    "description": "管理任务调度、执行和历史记录。"
+    "description": "管理任务调度、执行和历史记录。",
+    "timezoneLabel": "调度时区：{tz}",
+    "timezoneHint": "时间按调度时区 {tz} 解释（配置项 Scheduler.timezone）。",
+    "previewHint": "只列出会受影响的用户，不做任何改动；确认结果后取消勾选再执行。",
+    "cleanupPendingTitle": "资格发放超过多少天才收回",
+    "cleanupPendingDescription": "只收回发放超过该天数仍未创建 Emby 的开通资格，不删除 Web 账号。",
+    "enforceGroupDescription": "检测到因退群被停用的用户回到群里且账号未过期时，是否自动启用其系统账号，并恢复当时随之停用的 Emby；管理员手动停权的账号不受影响。关闭时仅标记为待审核。注意：ban_on_leave 开启时自动解禁不会生效。",
+    "summary": {
+      "would_disable": "拟停用",
+      "circuit_breaker_tripped": "触发熔断",
+      "aborted": "已中止",
+      "abort_reason": "中止原因",
+      "skipped_other_disabled": "跳过（非退群停用）",
+      "rejoined_emby_enabled": "回群恢复 Emby",
+      "rejoined_emby_enable_failed": "回群恢复 Emby 失败",
+      "emby_disable_failed": "Emby 停用失败",
+      "partial": "部分完成",
+      "planned": "计划改动",
+      "mirror_fixed": "修正本地镜像",
+      "skipped_manual_ban": "跳过（管理员封禁）",
+      "skipped_emby_admin": "跳过（Emby 管理员）",
+      "skipped_recent": "跳过（未满天数）",
+      "next_after_uid": "下一批起点 UID",
+      "truncated": "已分批"
+    }
   }
 }

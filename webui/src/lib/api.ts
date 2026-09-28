@@ -1969,7 +1969,7 @@ class ApiClient {
   // ==================== 定时任务管理 ====================
 
   async listSchedulerJobs(signal?: AbortSignal) {
-    return this.request<{ jobs: SchedulerJobItem[] }>(`/admin/scheduler/jobs`, { signal, cache: "no-store" }, { cacheRead: false, dedupe: false });
+    return this.request<{ jobs: SchedulerJobItem[]; timezone?: string; utc_offset_seconds?: number }>(`/admin/scheduler/jobs`, { signal, cache: "no-store" }, { cacheRead: false, dedupe: false });
   }
 
   async triggerSchedulerJob(
