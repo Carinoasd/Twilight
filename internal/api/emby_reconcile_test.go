@@ -111,3 +111,44 @@ func TestEmbyStateReconcileAbortsOverMaxChanges(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbySyncMaxUsersUsesCursor 回归审查 L10：emby_sync 的 max_users 截断后要留下游标，
+// 下一批从游标之后继续，而不是每次都只处理前 N 个用户。
+func TestEmbySyncMaxUsersUsesCursor(t *testing.T) {
+	app := newTestApp(t)
+	remote := map[string]bool{}
+	users := []store.User{}
+	for _, id := range []string{"c1", "c2", "c3"} {
+		u, err := app.store().CreateUser(store.User{Username: "cursor-" + id, Role: store.RoleNormal, Active: true, EmbyID: id, EmbyUsername: "old-" + id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		users = append(users, u)
+		remote[id] = false
+	}
+	newFakeEmbyPolicyServer(t, app, remote)
+	run := func(params map[string]any) map[string]any {
+		t.Helper()
+		ctx := context.WithValue(context.Background(), schedulerFrozenParamsKey{}, params)
+		req := httptest.NewRequest(http.MethodPost, "/scheduler/internal", nil).WithContext(ctx)
+		summary, _, err := app.runSchedulerJob(req, "emby_sync")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return summary
+	}
+	first := run(map[string]any{"max_users": 2})
+	if int64(numeric(first["next_after_uid"])) != users[1].UID || !boolish(first["truncated"]) || int(numeric(first["batch_users"])) != 2 {
+		t.Fatalf("first batch should stop after the second user: %#v", first)
+	}
+	if cur, _ := app.store().User(users[2].UID); cur.EmbyUsername != "old-c3" {
+		t.Fatalf("third user must not be touched in the first batch: %#v", cur)
+	}
+	second := run(map[string]any{"max_users": 2, "after_uid": first["next_after_uid"]})
+	if int(numeric(second["batch_users"])) != 1 || int64(numeric(second["next_after_uid"])) != 0 {
+		t.Fatalf("second batch should cover the rest and wrap: %#v", second)
+	}
+	if cur, _ := app.store().User(users[2].UID); cur.EmbyUsername != "n-c3" {
+		t.Fatalf("third user should be synced in the second batch: %#v", cur)
+	}
+}

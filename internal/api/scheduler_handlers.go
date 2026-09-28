@@ -17,7 +17,7 @@ var schedulerJobs = []map[string]any{
 	{"id": "expiry_reminders", "name": "发送到期提醒", "description": "向即将到期且已绑定 Telegram 的用户发送续期通知。", "manual_only": false, "enabled": true},
 	{"id": "daily_stats", "name": "每日统计", "description": "记录每日用户总数与活跃用户数。", "manual_only": false, "enabled": true},
 	{"id": "cleanup_sessions", "name": "会话巡检与清理", "description": "清理过期会话与邮箱验证码，并读取 Emby 当前活跃会话数。", "manual_only": false, "enabled": true},
-	{"id": "emby_sync", "name": "同步 Emby 用户", "description": "将本地用户与 Emby 远程用户的 ID、名称、禁用状态同步，修复占位 ID。", "manual_only": true, "enabled": true},
+	{"id": "emby_sync", "name": "同步 Emby 用户", "description": "将本地用户与 Emby 远程用户的 ID、名称、禁用状态同步，修复占位 ID。用户多于 max_users 时分批执行，下一次手动执行会接着上一批继续。", "manual_only": true, "enabled": true, "runtime_params": []string{"max_users", "after_uid"}},
 	{"id": "emby_state_reconcile", "name": "Emby 状态对账", "description": "按 Web 账号状态收敛 Emby 启停：停用应停用却仍启用的账号，重新启用本系统自动停用、Web 已恢复的账号；不做名称认领，不启用管理员单独封禁的 Emby。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "max_changes"}},
 	{"id": "cleanup_no_emby", "name": "清理无 Emby 账号", "description": "删除注册后长期未绑定 Emby 且无开通资格的 Web 账号。", "manual_only": false, "enabled": true},
 	{"id": "cleanup_pending_emby_entitlements", "name": "清理未使用的 Emby 开通资格", "description": "收回长期未创建 Emby 的开通资格，保留 Web 账号。", "manual_only": false, "enabled": true},
@@ -299,7 +299,12 @@ func (a *App) normalizeSchedulerRuntimeParams(jobID string, params map[string]an
 	case "emby_state_reconcile":
 		return map[string]any{"dry_run": boolValue(params, "dry_run", false), "max_changes": clamp(intValue(params, "max_changes", embyReconcileDefaultMaxChanges), 0, 100000)}
 	case "emby_sync":
-		return map[string]any{"max_users": clamp(intValue(params, "max_users", 1000), 1, 50000)}
+		out := map[string]any{"max_users": clamp(intValue(params, "max_users", 1000), 1, 50000)}
+		// after_uid 只在显式传入时保留；缺省时任务会接着上一轮的游标继续。
+		if _, ok := params["after_uid"]; ok {
+			out["after_uid"] = max(intValue(params, "after_uid", 0), 0)
+		}
+		return out
 	case "sync_emby_activity_logs":
 		return map[string]any{"since_hours": clamp(intValue(params, "since_hours", 24), 1, 720)}
 	case "cleanup_unlinked_emby":

@@ -405,17 +405,38 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		for name := range duplicateRemoteNames {
 			delete(remoteByName, name)
 		}
-		users := a.store().ListUsers()
+		allUsers := a.store().ListUsers()
 		maxUsers := clamp(jobParamInt(params, "max_users", 1000), 1, 50000)
-		if len(users) > maxUsers {
-			users = users[:maxUsers]
-		}
+		// 占用关系必须看全部用户，不能只看本批，否则批外用户已占用的远端 ID 会被误判为空闲。
 		claimedRemoteIDs := map[string]int64{}
-		for _, u := range users {
+		for _, u := range allUsers {
 			if u.EmbyID != "" && !isSyntheticEmbyID(u.EmbyID, u.UID) {
 				claimedRemoteIDs[u.EmbyID] = u.UID
 			}
 		}
+		// max_users 截断改成游标分批：用户按 UID 升序，本批从 after_uid 之后开始；
+		// 未显式指定时接着上一轮留下的 next_after_uid 继续，跑完一圈后回到开头。
+		afterUID := int64(jobParamInt(params, "after_uid", -1))
+		if afterUID < 0 {
+			afterUID = a.embySyncLastCursor()
+		}
+		users := make([]store.User, 0, min(len(allUsers), maxUsers))
+		truncated := false
+		for _, u := range allUsers {
+			if u.UID <= afterUID {
+				continue
+			}
+			if len(users) >= maxUsers {
+				truncated = true
+				break
+			}
+			users = append(users, u)
+		}
+		nextAfterUID := int64(0)
+		if truncated && len(users) > 0 {
+			nextAfterUID = users[len(users)-1].UID
+		}
+		logs = append(logs, fmt.Sprintf("batch: after_uid=%d, %d users, next_after_uid=%d", afterUID, len(users), nextAfterUID))
 		updatedNames, syncedState, stateUnchanged, missing, filledIDs, repairedPlaceholders, conflicts := 0, 0, 0, 0, 0, 0, 0
 		nameCandidates := 0
 		for _, u := range users {
@@ -535,7 +556,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"conflicts":             conflicts,
 			})
 		}
-		return map[string]any{"success": true, "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
+		return map[string]any{"success": true, "after_uid": afterUID, "next_after_uid": nextAfterUID, "truncated": truncated, "batch_users": len(users), "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
 	case "emby_state_reconcile":
 		return a.runEmbyStateReconcile(r.Context(), jobParamBool(params, "dry_run", false), max(jobParamInt(params, "max_changes", embyReconcileDefaultMaxChanges), 0))
 	case "cleanup_no_emby":
@@ -1053,6 +1074,19 @@ func schedulerManualRun(r *http.Request) bool {
 
 func schedulerSideEffectContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+}
+
+// embySyncLastCursor 读取最近一轮完成的 emby_sync 留下的 next_after_uid；没有就从头开始。
+func (a *App) embySyncLastCursor() int64 {
+	for _, run := range a.store().SchedulerRuns("emby_sync", 10) {
+		if run.Status != "success" || run.Summary == nil {
+			continue
+		}
+		if value, ok := run.Summary["next_after_uid"]; ok {
+			return int64(numeric(value))
+		}
+	}
+	return 0
 }
 
 // appendLimitedUID 往稽核用的 uid 清单追加，最多 auditUIDListLimit 个。
