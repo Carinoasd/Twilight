@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -309,5 +310,37 @@ func TestTelegramUpdateBatchBoundsSingleUpdate(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("stuck update blocked the whole batch")
+	}
+}
+
+// fetch 私网判定要覆盖 CGNAT、benchmark、保留网段，并解开 NAT64/6to4/Teredo 内嵌 IPv4。
+func TestDeveloperJSPrivateIPCoversReservedAndTranslatedRanges(t *testing.T) {
+	blocked := []string{
+		"100.101.102.103",                      // CGNAT / Tailscale
+		"198.18.0.1",                           // benchmark
+		"192.0.0.8",                            // IETF 协议分配
+		"240.0.0.1",                            // 保留
+		"0.1.2.3",                              // 0.0.0.0/8
+		"64:ff9b::a00:1",                       // NAT64 -> 10.0.0.1
+		"64:ff9b::7f00:1",                      // NAT64 -> 127.0.0.1
+		"2002:a00:1::1",                        // 6to4 -> 10.0.0.1
+		"2002:a9fe:a9fe::1",                    // 6to4 -> 169.254.169.254
+		"2001:0:4136:e378:8000:63bf:f5ff:fffe", // Teredo 客户端 -> 10.0.0.1
+		"::a00:1",                              // IPv4-compatible
+	}
+	for _, s := range blocked {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("cannot parse %q", s)
+		}
+		if !developerJSPrivateIP(ip) {
+			t.Errorf("expected %s to be blocked", s)
+		}
+	}
+	allowed := []string{"8.8.8.8", "64:ff9b::808:808", "2002:808:808::1", "2606:4700:4700::1111", "100.128.0.1"}
+	for _, s := range allowed {
+		if developerJSPrivateIP(net.ParseIP(s)) {
+			t.Errorf("expected %s to be allowed", s)
+		}
 	}
 }

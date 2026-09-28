@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
@@ -2123,20 +2124,11 @@ func developerJSPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	// 归一化 IPv4-mapped IPv6（如 ::ffff:127.0.0.1），避免绕过私网判断。
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsInterfaceLocalMulticast() {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return true
 	}
-	// IPv4 广播地址。
-	if ip.Equal(net.IPv4bcast) {
-		return true
-	}
-	return false
+	return developerJSBlockedAddr(addr)
 }
 
 func developerJSAnySlice(input any) []any {

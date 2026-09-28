@@ -29,7 +29,7 @@ Telegram JS 交互状态是短期内存数据，不会无限增长：内联 call
 
 沙箱不会暴露文件系统、进程、模块加载器、浏览器对象、原始数据库 state、SQL、数据库连接信息、密码、Token、API Key、BGM Token 明文、Emby 内部 ID 或敏感配置。
 
-`fetch()` 是受限同步能力：只允许公开 `http/https` 的 `GET` / `POST` / `HEAD`，阻断 localhost、内网、链路本地（含云元数据 `169.254.169.254`）、广播与组播目标，禁用跳转和凭据，响应体有限长。除发起前按域名解析校验外，还会在 TCP 拨号阶段对**实际连接到的 IP** 再校验一次，阻断 DNS rebinding（解析时返回公网 IP、连接时切到内网 IP）与 IPv4-mapped IPv6 绕过。`eval`、`Function`、`globalThis`、`fetch`、`setTimeout`、`setInterval` 会被标记为高风险能力；`require`、`process`、浏览器对象、本地存储、cookie、`constructor.constructor` 等仍会被静态阻断。
+`fetch()` 是受限同步能力：只允许公开 `http/https` 的 `GET` / `POST` / `HEAD`，阻断 localhost、内网、链路本地（含云元数据 `169.254.169.254`）、CGNAT `100.64.0.0/10`、`198.18.0.0/15`、`192.0.0.0/24`、`240.0.0.0/4` 等保留网段、广播与组播目标，NAT64（`64:ff9b::/96`）、6to4（`2002::/16`）、Teredo（`2001::/32`）地址会解出内嵌 IPv4 再判断，禁用跳转和凭据，响应体有限长。除发起前按域名解析校验外，还会在 TCP 拨号阶段对**实际连接到的 IP** 再校验一次，阻断 DNS rebinding（解析时返回公网 IP、连接时切到内网 IP）与 IPv4-mapped IPv6 绕过。`eval`、`Function`、`globalThis`、`fetch`、`setTimeout`、`setInterval` 会被标记为高风险能力；`require`、`process`、浏览器对象、本地存储、cookie、`constructor.constructor` 等仍会被静态阻断。
 
 ## 全局绑定
 
