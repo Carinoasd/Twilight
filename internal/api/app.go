@@ -814,6 +814,14 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lw.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// 路由匹配用的是清理后的路径，但不少 handler（会话管理员视图、上传大小例外、
+	// 启用/停用方向判断等）直接看 r.URL.Path。带 “..” / “.” / 空段的请求会让两边
+	// 看到不同的路径，例如 /api/v1/users/admin/../me/sessions 能以普通用户身份拿到
+	// 管理员视图。正常客户端不会发出这种路径，入口处一律拒绝。
+	if !requestPathCanonical(r.URL.Path) {
+		failWithCode(lw, http.StatusBadRequest, ErrBadRequest, "请求路径不规范")
+		return
+	}
 	bodyLimit := a.cfg().MaxUploadSize
 	if strings.HasPrefix(r.URL.Path, "/api/v1/system/admin/migration/") {
 		// Migration archives are bounded by the archive parser rather than the
@@ -2000,5 +2008,23 @@ func statusFromError(w http.ResponseWriter, err error) bool {
 		return true
 	}
 	failWithCode(w, http.StatusInternalServerError, ErrInternal, "操作失败")
+	return true
+}
+
+// requestPathCanonical 报告路径是否已是规范形式：不含 “.”、“..” 段，也没有连续斜杠。
+// 末尾单个斜杠允许（部分客户端会带），其余一律视为不规范。
+func requestPathCanonical(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	trimmed := strings.TrimSuffix(p[1:], "/")
+	if trimmed == "" {
+		return true
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
 	return true
 }
