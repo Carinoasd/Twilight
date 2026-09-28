@@ -28,6 +28,9 @@ const (
 	// 一次拖回几十万行既拖垮 Emby 也拖垮自己的写入。
 	playbackReportingMaxRows = 5000
 
+	// playbackReportingMaxPages 是单次同步最多翻的页数（共 10 万行）。
+	playbackReportingMaxPages = 20
+
 	// playbackReportingTimeLayout 与插件写入 SQLite 的时间格式一致。插件存的是
 	// TEXT 时间戳，字符串比较必须与它的格式对齐，否则 WHERE 直接落空。
 	playbackReportingTimeLayout = "2006-01-02 15:04:05"
@@ -138,16 +141,9 @@ func (a *App) syncPlaybackReporting(ctx context.Context, since, until time.Time)
 		userKeys = append(userKeys, key)
 	}
 	// 插件给的是 Emby 内部 UserId，要换成 Twilight 的 UID。匹配规则与活动日志
-	// 那条链路保持一致（EmbyID / Emby 用户名 / 站点用户名）。
+	// 那条链路保持一致（只认 EmbyID / Emby 用户名，不再用站点用户名）。
 	matched := a.store().UsersMatching(len(userKeys), func(user store.User) bool {
-		for _, key := range []string{user.EmbyID, user.EmbyUsername, user.Username} {
-			if normalized := normalizeEmbyActivityUserKey(key); normalized != "" {
-				if _, ok := seenKey[normalized]; ok {
-					return true
-				}
-			}
-		}
-		return false
+		return embyActivityUserMatchesKeys(user, seenKey)
 	})
 	usersByKey := embyActivityUsersByKey(matched)
 
@@ -168,7 +164,8 @@ func (a *App) syncPlaybackReporting(ctx context.Context, since, until time.Time)
 
 	pending := make([]store.PlaybackRecord, 0, len(rows))
 	for _, row := range rows {
-		user := usersByKey[normalizeEmbyActivityUserKey(row.UserID)]
+		// 插件行只带 Emby UserId，只按 ID 归属。
+		user := usersByKey.resolve(row.UserID)
 		if user.UID == 0 {
 			continue
 		}
@@ -235,19 +232,34 @@ func (a *App) syncPlaybackReporting(ctx context.Context, since, until time.Time)
 // SQL 完全由本函数拼装：时间来自 time.Time 的格式化输出，不含任何用户输入，
 // 所以不存在注入面。反过来，这也意味着绝不能把外部参数拼进这条语句。
 func (a *App) fetchPlaybackReportingRows(ctx context.Context, since, until time.Time) ([]playbackReportingRow, error) {
-	query := fmt.Sprintf(`SELECT UserId, ItemId, ItemType, ItemName, PlayDuration, PauseDuration, DateCreated
+	// 旧实现是无排序的 LIMIT 5000：窗口内超过 5000 行时 SQLite 随便返回其中一部分，
+	// 被截掉的行永远补不回来。现在按 DateCreated（再以 rowid 打破同秒并列）稳定排序
+	// 并分页，最多取 playbackReportingMaxPages 页，单页仍受 playbackReportingMaxRows 限制。
+	rows := []playbackReportingRow{}
+	for page := 0; page < playbackReportingMaxPages; page++ {
+		query := fmt.Sprintf(`SELECT UserId, ItemId, ItemType, ItemName, PlayDuration, PauseDuration, DateCreated
 FROM PlaybackActivity
 WHERE DateCreated >= '%s' AND DateCreated < '%s'
-LIMIT %d`,
-		since.Format(playbackReportingTimeLayout), until.Format(playbackReportingTimeLayout), playbackReportingMaxRows)
-	var resp playbackReportingQueryResponse
-	if err := a.embyPost(ctx, playbackReportingQueryPath, map[string]any{
-		"CustomQueryString": query,
-		"ReplaceUserId":     false,
-	}, &resp); err != nil {
-		return nil, err
+ORDER BY DateCreated ASC, rowid ASC
+LIMIT %d OFFSET %d`,
+			since.Format(playbackReportingTimeLayout), until.Format(playbackReportingTimeLayout), playbackReportingMaxRows, page*playbackReportingMaxRows)
+		var resp playbackReportingQueryResponse
+		if err := a.embyPost(ctx, playbackReportingQueryPath, map[string]any{
+			"CustomQueryString": query,
+			"ReplaceUserId":     false,
+		}, &resp); err != nil {
+			if page > 0 {
+				// 后续页失败时保留已取到的前几页，下次同步窗口会重叠补齐。
+				return rows, nil
+			}
+			return nil, err
+		}
+		rows = append(rows, parsePlaybackReportingRows(resp)...)
+		if len(resp.Results) < playbackReportingMaxRows {
+			break
+		}
 	}
-	return parsePlaybackReportingRows(resp), nil
+	return rows, nil
 }
 
 func parsePlaybackReportingRows(resp playbackReportingQueryResponse) []playbackReportingRow {
