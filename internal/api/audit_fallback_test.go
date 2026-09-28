@@ -52,7 +52,8 @@ func TestFallbackAuditSelfServiceTargetsSelfAndSkipsUserFailures(t *testing.T) {
 		t.Fatalf("admin logout status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	logs := app.store().ListAuditLogs()
-	if len(logs) != 1 || logs[0].Action != "post_auth_logout" || logs[0].TargetUID != adminUser.UID {
+	// 登出现在有明确审计 logout（不再落到 fallback 的 post_auth_logout），target_uid 同样是本人。
+	if len(logs) != 1 || logs[0].Action != "logout" || logs[0].TargetUID != adminUser.UID {
 		t.Fatalf("expected only admin logout with target=self (%d), got %#v", adminUser.UID, logs)
 	}
 }
