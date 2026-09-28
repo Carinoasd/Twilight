@@ -282,20 +282,25 @@ type Config struct {
 	SchedulerDailyStatsTime         string
 	SchedulerSessionCleanupInterval int
 	// SchedulerEmbyReconcileInterval 是 emby_state_reconcile 的默认执行间隔（小时）。
-	SchedulerEmbyReconcileInterval    int
-	SchedulerCleanupNoEmbyTime        string
-	SchedulerCleanupPendingEmbyTime   string
-	SchedulerCleanupUnusedUploadsTime string
-	SchedulerCleanupAuditLogsTime     string
-	SchedulerCleanupTicketImagesTime  string
-	SchedulerTickIntervalSeconds      int
-	SystemUpdateEnabled               bool
-	SystemUpdateRepoURL               string
-	SystemUpdateBranch                string
-	SystemUpdateRestartServices       bool
-	SystemUpdateTriggerType           string
-	SystemUpdateIntervalHours         int
-	SystemUpdateTime                  string
+	SchedulerEmbyReconcileInterval int
+	SchedulerCleanupNoEmbyTime     string
+	// SchedulerTimezone 是 cron_daily 任务的时区（IANA 名，如 Asia/Shanghai）；留空用进程本地时区。
+	SchedulerTimezone string
+	// 群成员巡检与 Telegram 绑定检查的每日执行时间，原本没有专属设置、全挤在 03:00。
+	SchedulerGroupMembershipCheckTime  string
+	SchedulerTelegramBindingsCheckTime string
+	SchedulerCleanupPendingEmbyTime    string
+	SchedulerCleanupUnusedUploadsTime  string
+	SchedulerCleanupAuditLogsTime      string
+	SchedulerCleanupTicketImagesTime   string
+	SchedulerTickIntervalSeconds       int
+	SystemUpdateEnabled                bool
+	SystemUpdateRepoURL                string
+	SystemUpdateBranch                 string
+	SystemUpdateRestartServices        bool
+	SystemUpdateTriggerType            string
+	SystemUpdateIntervalHours          int
+	SystemUpdateTime                   string
 
 	MediaRequestEnabled          bool
 	MaxConcurrentRequestsPerUser int
@@ -569,6 +574,9 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.SchedulerSessionCleanupInterval = reader.intValue(cfg.SchedulerSessionCleanupInterval, "Scheduler.session_cleanup_interval", "session_cleanup_interval")
 	cfg.SchedulerEmbyReconcileInterval = reader.intValue(cfg.SchedulerEmbyReconcileInterval, "Scheduler.emby_reconcile_interval", "emby_reconcile_interval")
 	cfg.SchedulerCleanupNoEmbyTime = reader.stringValue(cfg.SchedulerCleanupNoEmbyTime, "Scheduler.cleanup_no_emby_time", "cleanup_no_emby_time")
+	cfg.SchedulerTimezone = reader.stringValue(cfg.SchedulerTimezone, "Scheduler.timezone", "scheduler_timezone")
+	cfg.SchedulerGroupMembershipCheckTime = reader.stringValue(cfg.SchedulerGroupMembershipCheckTime, "Scheduler.group_membership_check_time", "group_membership_check_time")
+	cfg.SchedulerTelegramBindingsCheckTime = reader.stringValue(cfg.SchedulerTelegramBindingsCheckTime, "Scheduler.telegram_bindings_check_time", "telegram_bindings_check_time")
 	cfg.SchedulerCleanupPendingEmbyTime = reader.stringValue(cfg.SchedulerCleanupPendingEmbyTime, "Scheduler.cleanup_pending_emby_time", "cleanup_pending_emby_time")
 	cfg.SchedulerCleanupUnusedUploadsTime = reader.stringValue(cfg.SchedulerCleanupUnusedUploadsTime, "Scheduler.cleanup_unused_uploads_time", "cleanup_unused_uploads_time")
 	cfg.SchedulerCleanupAuditLogsTime = reader.stringValue(cfg.SchedulerCleanupAuditLogsTime, "Scheduler.cleanup_audit_logs_time", "cleanup_audit_logs_time")
@@ -710,6 +718,8 @@ func defaults() Config {
 		SchedulerSessionCleanupInterval:      6,
 		SchedulerEmbyReconcileInterval:       6,
 		SchedulerCleanupNoEmbyTime:           "03:30",
+		SchedulerGroupMembershipCheckTime:    "03:10",
+		SchedulerTelegramBindingsCheckTime:   "03:20",
 		SchedulerCleanupPendingEmbyTime:      "03:45",
 		SchedulerCleanupUnusedUploadsTime:    "02:20",
 		SchedulerCleanupAuditLogsTime:        "04:30",

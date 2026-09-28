@@ -86,6 +86,7 @@ type App struct {
 	telegramBotCacheUntil     time.Time
 	telegramBotCache          map[string]any
 	telegramEndpointCache     atomic.Pointer[telegramEndpointCacheEntry]
+	schedulerTZCache          atomic.Pointer[schedulerTZEntry]
 	telegramCommandIndex      atomic.Pointer[telegramCommandConfigIndex]
 	telegramStatusMu          sync.Mutex
 	telegramLastOKAt          int64

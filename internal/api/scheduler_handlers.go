@@ -29,14 +29,15 @@ var schedulerJobs = []map[string]any{
 	{"id": "cleanup_ticket_images", "name": "清理过期工单图片", "description": "按保留天数清理已关闭工单的图片附件及元数据。", "manual_only": false, "enabled": true},
 	{"id": "refresh_bangumi_collections", "name": "刷新 Bangumi 收藏缓存", "description": "每小时为开启 BGM 管理且配置 Token 的用户缓存在看、想看、看过收藏列表。", "manual_only": false, "enabled": true},
 	{"id": "sync_emby_activity_logs", "name": "同步 Emby 活动日志", "description": "每 10 分钟从 Emby 拉取活动日志并存入本地，用于活动审计与播放记录入库。", "manual_only": false, "enabled": true, "runtime_params": []string{"since_hours"}},
-	{"id": "cleanup_unlinked_emby", "name": "清理孤立 Emby 账号", "description": "扫描 Emby 中未绑定任何 Web 账号的孤立用户，支持仅扫描与删除模式。", "manual_only": false, "enabled": false, "runtime_params": []string{"dry_run", "delete"}},
+	{"id": "cleanup_unlinked_emby", "name": "清理孤立 Emby 账号", "description": "扫描 Emby 中未绑定任何 Web 账号的孤立用户，支持仅扫描与删除模式。默认不自动执行，保存自定义排程后才会自动运行。", "manual_only": false, "enabled": true, "runtime_params": []string{"dry_run", "delete"}},
 	{"id": "cleanup_emby_devices", "name": "清理 Emby 设备记录", "description": "通过 Emby 管理员接口删除历史设备记录，自动跳过 Twilight 自身设备与受保护用户。", "manual_only": true, "enabled": true, "runtime_params": []string{"dry_run", "max_workers", "skip_usernames"}},
 	{"id": "kick_unknown_group_members", "name": "踢出未知 Telegram 群成员", "description": "根据观察到的群成员名册，踢出无账号/未绑定 Emby/已禁用的成员。", "manual_only": true, "enabled": true, "runtime_params": []string{"dry_run", "max_per_run"}},
 }
 
 func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Params) {
 	jobs := make([]map[string]any, 0, len(schedulerJobs))
-	now := time.Now()
+	loc := a.schedulerLocation()
+	now := time.Now().In(loc)
 
 	// Batch-fetch all snapshots in a single lock acquisition instead of
 	// N separate SchedulerRunSnapshot calls (one per job). This reduces
@@ -81,8 +82,15 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		item["last_run"] = nil
 		snapshot := overview.Runs[jobID]
 		running := activeJobIDs[jobID] || schedulerSnapshotRecentlyRunning(snapshot, now)
-		item["next_run_at"] = zeroNil(schedulerNextRunAtFromSnapshot(spec, now, snapshot))
-		item["auto_disabled"] = schedulerTriggerDisabled(spec)
+		// 被配置关闭的任务（如未开启的 system_auto_update）永远不会自动入队，
+		// 不能再显示「下次运行时间」误导管理员。
+		enabledByConfig := schedulerJobEnabledByConfig(a.cfg().SystemUpdateEnabled, job)
+		if enabledByConfig {
+			item["next_run_at"] = zeroNil(schedulerNextRunAtFromSnapshot(spec, now, snapshot))
+		} else {
+			item["next_run_at"] = nil
+		}
+		item["auto_disabled"] = schedulerTriggerDisabled(spec) || !enabledByConfig
 		if runs := snapshot.Runs; len(runs) > 0 {
 			item["last_run"] = schedulerRunListView(runs[0])
 			if snapshot.HasLatestAuto {
@@ -95,7 +103,8 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		item["is_running"] = running
 		jobs = append(jobs, item)
 	}
-	ok(w, "OK", map[string]any{"jobs": jobs})
+	_, offset := now.Zone()
+	ok(w, "OK", map[string]any{"jobs": jobs, "timezone": loc.String(), "utc_offset_seconds": offset})
 }
 
 func (a *App) handleSchedulerTerminate(w http.ResponseWriter, r *http.Request, params Params) {

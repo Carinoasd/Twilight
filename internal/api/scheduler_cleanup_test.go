@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -103,5 +104,59 @@ func TestCleanupPendingEmbyEntitlementsRespectsAge(t *testing.T) {
 	}
 	if cur, _ := app.store().User(stale.UID); cur.PendingEmby {
 		t.Fatalf("stale grant should be revoked: %#v", summary)
+	}
+}
+
+func schedulerJobsForTest(t *testing.T, app *App) (map[string]map[string]any, map[string]any) {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	app.handleSchedulerJobs(rr, httptest.NewRequest(http.MethodGet, "/api/v1/admin/scheduler/jobs", nil), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("jobs status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	jobs := map[string]map[string]any{}
+	list, _ := body.Data["jobs"].([]any)
+	for _, raw := range list {
+		job, _ := raw.(map[string]any)
+		jobs[asString(job["id"])] = job
+	}
+	return jobs, body.Data
+}
+
+// TestSchedulerJobsTimezoneAndDisabledNextRun 回归排程缺口：
+//   - 返回调度时区，cron_daily 的下次时间按该时区计算；
+//   - 不会自动执行的任务（cleanup_unlinked_emby、未开启的 system_auto_update）不显示下次时间；
+//   - 群成员巡检与绑定检查有自己的默认时间，不再都挤在 03:00。
+func TestSchedulerJobsTimezoneAndDisabledNextRun(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().SchedulerTimezone = "Asia/Tokyo"
+	app.cfg().SchedulerExpiredCheckTime = "03:00"
+	app.cfg().SchedulerGroupMembershipCheckTime = "03:10"
+	app.cfg().SchedulerTelegramBindingsCheckTime = "03:20"
+	app.cfg().SystemUpdateEnabled = false
+	jobs, data := schedulerJobsForTest(t, app)
+	if asString(data["timezone"]) != "Asia/Tokyo" || int(numeric(data["utc_offset_seconds"])) != 9*3600 {
+		t.Fatalf("timezone not reported: %#v", data)
+	}
+	next := time.Unix(int64(numeric(jobs["check_expired"]["next_run_at"])), 0).In(time.FixedZone("JST", 9*3600))
+	if next.Hour() != 3 || next.Minute() != 0 {
+		t.Fatalf("check_expired should run at 03:00 Asia/Tokyo, got %s", next)
+	}
+	for _, id := range []string{"cleanup_unlinked_emby", "system_auto_update"} {
+		if jobs[id]["next_run_at"] != nil || !boolish(jobs[id]["auto_disabled"]) {
+			t.Fatalf("%s must not show a next run time: %#v", id, jobs[id])
+		}
+	}
+	for id, minute := range map[string]int{"enforce_group_membership": 10, "check_telegram_bindings": 20} {
+		spec, _ := jobs[id]["trigger_spec"].(map[string]any)
+		if int(numeric(spec["hour"])) != 3 || int(numeric(spec["minute"])) != minute {
+			t.Fatalf("%s default time wrong: %#v", id, spec)
+		}
 	}
 }

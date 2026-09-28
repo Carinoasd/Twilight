@@ -177,6 +177,8 @@ session_cleanup_interval = 6
 emby_reconcile_interval = 6
 cleanup_no_emby_time = "03:30"
 cleanup_pending_emby_time = "03:45"
+group_membership_check_time = "03:10"
+telegram_bindings_check_time = "03:20"
 cleanup_unused_uploads_time = "02:20"
 cleanup_audit_logs_time = "04:30"
 

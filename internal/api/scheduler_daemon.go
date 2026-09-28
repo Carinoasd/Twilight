@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	// 内嵌时区数据库：精简镜像可能没有 /usr/share/zoneinfo，Scheduler.timezone 仍要能解析。
+	_ "time/tzdata"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -71,7 +73,7 @@ func (a *App) runSchedulerLoop(ctx context.Context) (err error) {
 			return nil
 		}
 		a.reloadConfigIfChanged()
-		now := time.Now()
+		now := time.Now().In(a.schedulerLocation())
 		interval := clamp(a.cfg().SchedulerTickIntervalSeconds, 10, 300)
 		if interval != lastInterval {
 			nextDue = time.Time{}
@@ -109,7 +111,8 @@ func (a *App) runDueSchedulerJobs(ctx context.Context) {
 		zap.L().Warn("scheduler history unavailable")
 		return
 	}
-	now := time.Now()
+	// cron_daily 的「几点」按 Scheduler.timezone 解释（schedulerJobDueFromSnapshot 用 now.Location()）。
+	now := time.Now().In(a.schedulerLocation())
 	for _, id := range ids {
 		spec := a.schedulerDefaultTriggerSpec(id)
 		schedule := overview.Schedules[id]
@@ -126,6 +129,30 @@ func (a *App) runDueSchedulerJobs(ctx context.Context) {
 			zap.L().Warn("scheduler enqueue failed", zap.String("job_id", id))
 		}
 	}
+}
+
+// schedulerLocation 返回调度使用的时区。Scheduler.timezone 为空时用进程本地时区；
+// 名字无效时同样回退本地时区并告警（只在值变化时告警一次）。
+func (a *App) schedulerLocation() *time.Location {
+	name := strings.TrimSpace(a.cfg().SchedulerTimezone)
+	if name == "" {
+		return time.Local
+	}
+	if cached := a.schedulerTZCache.Load(); cached != nil && cached.name == name {
+		return cached.loc
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		zap.L().Warn("invalid Scheduler.timezone, falling back to local time", zap.String("timezone", name), zap.Error(err))
+		loc = time.Local
+	}
+	a.schedulerTZCache.Store(&schedulerTZEntry{name: name, loc: loc})
+	return loc
+}
+
+type schedulerTZEntry struct {
+	name string
+	loc  *time.Location
 }
 
 func schedulerJobEnabledByConfig(systemUpdateEnabled bool, job map[string]any) bool {
@@ -450,7 +477,13 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 			return map[string]any{"type": "interval", "seconds": hours * 3600}
 		}
 	case "cleanup_unlinked_emby":
-		return dailySpec("05:00", 5, 0)
+		// 删除远端账号的维护任务默认不自动执行（旧实现列表却显示 05:00 的下次时间）。
+		// 管理员在后台保存自定义排程即表示启用自动执行（仍默认仅扫描不删除）。
+		return map[string]any{"type": "manual"}
+	case "enforce_group_membership":
+		return dailySpec(a.cfg().SchedulerGroupMembershipCheckTime, 3, 10)
+	case "check_telegram_bindings":
+		return dailySpec(a.cfg().SchedulerTelegramBindingsCheckTime, 3, 20)
 	case "emby_sync", "cleanup_emby_devices", "kick_unknown_group_members":
 		return map[string]any{"type": "manual"}
 	case "cleanup_unused_uploads":
