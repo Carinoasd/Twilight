@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -72,6 +73,8 @@ type migrationResourcePlanEntry struct {
 type migrationResourcePlan struct {
 	Entries   []migrationResourcePlanEntry
 	Conflicts []string
+	// Skipped 是文件名不符合该命名空间白名单、因此不会写盘的资源逻辑路径。
+	Skipped []string
 }
 
 type migrationResourceRollbackEntry struct {
@@ -181,6 +184,10 @@ func (a *App) handleMigrationImport(w http.ResponseWriter, r *http.Request, _ Pa
 	if len(plan.Conflicts) > 0 {
 		summary["resource_conflicts"] = plan.Conflicts
 		summary["resource_conflict_count"] = len(plan.Conflicts)
+	}
+	if len(plan.Skipped) > 0 {
+		summary["resource_skipped"] = plan.Skipped
+		summary["resource_skipped_count"] = len(plan.Skipped)
 	}
 	if options.Preview || options.Confirm != migrationImportConfirmPhrase {
 		summary["dry_run"] = true
@@ -407,6 +414,32 @@ func migrationResourcePathParts(logical string) (string, string, error) {
 	return "", "", fmt.Errorf("unsupported migration resource %q", logical)
 }
 
+var (
+	migrationAuthBackgroundNamePattern = regexp.MustCompile(`^background\.(jpg|png|gif|webp|bmp)$`)
+	migrationBangumiCoverNamePattern   = regexp.MustCompile(`^[0-9]+\.(jpg|png|gif|webp|bmp)$`)
+	migrationTicketImageNamePattern    = regexp.MustCompile(`^[0-9]+/[a-f0-9]{16}\.(jpg|png|gif|webp|bmp)$`)
+)
+
+// migrationResourceNameAllowed 按命名空间校验导入资源的相对路径：
+//   - avatar / background / server-icon：随机 16 hex + 图片扩展名（uploadFilenamePattern）；
+//   - auth-background：background.<图片扩展名>，或旧版随机 hex 文件名；
+//   - tickets：<工单 ID>/<随机 16 hex>.<图片扩展名>；
+//   - bangumi：<条目 ID>.<图片扩展名>。
+func migrationResourceNameAllowed(source, relative string) bool {
+	switch source {
+	case "avatar", "background", "server-icon":
+		return uploadFilenamePattern.MatchString(relative)
+	case "auth-background":
+		return migrationAuthBackgroundNamePattern.MatchString(relative) || uploadFilenamePattern.MatchString(relative)
+	case "tickets":
+		return migrationTicketImageNamePattern.MatchString(relative)
+	case "bangumi":
+		return migrationBangumiCoverNamePattern.MatchString(relative)
+	default:
+		return false
+	}
+}
+
 func (a *App) planMigrationResources(archive migration.Archive) (migrationResourcePlan, error) {
 	plan := migrationResourcePlan{Entries: make([]migrationResourcePlanEntry, 0)}
 	root := firstNonEmpty(a.cfg().UploadDir, "uploads")
@@ -420,6 +453,12 @@ func (a *App) planMigrationResources(archive migration.Archive) (migrationResour
 		sourceDir, relative, err := migrationResourcePathParts(manifestFile.Path)
 		if err != nil {
 			return plan, err
+		}
+		// 资源文件名必须符合本系统各命名空间真实会产生的格式，否则不写盘：
+		// 例如 auth-background 目录下的 zzz.html 会被公开背景端点当成背景回传。
+		if !migrationResourceNameAllowed(sourceDir, relative) {
+			plan.Skipped = append(plan.Skipped, manifestFile.Path)
+			continue
 		}
 		target, err := ResolveWithinRoot(root, filepath.Join(sourceDir, filepath.FromSlash(relative)))
 		if err != nil {

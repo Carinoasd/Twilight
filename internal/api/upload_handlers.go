@@ -427,13 +427,43 @@ func (a *App) handleAsset(w http.ResponseWriter, r *http.Request, params Params)
 			return
 		}
 	} else {
-		if !strings.Contains(p.User.Background, filename) && p.User.Role != store.RoleAdmin {
+		// 精确比对：只有当前背景配置里某个图片字段恰好指向该资源时才放行，
+		// 不再用 strings.Contains 做子串匹配。
+		if !userBackgroundReferencesAsset(p.User.Background, assetURL) && p.User.Role != store.RoleAdmin {
 			failWithCode(w, http.StatusNotFound, ErrAssetNotFound, "resource not found")
 			return
 		}
 	}
 	setImmutableCacheHeader(w)
 	http.ServeFile(w, r, filePath)
+}
+
+// userBackgroundReferencesAsset 解析用户背景配置（JSON，图片字段形如
+// url("/api/v1/users/assets/background/<file>")），判断是否恰好引用 assetURL。
+// 非 JSON 的旧格式按单个图片值处理。
+func userBackgroundReferencesAsset(background, assetURL string) bool {
+	background = strings.TrimSpace(background)
+	if background == "" {
+		return false
+	}
+	normalize := func(value string) string {
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(strings.ToLower(value), "url(") && strings.HasSuffix(value, ")") {
+			value = strings.TrimSpace(value[4 : len(value)-1])
+			value = strings.Trim(value, `"'`)
+		}
+		return value
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(background), &cfg); err != nil {
+		return normalize(background) == assetURL
+	}
+	for _, key := range []string{"lightBgImage", "darkBgImage"} {
+		if text, ok := cfg[key].(string); ok && normalize(text) == assetURL {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveUploadAssetPath(uploadDir, kind, filename string) (string, bool) {
@@ -506,20 +536,32 @@ func (a *App) handleUploadAuthBackground(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	filePath := filepath.Join(dir, filename)
-	// 清理旧扩展名的 background 文件（如从 .png 切换到 .jpg）
+	// 旧实现读了 data 却从未写盘，还先删掉了其他扩展名的旧背景，结果背景图丢失。
+	// 现在：先记下同名旧档（配置保存失败时回滚）→ 原子写入新档 → 配置保存成功后
+	// 才清理其他扩展名的旧背景。
+	previous, prevErr := os.ReadFile(filePath)
+	hadPrevious := prevErr == nil
+	if err := store.WriteFileAtomicSync(filePath, data, 0o600); err != nil {
+		failWithCode(w, http.StatusInternalServerError, ErrUploadSaveFailed, "保存文件失败")
+		return
+	}
+	info, status, message := a.patchConfigSections("", map[string]any{"Global": map[string]any{"auth_background_url": "/system/auth-background"}})
+	if status != http.StatusOK {
+		if hadPrevious {
+			_ = store.WriteFileAtomicSync(filePath, previous, 0o600)
+		} else {
+			_ = os.Remove(filePath)
+		}
+		failWithCode(w, status, ErrConfigSaveFailed, message)
+		return
+	}
 	for _, oldExt := range []string{".jpg", ".png", ".gif", ".webp", ".bmp"} {
 		if oldExt == ext {
 			continue
 		}
-		oldPath := filepath.Join(dir, "background"+oldExt)
-		_ = os.Remove(oldPath)
+		_ = os.Remove(filepath.Join(dir, "background"+oldExt))
 	}
-	info, status, message := a.patchConfigSections("", map[string]any{"Global": map[string]any{"auth_background_url": "/system/auth-background"}})
-	if status != http.StatusOK {
-		_ = os.Remove(filePath)
-		failWithCode(w, status, ErrConfigSaveFailed, message)
-		return
-	}
+	a.audit(r, "upload_auth_background", "admin", 0, map[string]any{"filename": filename, "bytes": len(data), "content_type": contentType})
 	ok(w, "上传成功", map[string]any{
 		"url":      "/system/auth-background",
 		"filename": filename,
@@ -527,8 +569,7 @@ func (a *App) handleUploadAuthBackground(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// handleAuthBackground 提供认证页背景图文件，优先返回固定文件名 background.<ext>，
-// 兼容旧版 ?file= 参数格式（新文件不存在时回退）。
+// handleAuthBackground 提供认证页背景图文件，只返回固定文件名 background.<ext>。
 func (a *App) handleAuthBackground(w http.ResponseWriter, r *http.Request, _ Params) {
 	uploadRoot := firstNonEmpty(a.cfg().UploadDir, "uploads")
 	dir, err := ResolveWithinRoot(uploadRoot, "auth-background")
@@ -545,29 +586,9 @@ func (a *App) handleAuthBackground(w http.ResponseWriter, r *http.Request, _ Par
 			return
 		}
 	}
-	// 新文件不存在时回退：兼容旧版 ?file= 参数或目录中最新的文件
-	if fileName := strings.TrimSpace(r.URL.Query().Get("file")); fileName != "" {
-		if uploadFilenamePattern.MatchString(fileName) {
-			if filePath, resolveErr := ResolveWithinRoot(dir, fileName); resolveErr == nil {
-				if info, statErr := os.Lstat(filePath); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() {
-					http.ServeFile(w, r, filePath)
-					return
-				}
-			}
-		}
-	}
-	if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) > 0 {
-		for i := len(entries) - 1; i >= 0; i-- {
-			e := entries[i]
-			if !e.Type().IsRegular() {
-				continue
-			}
-			if info, infoErr := e.Info(); infoErr == nil && info.Mode()&os.ModeSymlink == 0 {
-				http.ServeFile(w, r, filepath.Join(dir, e.Name()))
-				return
-			}
-		}
-	}
+	// 不再回退到 ?file= 或"目录里排序最后的任意文件"：这是公开端点，旧回退会把
+	// auth-background 目录下任意文件（例如经迁移导入写入的 .html）按扩展名的
+	// Content-Type 回给未登录访客。只允许固定的 background.<图片扩展名>。
 	failWithCode(w, http.StatusNotFound, ErrAssetNotFound, "resource not found")
 }
 
