@@ -420,6 +420,8 @@ func (s *Store) UpdateMediaRequestStatusIfRevision(id int64, rawStatus string, a
 	defer s.mu.Unlock()
 	var updated MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = MediaRequest{}
 		r, ok := s.state.MediaRequests[id]
 		if !ok {
 			return ErrNotFound
@@ -447,6 +449,8 @@ func (s *Store) UpdateMediaRequestStatusByKey(key, rawStatus, adminNote string, 
 	defer s.mu.Unlock()
 	var updated MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = MediaRequest{}
 		id, current, ok := s.mediaRequestByKeyLocked(key)
 		if !ok {
 			return ErrNotFound
@@ -478,6 +482,9 @@ func (s *Store) UpdateMediaRequestsStatusByKey(items []MediaRequestBatchItem, ra
 	updated := make([]MediaRequest, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = make([]MediaRequest, 0, len(items))
+		seen = make(map[string]struct{}, len(items))
 		for _, item := range items {
 			key := strings.TrimSpace(item.RequireKey)
 			if key == "" {
@@ -549,6 +556,8 @@ func (s *Store) DeleteMediaRequestByKey(key string, expectedRevision *int64) (Me
 	defer s.mu.Unlock()
 	var deleted MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = MediaRequest{}
 		id, current, ok := s.mediaRequestByKeyLocked(key)
 		if !ok {
 			return ErrNotFound

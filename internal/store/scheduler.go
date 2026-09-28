@@ -367,6 +367,8 @@ func (s *Store) SetSchedulerScheduleRevision(jobID string, spec, params map[stri
 	defer s.mu.Unlock()
 	var result SchedulerSchedule
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		result = SchedulerSchedule{}
 		previous := s.state.SchedulerSchedules[jobID]
 		if expected != nil && previous.Revision != *expected {
 			return ErrConflict

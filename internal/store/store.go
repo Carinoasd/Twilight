@@ -1044,6 +1044,10 @@ func (s *Store) mutateAndSaveLocked(mutate func() error) error {
 	return s.mutateAndSaveWithTxLocked(mutate, nil)
 }
 
+// testHookBeforePersist 仅供测试：mutate 成功后、写库前调用，用来在两者之间插入
+// 「他进程」的写入以制造版本冲突、验证闭包重放。生产代码中恒为 nil。
+var testHookBeforePersist func()
+
 // mutateAndSaveWithTxLocked extends the state version/rollback boundary to
 // dedicated tables. persist runs inside the same transaction and must contain
 // only database writes: a version conflict can retry the entire operation.
@@ -1072,6 +1076,9 @@ func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(cont
 			// mutate 失败：本身就不打算落盘，状态可能被改了一半，回滚到快照。
 			s.restoreStateLocked(prev)
 			return err
+		}
+		if testHookBeforePersist != nil {
+			testHookBeforePersist()
 		}
 		if persist == nil {
 			err = s.saveLocked()
@@ -1773,7 +1780,10 @@ func (s *Store) CreateUser(u User) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var created User
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created = input, User{}
 		if s.usernameExistsLocked(u.Username) || s.emailTakenLocked(u.Email, 0) || s.telegramIDTakenLocked(u.TelegramID, 0) || s.embyIDTakenLocked(u.EmbyID, 0) {
 			return ErrConflict
 		}
@@ -1809,7 +1819,10 @@ func (s *Store) CreateInitialAdmin(u User) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var created User
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created = input, User{}
 		if len(s.state.Users) != 0 {
 			return ErrSetupUnavailable
 		}
@@ -1920,7 +1933,10 @@ func (s *Store) CreateUserWithRegCode(u User, regCode string, telegramID int64) 
 	defer s.mu.Unlock()
 	var created User
 	var consumed RegCode
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created, consumed = input, User{}, RegCode{}
 		if s.usernameExistsLocked(u.Username) || s.emailTakenLocked(u.Email, 0) || s.telegramIDTakenLocked(u.TelegramID, 0) || s.telegramIDTakenLocked(telegramID, 0) || s.embyIDTakenLocked(u.EmbyID, 0) {
 			return ErrConflict
 		}
@@ -2129,6 +2145,8 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2215,6 +2233,8 @@ func (s *Store) ClearUserEmails() (total int, cleared int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		cleared = 0
 		total = len(s.state.Users)
 		for uid, u := range s.state.Users {
 			if u.Email == "" {
@@ -2447,6 +2467,8 @@ func (s *Store) SetUserRoleAtomic(uid int64, newRole int) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2480,6 +2502,8 @@ func (s *Store) SetUserActiveAtomic(uid int64, active bool) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2546,6 +2570,8 @@ func (s *Store) DisableUserForTelegramMembership(uid int64) (User, bool, string,
 		protectionReason string
 	)
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, disabled, protectionReason = User{}, false, ""
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2625,6 +2651,8 @@ func (s *Store) bindUserTelegram(uid int64, tgid int64, telegramUsername string,
 		old     int64
 	)
 	err := s.mutateAndSaveWithTxLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, old = User{}, 0
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2688,6 +2716,8 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 		displaced int64
 	)
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, displaced = User{}, 0
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -3543,7 +3573,10 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 func (s *Store) CreateAPIKey(k APIKey) (APIKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := k
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		k = input
 		k.ID = s.state.NextAPIKeyID
 		s.state.NextAPIKeyID++
 		if k.CreatedAt == 0 {
@@ -3642,6 +3675,8 @@ func (s *Store) UpdateAPIKey(uid, id int64, fn func(*APIKey) error) (APIKey, err
 	defer s.mu.Unlock()
 	var updated APIKey
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = APIKey{}
 		k, ok := s.state.APIKeys[id]
 		if !ok || k.UID != uid {
 			return ErrNotFound
@@ -3804,7 +3839,10 @@ func (s *Store) CreateMediaRequestWithOptions(r MediaRequest, opts MediaRequestC
 	// 的语义 mutateAndSaveLocked 不直接支持——通过闭包外的捕获变量传出。
 	var conflict MediaRequest
 	var conflictHit bool
+	input := r
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		r, conflict, conflictHit = input, MediaRequest{}, false
 		if opts.UserActiveLimit > 0 && s.countActiveMediaRequestsLocked(r.UID) >= opts.UserActiveLimit {
 			return ErrMediaRequestUserActiveLimit
 		}
@@ -3944,6 +3982,8 @@ func (s *Store) UpdateMediaRequest(id int64, fn func(*MediaRequest) error) (Medi
 	defer s.mu.Unlock()
 	var updated MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = MediaRequest{}
 		r, ok := s.state.MediaRequests[id]
 		if !ok {
 			return ErrNotFound
@@ -3973,6 +4013,8 @@ func (s *Store) DeleteMediaRequestIfRevision(id int64, expectedRevision *int64) 
 	defer s.mu.Unlock()
 	var deleted MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = MediaRequest{}
 		request, ok := s.state.MediaRequests[id]
 		if !ok {
 			return ErrNotFound
@@ -4013,6 +4055,8 @@ func (s *Store) ConfirmBindCodeAtomic(code string, telegramID int64, telegramUse
 	var updated User
 	var userUpdated bool
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		confirmed, updated, userUpdated = BindCode{}, User{}, false
 		bind, ok := s.state.BindCodes[code]
 		if !ok {
 			return ErrNotFound
@@ -4085,6 +4129,8 @@ func (s *Store) CleanupExpiredBindCodes(now int64) (int, error) {
 	defer s.mu.Unlock()
 	deleted := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = 0
 		for code, bind := range s.state.BindCodes {
 			if bind.ExpiresAt > 0 && bind.ExpiresAt <= now {
 				delete(s.state.BindCodes, code)
@@ -4111,6 +4157,8 @@ func (s *Store) RepairLegacyTelegramBindResidue() (int, error) {
 	}
 	deleted := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = 0
 		for code := range s.state.BindCodes {
 			delete(s.state.BindCodes, code)
 			deleted++
@@ -4241,7 +4289,11 @@ func normalizeRegistrationGrantDays(days int) int {
 func (s *Store) UpsertAnnouncement(a Announcement) (Announcement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := a
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		// 否则上一轮分配的 ID 会被沿用，可能覆盖他进程刚用同一 ID 新建的条目。
+		a = input
 		now := time.Now().Unix()
 		if a.ID == 0 {
 			a.ID = s.state.NextAnnouncementID
@@ -4400,7 +4452,11 @@ func (s *Store) MarkAnnouncementsSeen(uid int64, ids []int64) error {
 func (s *Store) UpsertDeveloperJSPreset(p DeveloperJSPreset) (DeveloperJSPreset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := p
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		// 否则上一轮分配的 ID 会被沿用，可能覆盖他进程刚用同一 ID 新建的条目。
+		p = input
 		now := time.Now().Unix()
 		if p.ID == 0 {
 			p.ID = s.state.NextDeveloperJSPresetID
@@ -4629,6 +4685,8 @@ func (s *Store) ConsumeInviteCode(code string, childUID int64) (InviteCode, erro
 	defer s.mu.Unlock()
 	var consumed InviteCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		consumed = InviteCode{}
 		c, ok := s.state.InviteCodes[code]
 		if !ok || !c.Active {
 			return ErrNotFound
@@ -4679,6 +4737,8 @@ func (s *Store) ConsumeInviteCodeAndUpdateUser(code string, childUID int64, maxD
 	var updated User
 	var consumed InviteCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, consumed = User{}, InviteCode{}
 		u, okUser := s.state.Users[childUID]
 		if !okUser {
 			return ErrNotFound
@@ -5001,11 +5061,15 @@ func (s *Store) ConsumeRegCodeAndUpdateUser(code string, uid, telegramID int64, 
 	var updated User
 	var consumed RegCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, consumed = User{}, RegCode{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
 		}
 		now := time.Now().Unix()
+		// 用闭包内局部变量：直接改写参数 telegramID 会让冲突重放沿用上一轮的回填值。
+		telegramID := telegramID
 		if telegramID == 0 {
 			telegramID = u.TelegramID
 		}
@@ -5198,7 +5262,10 @@ func (s *Store) CreateRebindRequest(req RebindRequest) (RebindRequest, error) {
 	defer s.mu.Unlock()
 	var existingHit RebindRequest
 	var hit bool
+	input := req
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		req, existingHit, hit = input, RebindRequest{}, false
 		for _, existing := range s.state.RebindRequests {
 			if existing.UID == req.UID && existing.Status == "pending" {
 				existingHit = existing
@@ -5246,6 +5313,8 @@ func (s *Store) ReviewRebindRequest(id, reviewerUID int64, status, note string) 
 	defer s.mu.Unlock()
 	var updated RebindRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = RebindRequest{}
 		req, ok := s.state.RebindRequests[id]
 		if !ok {
 			return ErrNotFound

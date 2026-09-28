@@ -217,3 +217,88 @@ func TestRecordLoginWritesOnce(t *testing.T) {
 		t.Fatalf("device: %+v", devices)
 	}
 }
+
+// forceConflictOnce 让下一次 mutateAndSave 在 mutate 之后、写库之前，由另一个 Store
+// （模拟他进程）先写一笔，从而必然撞上版本守卫并重放闭包。
+func forceConflictOnce(t *testing.T, write func(other *Store)) {
+	t.Helper()
+	other := reopenTestStore(t)
+	fired := false
+	testHookBeforePersist = func() {
+		if fired {
+			return
+		}
+		fired = true
+		testHookBeforePersist = nil
+		write(other)
+	}
+	t.Cleanup(func() {
+		testHookBeforePersist = nil
+		if !fired {
+			t.Errorf("conflict hook never fired")
+		}
+	})
+}
+
+// 第 3 条：批次改媒体请求状态遇到版本冲突重放时，seen 不能残留导致误报 ErrInvalid。
+func TestMediaRequestBatchStatusSurvivesConflictReplay(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	var items []MediaRequestBatchItem
+	for i := 0; i < 2; i++ {
+		req, err := st.CreateMediaRequest(MediaRequest{UID: 1, Source: "tmdb", MediaID: int64(100 + i), Title: "m"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, MediaRequestBatchItem{RequireKey: req.RequireKey})
+	}
+	forceConflictOnce(t, func(other *Store) {
+		if err := other.AddViolationLog(ViolationLog{Code: "x"}); err != nil {
+			t.Error(err)
+		}
+	})
+	updated, err := st.UpdateMediaRequestsStatusByKey(items, MediaRequestStatusCompleted, "", false)
+	if err != nil {
+		t.Fatalf("batch update after conflict replay: %v", err)
+	}
+	if len(updated) != len(items) {
+		t.Fatalf("updated %d requests, want %d", len(updated), len(items))
+	}
+}
+
+// 第 3 条：清理计数在冲突重放后不能翻倍。
+func TestCleanupCountNotDoubledOnConflictReplay(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	now := time.Now().Unix()
+	for _, id := range []string{"ev-1", "ev-2"} {
+		if err := st.PutEmailVerification(EmailVerification{ID: id, Purpose: "bind", Email: id + "@example.com", ExpiresAt: now - 10}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forceConflictOnce(t, func(other *Store) {
+		if err := other.AddViolationLog(ViolationLog{Code: "x"}); err != nil {
+			t.Error(err)
+		}
+	})
+	deleted, err := st.CleanupExpiredEmailVerifications(now)
+	if err != nil || deleted != 2 {
+		t.Fatalf("cleanup deleted=%d err=%v, want 2", deleted, err)
+	}
+}
+
+// 第 3 条：带 ID==0 判断的新建路径在重放时必须重新分配 ID，不能覆盖他进程刚建的条目。
+func TestUpsertAnnouncementReplayAllocatesFreshID(t *testing.T) {
+	st := newJSONStoreForTest(t)
+	forceConflictOnce(t, func(other *Store) {
+		if _, err := other.UpsertAnnouncement(Announcement{Title: "from-other", Content: "o", Visible: true}); err != nil {
+			t.Error(err)
+		}
+	})
+	mine, err := st.UpsertAnnouncement(Announcement{Title: "mine", Content: "m", Visible: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := st.ListAnnouncements(true)
+	if len(all) != 2 {
+		t.Fatalf("announcements=%+v, want both (mine id=%d)", all, mine.ID)
+	}
+}

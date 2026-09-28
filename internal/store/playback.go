@@ -75,6 +75,8 @@ func (s *Store) SyncEmbyActivityLogs(entries []EmbyActivityLog) (int, error) {
 	defer s.mu.Unlock()
 	added := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		added = 0
 		changed := false
 		if s.state.NextEmbyActivityLogID <= 0 {
 			maxID := int64(0)

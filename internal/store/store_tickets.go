@@ -114,7 +114,10 @@ func applyTicketStatusTimestamps(t *Ticket, existing Ticket, now int64) {
 func (s *Store) CreateTicket(t Ticket, userOpenLimit, globalOpenLimit int) (Ticket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := t
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		t = input
 		if userOpenLimit > 0 && s.countOpenTicketsLocked(t.UID) >= userOpenLimit {
 			return ErrTicketUserOpenLimit
 		}
@@ -275,6 +278,8 @@ func (s *Store) UpdateTicket(ticketID int64, patch TicketUpdate) (Ticket, error)
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound
@@ -328,6 +333,8 @@ func (s *Store) ReopenTicket(ticketID, uid int64, userOpenLimit, globalOpenLimit
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound
@@ -365,6 +372,8 @@ func (s *Store) SetTicketNotify(ticketID int64, enabled bool, ownerUID ...int64)
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound
@@ -401,6 +410,8 @@ func (s *Store) addTicketAttachment(ticketID int64, att TicketAttachment, actorR
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound
@@ -447,6 +458,8 @@ func (s *Store) AddTicketReply(ticketID int64, reply TicketReply) (Ticket, error
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound
@@ -495,6 +508,8 @@ func (s *Store) RemoveTicketAttachment(ticketID int64, filename string, actorRol
 	defer s.mu.Unlock()
 	var out Ticket
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out = Ticket{}
 		t, ok := s.state.Tickets[ticketID]
 		if !ok {
 			return ErrNotFound

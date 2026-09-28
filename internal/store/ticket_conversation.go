@@ -109,7 +109,8 @@ func (s *Store) AppendTicketMessage(ticketID int64, actor User, content, request
 				}
 				reply.ID = int64(i + 1)
 				result.Ticket, result.Reply, result.Replayed = t, reply, true
-				return nil
+				// 幂等重放：state 没有任何改动，跳过整份落盘。
+				return errNoChange
 			}
 		}
 		if !TicketStatusAllowsConversation(t.Status) && user.Role != RoleAdmin {
