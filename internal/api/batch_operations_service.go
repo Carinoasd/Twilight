@@ -10,28 +10,28 @@ import (
 )
 
 type batchOperationRequest struct {
-	UIDs       []int64
-	SelectAll  bool
-	Filter     map[string]any
+	UIDs        []int64
+	SelectAll   bool
+	Filter      map[string]any
 	ExcludeUIDs []int64
-	Confirm    string
-	Reason     string
-	Days       int
-	DeleteEmby bool
-	Scope      string
+	Confirm     string
+	Reason      string
+	Days        int
+	DeleteEmby  bool
+	Scope       string
 }
 
 type batchOperationResult struct {
-	Success     []int64          `json:"success"`
-	Failed      []batchFailure   `json:"failed"`
-	SelectedAll bool             `json:"selected_all,omitempty"`
-	Metadata    map[string]any   `json:"metadata,omitempty"`
+	Success     []int64        `json:"success"`
+	Failed      []batchFailure `json:"failed"`
+	SelectedAll bool           `json:"selected_all,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 type batchFailure struct {
-	UID     int64  `json:"uid"`
+	UID     int64   `json:"uid"`
 	Code    ErrCode `json:"code"`
-	Message string `json:"message"`
+	Message string  `json:"message"`
 }
 
 func (a *App) batchToggleUsers(ctx context.Context, req batchOperationRequest, enable bool, currentUID int64) (batchOperationResult, error) {

@@ -56,7 +56,8 @@ jobs:
 
   postgres-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # -race 下 api 包单次要跑 30 分钟上下，25m 的 go test 超时会把整包打断。
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:18
@@ -83,7 +84,7 @@ jobs:
           cache: true
       - name: Run database integration and race tests
         # Store/API fixtures share one disposable database, so packages run serially.
-        run: go test -p 1 -race ./internal/store ./internal/api -count=1 -timeout=25m
+        run: go test -p 1 -race ./internal/store ./internal/api -count=1 -timeout=50m
 
   go-security:
     runs-on: ubuntu-latest

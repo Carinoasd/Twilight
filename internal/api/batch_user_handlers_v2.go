@@ -189,9 +189,9 @@ func (a *App) handleV2BatchRefreshStatus(w http.ResponseWriter, r *http.Request,
 	}
 
 	a.audit(r, "batch_refresh_status", "admin", 0, map[string]any{
-		"scope":       scope,
-		"total":       len(req.UIDs),
-		"tg_updated":  result.Metadata["telegram_updated"],
+		"scope":         scope,
+		"total":         len(req.UIDs),
+		"tg_updated":    result.Metadata["telegram_updated"],
 		"emby_disabled": result.Metadata["emby_disabled"],
 	})
 

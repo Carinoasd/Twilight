@@ -25,8 +25,8 @@ type updateUsernameResult struct {
 }
 
 type renewResult struct {
-	User       store.User
-	ExpiredAt  int64
+	User         store.User
+	ExpiredAt    int64
 	ExpireStatus string
 }
 

@@ -6,7 +6,7 @@
 
 **面向 Emby / Jellyfin 的用户、邀请、卡码、Bot 与运维管理面板**
 
-[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Telegram-频道-blue?logo=telegram)](https://t.me/Twilightpanel)
@@ -23,7 +23,7 @@ Twilight 是一个功能完善的 Emby / Jellyfin 用户管理系统，提供注
 
 ### 技术栈
 
-- **后端**: Go 1.25+ / PostgreSQL
+- **后端**: Go 1.26+ / PostgreSQL
 - **前端**: Next.js / React / TypeScript / Tailwind CSS（`webui/`）
 - **部署**: Docker / Linux systemd
 

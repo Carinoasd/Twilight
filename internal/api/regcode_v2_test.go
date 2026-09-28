@@ -13,7 +13,6 @@ func TestV2AdminRegcodeResourcesUseBoundedResourceShape(t *testing.T) {
 	app := newTestApp(t)
 	admin := registerAdmin(t, app, "v2-reg-admin", "Admin123456")
 
-
 	created := doJSON(app, http.MethodPost, "/api/v2/admin/regcodes", `{"type":1,"days":30,"validity_time":-1,"use_count_limit":-1,"count":1,"note":"v2"}`, admin)
 	if created.Code != http.StatusOK {
 		t.Fatalf("v2 create status=%d body=%s", created.Code, created.Body.String())

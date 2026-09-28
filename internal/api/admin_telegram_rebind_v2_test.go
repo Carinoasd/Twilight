@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/prejudice-studio/twilight/internal/store"
-
 )
 
 func TestV2AdminTelegramRebindResourcesUseGuardedReviewFlow(t *testing.T) {
