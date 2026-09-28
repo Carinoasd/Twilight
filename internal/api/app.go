@@ -822,13 +822,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failWithCode(lw, http.StatusBadRequest, ErrBadRequest, "请求路径不规范")
 		return
 	}
-	bodyLimit := a.cfg().MaxUploadSize
-	if strings.HasPrefix(r.URL.Path, "/api/v1/system/admin/migration/") {
-		// Migration archives are bounded by the archive parser rather than the
-		// ordinary image-upload limit. The route still authenticates as admin
-		// before reading the body in its handler.
-		bodyLimit = migration.MaxArchiveBytes + 8<<20
-	}
+	bodyLimit := requestBodyLimit(r.URL.Path, a.cfg().MaxUploadSize)
 	if bodyLimit > 0 {
 		r.Body = http.MaxBytesReader(lw, r.Body, bodyLimit)
 	}
@@ -2031,4 +2025,24 @@ func requestPathCanonical(p string) bool {
 		}
 	}
 	return true
+}
+
+// migrationImportPaths 是允许上传迁移封包、因而放宽请求体上限的路由（精确匹配）。
+var migrationImportPaths = map[string]bool{
+	"/api/v1/system/admin/migration/import": true,
+	"/api/v2/admin/migration/import":        true,
+}
+
+// requestBodyLimit 返回某路径的请求体上限。
+//
+// 迁移封包受封包解析器自身的上限约束，不走普通图片上传上限；路由仍先按管理员鉴权
+// 再由 handler 读 body。旧实现按原始路径前缀 /api/v1/system/admin/migration/ 放宽，
+// 而路由匹配用的是清理后的路径——带 “..” 的请求能让任意路由拿到约 536MB 的上限。
+// 入口已拒绝非规范路径（requestPathCanonical），这里再改成只对导入路由精确放宽，
+// 同前缀下的 status / export 等不再沾光；V2 导入路由一并放宽，与 V1 口径一致。
+func requestBodyLimit(path string, defaultLimit int64) int64 {
+	if migrationImportPaths[strings.TrimSuffix(path, "/")] {
+		return migration.MaxArchiveBytes + 8<<20
+	}
+	return defaultLimit
 }

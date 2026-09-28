@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prejudice-studio/twilight/internal/migration"
 	"github.com/prejudice-studio/twilight/internal/store"
 )
 
@@ -221,5 +222,23 @@ func TestSessionCreateFailsWhenPostgresWriteFails(t *testing.T) {
 	}
 	if token, _, err := ss.Create(context.Background(), 1, ""); err == nil {
 		t.Fatalf("Create must fail when PostgreSQL write fails, got token %q", token)
+	}
+}
+
+// TestRequestBodyLimitOnlyWidenedForMigrationImport 防回归：只有迁移导入路由放宽请求体
+// 上限，同前缀的其它路由和普通上传仍用默认上限。
+func TestRequestBodyLimitOnlyWidenedForMigrationImport(t *testing.T) {
+	const def = int64(1 << 20)
+	for path, want := range map[string]int64{
+		"/api/v1/system/admin/migration/import":                         migration.MaxArchiveBytes + 8<<20,
+		"/api/v2/admin/migration/import":                                migration.MaxArchiveBytes + 8<<20,
+		"/api/v1/system/admin/migration/export":                         def,
+		"/api/v1/system/admin/migration/status":                         def,
+		"/api/v1/system/admin/migration/../../../../v2/settings/avatar": def,
+		"/api/v2/settings/appearance/avatar/upload":                     def,
+	} {
+		if got := requestBodyLimit(path, def); got != want {
+			t.Fatalf("requestBodyLimit(%q)=%d want %d", path, got, want)
+		}
 	}
 }
