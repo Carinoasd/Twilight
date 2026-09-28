@@ -576,6 +576,12 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			})
 		}
 		return map[string]any{"success": true, "after_uid": afterUID, "next_after_uid": nextAfterUID, "truncated": truncated, "batch_users": len(users), "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
+	case "auto_backup_database":
+		// 未开启时自动排程空转；管理员手动「立即执行」总是会备份。
+		if !jobParamBool(params, "enabled", a.cfg().SchedulerAutoBackupEnabled) && !schedulerManualRun(r) {
+			return map[string]any{"success": true, "skipped": true, "enabled": false}, []string{"auto backup disabled"}, nil
+		}
+		return a.runAutoBackupDatabase(jobParamInt(params, "keep", autoBackupKeep(a.cfg().SchedulerAutoBackupKeep)))
 	case "emby_state_reconcile":
 		return a.runEmbyStateReconcile(r.Context(), jobParamBool(params, "dry_run", false), max(jobParamInt(params, "max_changes", embyReconcileDefaultMaxChanges), 0))
 	case "cleanup_no_emby":

@@ -397,6 +397,11 @@ telegram_bindings_check_time = "03:20"
 failure_notify = true
 # 可安全重放的每日任务失败后，过多少分钟自动重试一次（每天最多一次）；0 关闭
 retry_failed_after_minutes = 15
+# 定期数据库备份（默认关闭）：每天 auto_backup_time 备份到 Database.backup_dir，
+# 只保留最近 auto_backup_keep 份自动备份；手动备份不会被自动删除
+auto_backup_enabled = false
+auto_backup_time = "04:15"
+auto_backup_keep = 7
 # 清理未使用上传文件（每日 HH:MM）
 cleanup_unused_uploads_time = "02:20"
 # 审计日志自动清理（每日 HH:MM）

@@ -488,6 +488,8 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 		// 删除远端账号的维护任务默认不自动执行（旧实现列表却显示 05:00 的下次时间）。
 		// 管理员在后台保存自定义排程即表示启用自动执行（仍默认仅扫描不删除）。
 		return map[string]any{"type": "manual"}
+	case "auto_backup_database":
+		return dailySpec(a.cfg().SchedulerAutoBackupTime, 4, 15)
 	case "enforce_group_membership":
 		return dailySpec(a.cfg().SchedulerGroupMembershipCheckTime, 3, 10)
 	case "check_telegram_bindings":
