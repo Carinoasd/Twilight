@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -342,5 +343,22 @@ func TestDeveloperJSPrivateIPCoversReservedAndTranslatedRanges(t *testing.T) {
 		if developerJSPrivateIP(net.ParseIP(s)) {
 			t.Errorf("expected %s to be allowed", s)
 		}
+	}
+}
+
+// 走环境代理时，拨号层只看得到代理 IP；必须在选代理时校验真实目标主机。
+func TestSharedTransportProxyGuardsTargetHost(t *testing.T) {
+	proxyURL, _ := url.Parse("http://127.0.0.1:3128")
+	original := sharedHTTPProxyFromEnvironment
+	sharedHTTPProxyFromEnvironment = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
+	defer func() { sharedHTTPProxyFromEnvironment = original }()
+
+	blocked, _ := http.NewRequest(http.MethodGet, "http://169.254.169.254/latest/meta-data", nil)
+	if got, err := sharedHTTPTransport.Proxy(blocked); err == nil {
+		t.Fatalf("metadata target via proxy should be refused, got proxy %v", got)
+	}
+	allowed, _ := http.NewRequest(http.MethodGet, "https://93.184.216.34/", nil)
+	if got, err := sharedHTTPTransport.Proxy(allowed); err != nil || got == nil || got.Host != "127.0.0.1:3128" {
+		t.Fatalf("public target should use proxy, got %v err=%v", got, err)
 	}
 }
