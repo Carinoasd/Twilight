@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Bot,
   CalendarDays,
@@ -40,6 +40,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAsyncResource } from "@/hooks/use-async-resource";
 import { PageError } from "@/components/layout/page-state";
 import { api, type AuditLog } from "@/lib/api";
+import type { AuditActionCount } from "@/lib/api-types";
 import { formatDate } from "@/lib/utils";
 import { useI18n, type MessageKey } from "@/lib/i18n";
 
@@ -67,6 +68,13 @@ const ACTION_LABELS: Record<string, MessageKey> = {
   batch_disable_users: "adminAuditLog.actionBatchDisableUsers",
   batch_renew_users: "adminAuditLog.actionBatchRenewUsers",
   batch_delete_users: "adminAuditLog.actionBatchDeleteUsers",
+};
+
+const SOURCE_LABELS: Record<string, MessageKey> = {
+  http: "adminAuditLog.sourceHttp",
+  telegram: "adminAuditLog.sourceTelegram",
+  scheduler: "adminAuditLog.sourceScheduler",
+  system: "adminAuditLog.sourceSystem",
 };
 
 const SORT_MAP: Record<string, { sort: string; order: string }> = {
@@ -102,6 +110,9 @@ export default function AdminAuditLogsPage() {
   const [presetFilter, setPresetFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [actionFilter, setActionFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  // action 下拉选项从后端取审计表里实际出现过的全部 action，不再前端写死。
+  const [actionOptions, setActionOptions] = useState<AuditActionCount[]>([]);
   const [timeRange, setTimeRange] = useState("all");
   const [sortMode, setSortMode] = useState("created_desc");
   const [perPage, setPerPage] = useState(50);
@@ -129,6 +140,7 @@ export default function AdminAuditLogsPage() {
         preset: presetFilter !== "all" ? presetFilter : undefined,
         category: categoryFilter !== "all" ? categoryFilter : undefined,
         action: actionFilter !== "all" ? actionFilter : undefined,
+        source: sourceFilter !== "all" ? sourceFilter : undefined,
         uid: uidFilter.trim() || undefined,
         target_uid: targetUidFilter.trim() || undefined,
         search: search || undefined,
@@ -150,6 +162,7 @@ export default function AdminAuditLogsPage() {
       presetFilter,
       categoryFilter,
       actionFilter,
+      sourceFilter,
       uidFilter,
       targetUidFilter,
       search,
@@ -164,6 +177,19 @@ export default function AdminAuditLogsPage() {
     loadLogs,
     { immediate: true }
   );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .getAuditLogActions(controller.signal)
+      .then((res) => {
+        if (res.success && res.data) setActionOptions(res.data.actions || []);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [total]);
+
+  const actionLabel = (action: string) => (ACTION_LABELS[action] ? t(ACTION_LABELS[action]) : action);
 
   const handlePresetChange = (value: string) => {
     setPresetFilter(value);
@@ -194,6 +220,7 @@ export default function AdminAuditLogsPage() {
     setPresetFilter("all");
     setCategoryFilter("all");
     setActionFilter("all");
+    setSourceFilter("all");
     setTimeRange("all");
     setSortMode("created_desc");
     setPerPage(50);
@@ -346,23 +373,27 @@ export default function AdminAuditLogsPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">{t("adminAuditLog.allActions")}</SelectItem>
-                <SelectItem value="create_regcode">{t("adminAuditLog.actionCreateRegcode")}</SelectItem>
-                <SelectItem value="update_regcode">{t("adminAuditLog.actionUpdateRegcode")}</SelectItem>
-                <SelectItem value="delete_regcode">{t("adminAuditLog.actionDeleteRegcode")}</SelectItem>
-                <SelectItem value="batch_delete_regcode">{t("adminAuditLog.actionBatchDeleteRegcode")}</SelectItem>
-                <SelectItem value="clear_regcode_usage">{t("adminAuditLog.actionClearRegcodeUsage")}</SelectItem>
-                <SelectItem value="create_invite_code">{t("adminAuditLog.actionCreateInviteCode")}</SelectItem>
-                <SelectItem value="create_renew_code">{t("adminAuditLog.actionCreateRenewCode")}</SelectItem>
-                <SelectItem value="use_code">{t("adminAuditLog.actionUseCode")}</SelectItem>
-                <SelectItem value="update_user">{t("adminAuditLog.actionUpdateUser")}</SelectItem>
-                <SelectItem value="set_role">{t("adminAuditLog.actionSetRole")}</SelectItem>
-                <SelectItem value="enable_user">{t("adminAuditLog.actionEnableUser")}</SelectItem>
-                <SelectItem value="disable_user">{t("adminAuditLog.actionDisableUser")}</SelectItem>
-                <SelectItem value="delete_user">{t("adminAuditLog.actionDeleteUser")}</SelectItem>
-                <SelectItem value="batch_enable_users">{t("adminAuditLog.actionBatchEnableUsers")}</SelectItem>
-                <SelectItem value="batch_disable_users">{t("adminAuditLog.actionBatchDisableUsers")}</SelectItem>
-                <SelectItem value="batch_renew_users">{t("adminAuditLog.actionBatchRenewUsers")}</SelectItem>
-                <SelectItem value="batch_delete_users">{t("adminAuditLog.actionBatchDeleteUsers")}</SelectItem>
+                {actionFilter !== "all" && !actionOptions.some((item) => item.action === actionFilter) && (
+                  <SelectItem value={actionFilter}>{actionLabel(actionFilter)}</SelectItem>
+                )}
+                {actionOptions.map((item) => (
+                  <SelectItem key={item.action} value={item.action}>
+                    {actionLabel(item.action)}
+                    {ACTION_LABELS[item.action] ? ` (${item.action})` : ""} · {item.count}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={sourceFilter} onValueChange={(value) => { setSourceFilter(value); setPage(1); }}>
+              <SelectTrigger>
+                <SelectValue placeholder={t("adminAuditLog.filterSource")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t("adminAuditLog.allSources")}</SelectItem>
+                {Object.entries(SOURCE_LABELS).map(([value, key]) => (
+                  <SelectItem key={value} value={value}>{t(key)}</SelectItem>
+                ))}
               </SelectContent>
             </Select>
 
@@ -488,10 +519,15 @@ export default function AdminAuditLogsPage() {
                             ? t("adminAuditLog.categorySystem")
                             : t("adminAuditLog.categoryUser")}
                       </Badge>
+                      {log.source && (
+                        <Badge variant="outline" className="text-xs">
+                          {SOURCE_LABELS[log.source] ? t(SOURCE_LABELS[log.source]) : log.source}
+                        </Badge>
+                      )}
                     </div>
                     <div className="text-sm">
                       <span className="font-medium">
-                        {ACTION_LABELS[log.action] ? t(ACTION_LABELS[log.action]) : log.action}
+                        {actionLabel(log.action)}
                       </span>
                       {log.target_uid != null && log.target_uid > 0 && (
                         <span className="ml-2 text-muted-foreground">

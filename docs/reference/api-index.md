@@ -112,7 +112,8 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | PUT | `/api/v2/admin/announcements/{announcement_id}` | Admin | V2 更新公告 |
 | DELETE | `/api/v2/admin/announcements/{announcement_id}` | Admin | V2 删除公告 |
 | GET | `/api/v2/admin/audit-logs` | Admin | V2 操作审计日志分页资源；服务端筛选、参数化排序且不缓存 |
-| DELETE | `/api/v2/admin/audit-logs/{log_id}` | Admin | V2 删除单条审计日志；兼容 `log_id` 路由参数 |
+| GET | `/api/v2/admin/audit-logs/actions` | Admin | 审计表中出现过的 action（含条数）与可选 source，供筛选下拉使用 |
+| DELETE | `/api/v2/admin/audit-logs/{log_id}` | Admin | V2 删除单条审计日志；需要 `DELETE_AUDIT_LOG`，删除后写不可删的 `delete_audit_log` |
 | POST | `/api/v2/admin/audit-logs/clear` | Admin | V2 清空审计日志；需要 `CLEAR_AUDIT_LOGS` |
 | POST | `/api/v2/admin/audit-logs/prune` | Admin | V2 按条数/天数裁剪审计日志；需要 `PRUNE_AUDIT_LOGS` |
 | GET | `/api/v2/admin/config/schema` | Admin | V2 读取脱敏结构化配置 schema；不返回服务器路径或 secret 明文 |
@@ -566,7 +567,8 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | DELETE | `/api/v2/admin/violations/{violation_id}` | Admin | V2 删除单条违规记录 |
 | POST | `/api/v2/admin/violations/clear` | Admin | V2 清空违规记录；需要 `CLEAR_VIOLATIONS` 确认短语 |
 | GET | `/api/v1/admin/audit-logs` | Admin | 操作审计日志列表（支持 category/action/uid/search 筛选与分页） |
-| DELETE | `/api/v1/admin/audit-logs/{log_id}` | Admin | 删除单条操作审计日志 |
+| GET | `/api/v1/admin/audit-logs/actions` | Admin | 审计表中出现过的 action 列表 |
+| DELETE | `/api/v1/admin/audit-logs/{log_id}` | Admin | 删除单条操作审计日志（需确认短语 `DELETE_AUDIT_LOG`） |
 | POST | `/api/v1/admin/audit-logs/clear` | Admin | 清空全部审计日志（需确认短语 `CLEAR_AUDIT_LOGS`） |
 | GET | `/api/v1/admin/bangumi/users` | Admin | 列出所有用户的 Bangumi 同步状态 |
 | GET | `/api/v1/admin/bangumi/records/{uid}` | Admin | 查看某用户的播放记录 |

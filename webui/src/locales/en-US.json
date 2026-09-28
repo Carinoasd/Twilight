@@ -2696,7 +2696,13 @@
     "pruneDone": "Prune completed",
     "pruneFailed": "Prune failed",
     "deleteConfirmTitle": "Delete this audit log entry?",
-    "deleteConfirmDescription": "Entry #{id} ({action}) will be deleted. The deletion itself is recorded in a protected entry that cannot be removed."
+    "deleteConfirmDescription": "Entry #{id} ({action}) will be deleted. The deletion itself is recorded in a protected entry that cannot be removed.",
+    "filterSource": "Source",
+    "allSources": "All sources",
+    "sourceHttp": "Web / API",
+    "sourceTelegram": "Telegram",
+    "sourceScheduler": "Scheduler",
+    "sourceSystem": "System"
   },
   "embyActivityLogs": {
     "title": "Emby Activity Logs",

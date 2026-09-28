@@ -79,3 +79,21 @@ func TestAuditWriteFailureIsCountedAndExposedInStats(t *testing.T) {
 		t.Fatalf("stats should expose audit_log failures, status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+// source 筛选只返回对应来源；actions 端点返回表里实际出现的全部 action。
+func TestAuditLogSourceFilterAndActionList(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().AuditLogEnabled = true
+	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	app.auditEntryIP("telegram", 0, "tg", "tg_only_action", "user", 0, nil)
+	app.auditSystem("scheduler", "scheduler_only_action", 0, nil)
+
+	rr := doJSON(app, http.MethodGet, "/api/v2/admin/audit-logs?source=telegram", ``, admin)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "tg_only_action") || strings.Contains(rr.Body.String(), "scheduler_only_action") || strings.Contains(rr.Body.String(), `"action":"login"`) {
+		t.Fatalf("source filter status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = doJSON(app, http.MethodGet, "/api/v2/admin/audit-logs/actions", ``, admin)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"action":"scheduler_only_action"`) || !strings.Contains(rr.Body.String(), `"action":"tg_only_action"`) {
+		t.Fatalf("actions status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

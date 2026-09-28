@@ -19,6 +19,7 @@ const pgAuditLogTimeout = 10 * time.Second
 type AuditLogQuery struct {
 	Category       string
 	Action         string
+	Source         string // http / telegram / scheduler / system；空表示不筛选
 	UID            int64
 	TargetUID      int64
 	From           int64
@@ -105,6 +106,9 @@ func auditLogWhereSQL(query AuditLogQuery) (string, []any) {
 	if query.Action != "" {
 		add("LOWER(action) = $%d", query.Action)
 	}
+	if query.Source != "" {
+		add("LOWER(source) = $%d", query.Source)
+	}
 	if query.UID > 0 {
 		add("uid = $%d", query.UID)
 	}
@@ -175,6 +179,7 @@ func auditLogOrderSQL(sortBy, order string) string {
 func normalizeAuditLogQuery(query AuditLogQuery) AuditLogQuery {
 	query.Category = strings.ToLower(strings.TrimSpace(query.Category))
 	query.Action = strings.ToLower(strings.TrimSpace(query.Action))
+	query.Source = strings.ToLower(strings.TrimSpace(query.Source))
 	query.Search = strings.ToLower(strings.TrimSpace(query.Search))
 	query.SortBy = normalizeAuditLogSortField(query.SortBy)
 	if !strings.EqualFold(query.Order, "asc") {
@@ -344,6 +349,41 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
 		}
 	}
 	return tx.Commit()
+}
+
+// AuditActionCount 是审计表里出现过的一个 action 及其条数。
+type AuditActionCount struct {
+	Action string `json:"action"`
+	Count  int    `json:"count"`
+}
+
+// ListAuditActions 返回审计表里实际出现过的 action（按条数降序，最多 limit 个），
+// 供前端筛选下拉使用，替代前端写死的少量 action。
+func (s *Store) ListAuditActions(limit int) ([]AuditActionCount, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrNotFound
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pgAuditLogTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT LOWER(action) AS action, count(*) FROM twilight_audit_logs
+GROUP BY LOWER(action) ORDER BY count(*) DESC, LOWER(action) ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AuditActionCount, 0)
+	for rows.Next() {
+		var item AuditActionCount
+		if err := rows.Scan(&item.Action, &item.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // ListAuditLogs returns all rows newest first. Runtime callers should prefer

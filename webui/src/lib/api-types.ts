@@ -1495,10 +1495,17 @@ export interface AuditLog {
   username: string;
   action: string;
   category: string;
+  source?: string;
+  method?: string;
   target_uid: number | null;
   detail: Record<string, unknown> | null;
   ip: string | null;
   created_at: number;
+}
+
+export interface AuditActionCount {
+  action: string;
+  count: number;
 }
 
 // ==================== 违规审计 ====================

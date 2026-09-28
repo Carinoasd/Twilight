@@ -625,6 +625,7 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	presetFilter := strings.ToLower(r.URL.Query().Get("preset"))
 	categoryFilter := strings.ToLower(r.URL.Query().Get("category"))
 	actionFilter := strings.ToLower(r.URL.Query().Get("action"))
+	sourceFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 	search := strings.ToLower(r.URL.Query().Get("search"))
 	from := auditLogUnixQuery(r, "from", "start")
 	to := auditLogUnixQuery(r, "to", "end")
@@ -640,6 +641,12 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	}
 	if actionFilter == "all" {
 		actionFilter = ""
+	}
+	// source 只接受已知取值，其它值（含 all）视为不筛选。
+	switch sourceFilter {
+	case "http", "telegram", "scheduler", "system":
+	default:
+		sourceFilter = ""
 	}
 	actionKeywords := []string(nil)
 	switch presetFilter {
@@ -669,6 +676,7 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 	result := a.store().QueryAuditLogs(store.AuditLogQuery{
 		Category:       categoryFilter,
 		Action:         actionFilter,
+		Source:         sourceFilter,
 		UID:            uid,
 		TargetUID:      targetUID,
 		From:           from,
@@ -691,6 +699,20 @@ func (a *App) handleListAuditLogs(w http.ResponseWriter, r *http.Request, _ Para
 		"per_page": perPage,
 		"sort":     sortBy,
 		"order":    order,
+	})
+}
+
+// handleListAuditActions 返回审计表中出现过的 action 列表，前端据此生成筛选下拉。
+func (a *App) handleListAuditActions(w http.ResponseWriter, _ *http.Request, _ Params) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	actions, err := a.store().ListAuditActions(2000)
+	if err != nil {
+		failWithCode(w, http.StatusInternalServerError, ErrInternal, "读取审计 action 失败")
+		return
+	}
+	ok(w, "OK", map[string]any{
+		"actions": actions,
+		"sources": []string{"http", "telegram", "scheduler", "system"},
 	})
 }
 

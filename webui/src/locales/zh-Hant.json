@@ -2696,7 +2696,13 @@
     "pruneDone": "條件清理完成",
     "pruneFailed": "條件清理失敗",
     "deleteConfirmTitle": "刪除這筆稽核日誌？",
-    "deleteConfirmDescription": "將刪除 #{id}（{action}）。刪除操作本身會留下一筆不可刪除的紀錄。"
+    "deleteConfirmDescription": "將刪除 #{id}（{action}）。刪除操作本身會留下一筆不可刪除的紀錄。",
+    "filterSource": "來源",
+    "allSources": "全部來源",
+    "sourceHttp": "網頁 / API",
+    "sourceTelegram": "Telegram",
+    "sourceScheduler": "定時任務",
+    "sourceSystem": "系統"
   },
   "embyActivityLogs": {
     "title": "Emby 活動日誌",

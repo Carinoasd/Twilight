@@ -6,6 +6,7 @@ import type {
   ApiKeyItem,
   ApiResponse,
   AuditLog,
+  AuditActionCount,
   BangumiSyncLog,
   BangumiSyncResult,
   BangumiSyncStatus,
@@ -2917,6 +2918,7 @@ class ApiClient {
     preset?: string;
     category?: string;
     action?: string;
+    source?: string;
     uid?: string;
     target_uid?: string;
     search?: string;
@@ -2931,6 +2933,7 @@ class ApiClient {
     if (params.preset && params.preset !== "all") query.set("preset", params.preset);
     if (params.category && params.category !== "all") query.set("category", params.category);
     if (params.action && params.action !== "all") query.set("action", params.action);
+    if (params.source && params.source !== "all") query.set("source", params.source);
     if (params.uid) query.set("uid", params.uid);
     if (params.target_uid) query.set("target_uid", params.target_uid);
     if (params.search) query.set("search", params.search);
@@ -2941,6 +2944,15 @@ class ApiClient {
     return this.request<{ logs: AuditLog[]; total: number; page: number; per_page: number; sort?: string; order?: string }>(
       `/admin/audit-logs?${query.toString()}`,
       { signal: params.signal, cache: "no-store" },
+      { cacheRead: false, dedupe: false },
+    );
+  }
+
+  // 审计表中出现过的全部 action，用于筛选下拉（替代前端写死的少量 action）。
+  async getAuditLogActions(signal?: AbortSignal) {
+    return this.request<{ actions: AuditActionCount[]; sources: string[] }>(
+      "/admin/audit-logs/actions",
+      { signal, cache: "no-store" },
       { cacheRead: false, dedupe: false },
     );
   }
