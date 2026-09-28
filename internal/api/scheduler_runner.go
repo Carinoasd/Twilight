@@ -744,6 +744,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "enabled": false}, []string{"system auto update disabled"}, nil
 		}
 		result := applyGitUpdate(r.Context(), a.cfg().SystemUpdateRepoURL, a.cfg().SystemUpdateBranch, a.cfg().SystemUpdateRestartServices, false, false)
+		a.auditSystem("scheduler", "system_update", 0, systemUpdateAuditDetail(result, a.cfg().SystemUpdateBranch))
 		if !boolish(result["success"]) {
 			return result, nil, fmt.Errorf("%s", asString(result["message"]))
 		}

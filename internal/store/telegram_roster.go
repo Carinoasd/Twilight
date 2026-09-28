@@ -359,10 +359,8 @@ func telegramRosterKey(chatID string, telegramID int64) string {
 	return strings.TrimSpace(chatID) + ":" + strconv36(telegramID)
 }
 
-func (s *Store) snapshotTelegramRosterLocked() (map[string]TelegramRosterEntry, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+func snapshotTelegramRoster(ctx context.Context, q schedulerQueryer) (map[string]TelegramRosterEntry, error) {
+	rows, err := q.QueryContext(ctx, `
 SELECT chat_id, telegram_id, is_bot, last_status, first_seen, last_seen
 FROM twilight_telegram_roster ORDER BY chat_id ASC, telegram_id ASC`)
 	if err != nil {

@@ -49,7 +49,8 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       POSTGRES_USER: twilight
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twilight}
+      # 不给默认密码：未在 .env 设置 POSTGRES_PASSWORD 时 compose 直接报错退出。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
       POSTGRES_DB: twilight
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -111,7 +112,7 @@ services:
       TWILIGHT_POSTGRES_HOST: postgres
       TWILIGHT_POSTGRES_PORT: 5432
       TWILIGHT_POSTGRES_USER: twilight
-      TWILIGHT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twilight}
+      TWILIGHT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
       TWILIGHT_POSTGRES_DATABASE: twilight
       TWILIGHT_POSTGRES_SSLMODE: disable
 

@@ -24,7 +24,11 @@ func collectMigrationConfig(cfg config.Config, passwordProtected bool) ([]migrat
 	values := configValues(cfg)
 	content := renderConfigTOML(values)
 	if !passwordProtected {
-		content = maskTOMLSecrets(content)
+		masked, err := maskTOMLSecrets(content)
+		if err != nil {
+			return nil, fmt.Errorf("mask migration config secrets: %w", err)
+		}
+		content = masked
 	}
 	policy, err := json.Marshal(migrationConfigPolicy{
 		FormatVersion:   "twilight-config/v1",

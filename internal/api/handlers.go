@@ -1958,7 +1958,7 @@ func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Para
 	// 会成为绕过 schema 遮蔽、把全部密钥（Postgres DSN、Emby Token、Bot Token、
 	// BotInternalSecret、Webhook Secret 等）泄露到浏览器 DOM/缓存/历史的旁路。
 	//   - content（规范化渲染）：先在 values 上 maskConfigSecrets 再 render；
-	//   - raw_content（磁盘原文）：按 section 上下文做行级 maskTOMLSecrets。
+	//   - raw_content（磁盘原文）：用 TOML 解析器按键路径结构化遮蔽（maskTOMLSecrets）。
 	// 两侧用同一哨兵，completed 比较仍对非密钥字段有效。PUT 路径
 	// （handleConfigTOMLPutSafe）会把回传的哨兵还原为真实值，避免写盘覆盖。
 	snapshot, err := a.configEditSnapshot()
@@ -1969,7 +1969,12 @@ func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Para
 	maskedValues := configValues(snapshot.file)
 	maskConfigSecrets(maskedValues)
 	normalizedContent := stripProtectedAdminConfig(renderConfigTOML(maskedValues))
-	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(snapshot.content))
+	maskedRaw, err := maskTOMLSecrets(snapshot.content)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	rawContent := stripProtectedAdminConfig(maskedRaw)
 	ok(w, "OK", map[string]any{"content": normalizedContent, "raw_content": rawContent, "path": path, "revision": snapshot.revision, "completed": normalizedContent != rawContent})
 }
 
@@ -1986,6 +1991,8 @@ func (a *App) handleConfigSchemaUpdate(w http.ResponseWriter, r *http.Request, _
 }
 
 func (a *App) handleConfigSweep(w http.ResponseWriter, r *http.Request, _ Params) {
+	// 目前清扫不修改任何键；仍写明确审计，便于与其他配置操作一起追溯。
+	a.audit(r, "config_sweep", "admin", 0, map[string]any{"changed": false, "removed_keys": []string{}})
 	ok(w, "config check completed", map[string]any{"changed": false, "config_file": a.cfg().ConfigFile})
 }
 

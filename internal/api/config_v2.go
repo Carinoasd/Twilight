@@ -39,7 +39,12 @@ func (a *App) handleV2ConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Pa
 	maskedValues := configValues(snapshot.file)
 	maskConfigSecrets(maskedValues)
 	normalizedContent := stripProtectedAdminConfig(renderConfigTOML(maskedValues))
-	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(snapshot.content))
+	maskedRaw, err := maskTOMLSecrets(snapshot.content)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	rawContent := stripProtectedAdminConfig(maskedRaw)
 	ok(w, "OK", map[string]any{
 		"content":     normalizedContent,
 		"raw_content": rawContent,
@@ -67,9 +72,15 @@ func (a *App) handleV2ConfigBackupInspect(w http.ResponseWriter, r *http.Request
 		failWithCode(w, http.StatusBadRequest, ErrConfigBackupInvalid, "配置备份无效")
 		return
 	}
+	masked, err := maskTOMLSecrets(string(content))
+	if err != nil {
+		// 无法解析就无法可靠遮蔽，宁可拒绝也不回传原文。
+		failWithCode(w, http.StatusBadRequest, ErrConfigBackupInvalid, "配置备份无法解析")
+		return
+	}
 	ok(w, "OK", map[string]any{
 		"backup":  v2ConfigBackupDTO(backup),
-		"content": stripProtectedAdminConfig(maskTOMLSecrets(string(content))),
+		"content": stripProtectedAdminConfig(masked),
 	})
 }
 

@@ -13,7 +13,7 @@ import (
 
 func TestMigrationResourcePathPartsRejectsUnsafeLogicalPaths(t *testing.T) {
 	valid := []string{
-		"resources/avatars/user.png",
+		"resources/avatars/0123456789abcdef.png",
 		"resources/tickets/42/reply/image.webp",
 		"resources/bangumi/123.jpg",
 	}
@@ -37,7 +37,7 @@ func TestMigrationResourcePathPartsRejectsUnsafeLogicalPaths(t *testing.T) {
 
 func TestPlanMigrationResourcesUsesAbsoluteRootAndDetectsConflict(t *testing.T) {
 	root := t.TempDir()
-	resource := filepath.Join(root, "avatar", "user.png")
+	resource := filepath.Join(root, "avatar", "0123456789abcdef.png")
 	if err := os.MkdirAll(filepath.Dir(resource), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +47,14 @@ func TestPlanMigrationResourcesUsesAbsoluteRootAndDetectsConflict(t *testing.T) 
 	app := &App{}
 	app.runtime.Store(&runtimeState{cfg: config.Config{UploadDir: root}})
 	archive := migration.Archive{
-		Manifest: migration.Manifest{Files: []migration.FileEntry{{Path: "resources/avatars/user.png", Kind: "resource", Size: 3}}},
-		Files:    map[string][]byte{"resources/avatars/user.png": []byte("new")},
+		Manifest: migration.Manifest{Files: []migration.FileEntry{{Path: "resources/avatars/0123456789abcdef.png", Kind: "resource", Size: 3}}},
+		Files:    map[string][]byte{"resources/avatars/0123456789abcdef.png": []byte("new")},
 	}
 	plan, err := app.planMigrationResources(archive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Conflicts) != 1 || plan.Conflicts[0] != "resources/avatars/user.png" {
+	if len(plan.Conflicts) != 1 || plan.Conflicts[0] != "resources/avatars/0123456789abcdef.png" {
 		t.Fatalf("conflicts = %#v", plan.Conflicts)
 	}
 	if len(plan.Entries) != 1 || !filepath.IsAbs(plan.Entries[0].TargetPath) {

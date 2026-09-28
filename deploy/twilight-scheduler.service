@@ -8,12 +8,30 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-User=root
-Group=root
-WorkingDirectory=/root/Twilight
-ExecStart=/root/Twilight/bin/twilight scheduler --config config.toml
+User=twilight
+Group=twilight
+WorkingDirectory=/opt/twilight
+ExecStart=/opt/twilight/bin/twilight scheduler --config config.toml
 
-EnvironmentFile=-/root/Twilight/.env
+EnvironmentFile=-/opt/twilight/.env
+
+# 以专用低权限账号运行并收紧沙箱：自动更新、配置编辑、上传、备份与迁移都会写文件，
+# 以 root 运行时任何路径类瑕疵都会变成 root 写文件。只放行项目目录可写；
+# 若把 backup_dir / upload_folder / databases_dir 配到项目目录以外，请把那些目录
+# 追加到 ReadWritePaths。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/twilight
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
 
 LimitNOFILE=65535
 MemoryMax=512M
