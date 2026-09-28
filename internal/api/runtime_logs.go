@@ -656,6 +656,12 @@ func (a *App) handleRuntimeLogStream(w http.ResponseWriter, r *http.Request, _ P
 		if !okWait {
 			return
 		}
+		// 长连接期间每次推送前重新验权：原实现只在建立连接时验一次，管理员被降级、
+		// 禁用或会话被吊销后仍能持续收到运行日志。
+		if !a.runtimeLogStreamStillAuthorized(r) {
+			_ = send("revoked", map[string]any{"reason": "unauthorized"})
+			return
+		}
 		if len(entries) == 0 {
 			if !send("ping", map[string]any{"time": time.Now().Unix(), "next_cursor": cursor}) {
 				return
@@ -667,6 +673,12 @@ func (a *App) handleRuntimeLogStream(w http.ResponseWriter, r *http.Request, _ P
 			return
 		}
 	}
+}
+
+// runtimeLogStreamStillAuthorized 用请求里原有的会话凭据重新鉴权，并确认仍是启用中的管理员。
+func (a *App) runtimeLogStreamStillAuthorized(r *http.Request) bool {
+	p, ok := a.authenticateUser(r)
+	return ok && p.User.Active && p.User.Role == store.RoleAdmin
 }
 
 func safeHostname() string {
