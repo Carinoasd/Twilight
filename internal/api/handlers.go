@@ -692,10 +692,12 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 	if bgmTokenChanged {
 		_ = a.store().DeleteBangumiCollectionCache(u.UID, 0)
 	}
+	// target_uid 填本人，按目标用户筛选时才能查到自助操作；detail 记改前改后。
+	changes := selfProfileChanges(p.User, u)
 	if signinAutoRenewalSet {
-		a.audit(r, "update_signin_auto_renewal", "user", 0, map[string]any{"enabled": signinAutoRenewalNext})
+		a.audit(r, "update_signin_auto_renewal", "user", u.UID, map[string]any{"enabled": signinAutoRenewalNext, "changes": changes})
 	} else {
-		a.audit(r, "update_profile", "user", 0, nil)
+		a.audit(r, "update_profile", "user", u.UID, map[string]any{"changes": changes})
 	}
 	ok(w, "更新成功", publicUser(u))
 }
@@ -731,6 +733,7 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "update_username", "user", u.UID, map[string]any{"username": auditFromTo(p.User.Username, u.Username)})
 	ok(w, "用户名已更新", publicUser(u))
 }
 

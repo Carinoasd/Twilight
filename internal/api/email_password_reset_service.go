@@ -139,5 +139,6 @@ func (a *App) handleEmailPasswordResetResource(w http.ResponseWriter, r *http.Re
 		statusFromError(w, err)
 		return
 	}
+	a.auditWithUser(r, user.UID, user.Username, "password_reset_email", "user", user.UID, map[string]any{"ip": a.clientIP(r), "email": maskEmail(user.Email), "sessions_revoked": true})
 	ok(w, "密码已重置，请使用新密码登录", map[string]any{"username": user.Username})
 }

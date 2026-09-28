@@ -63,6 +63,7 @@ func (a *App) handleUpdateBackground(w http.ResponseWriter, r *http.Request, _ P
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "update_background", "user", u.UID, map[string]any{"had_background": p.User.Background != ""})
 	ok(w, "background updated", map[string]any{"background": u.Background})
 }
 
@@ -166,6 +167,7 @@ func (a *App) handleDeleteBackground(w http.ResponseWriter, r *http.Request, _ P
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "delete_background", "user", p.User.UID, map[string]any{"had_background": p.User.Background != ""})
 	ok(w, "background deleted", nil)
 }
 
@@ -288,6 +290,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request, kind string) 
 		}
 		return
 	}
+	a.audit(r, "upload_"+kind, "user", p.User.UID, map[string]any{"url": url, "variant": bgVariant, "bytes": len(data), "content_type": contentType})
 	if kind == "avatar" {
 		ok(w, "上传成功", map[string]any{"avatar_url": url, "url": url, "filename": filename})
 		return
@@ -454,6 +457,7 @@ func (a *App) handleDeleteAvatar(w http.ResponseWriter, r *http.Request, _ Param
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "delete_avatar", "user", p.User.UID, map[string]any{"previous": p.User.Avatar})
 	ok(w, "avatar deleted", nil)
 }
 

@@ -72,6 +72,8 @@ func (a *App) handleLoginByAPIKey(w http.ResponseWriter, r *http.Request, _ Para
 	// API scopes authorize only the API-key surface. Even all four scopes do
 	// not authorize a full Web session (especially for an administrator), and
 	// a detached session would outlive key revocation and expiration.
+	// 持有有效 Key 却尝试网页登录值得留痕（Key 可能已外泄）。
+	a.auditWithUser(r, 0, "", "login_apikey_rejected", "user", u.UID, map[string]any{"ip": a.clientIP(r), "reason": "apikey_web_login_disabled"})
 	failWithCode(w, http.StatusForbidden, ErrAPIKeyPermissionDenied, "API Key 不能用于网页登录，请使用用户名或邮箱和密码")
 }
 
@@ -85,6 +87,7 @@ func (a *App) handleForgotPassword(w http.ResponseWriter, r *http.Request, _ Par
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request, _ Params) {
 	p := current(r)
+	a.auditLogout(r, p, false)
 	a.revokeSession(r.Context(), p.Token)
 	a.clearSessionCookie(w)
 	ok(w, "logged out", nil)
@@ -92,6 +95,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request, _ Params) {
 
 func (a *App) handleLogoutAll(w http.ResponseWriter, r *http.Request, _ Params) {
 	p := current(r)
+	a.auditLogout(r, p, true)
 	a.revokeAllSessions(r.Context(), p.User.UID)
 	a.clearSessionCookie(w)
 	ok(w, "all sessions logged out", nil)

@@ -123,7 +123,7 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 	_ = a.store().AddLoginLog(store.LoginLog{
 		UID: user.UID, IP: input.IP, DeviceID: deviceID, DeviceName: userAgent, Client: "web", Time: now,
 	})
-	a.auditWithUser(r, user.UID, user.Username, "login", "user", 0, map[string]any{"ip": input.IP, "device": deviceID})
+	a.auditWithUser(r, user.UID, user.Username, "login", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
 
 	// 使用统一的模板参数系统，支持所有用户状态参数
 	templateParams := a.NewTemplateParams(r.Context(), user).BuildWithExtra(map[string]string{
@@ -178,6 +178,7 @@ func (a *App) handleLoginResource(w http.ResponseWriter, r *http.Request) {
 	user, err := a.authenticateLogin(r.Context(), input)
 	if err != nil {
 		if failure, ok := err.(*loginFailure); ok {
+			a.auditLoginFailure(r, input, failure)
 			failWithCode(w, failure.Status, failure.Code, failure.Message)
 			return
 		}

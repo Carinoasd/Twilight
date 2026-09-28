@@ -242,3 +242,64 @@ func TestRequestBodyLimitOnlyWidenedForMigrationImport(t *testing.T) {
 		}
 	}
 }
+
+func findAudit(app *App, action string) (store.AuditLog, bool) {
+	for _, entry := range app.store().ListAuditLogs() {
+		if entry.Action == action {
+			return entry, true
+		}
+	}
+	return store.AuditLog{}, false
+}
+
+// TestAuthSettingsWritesHaveExplicitAudit 防回归：认证 / 会话 / 个人设置类写入要有明确
+// 审计（不是只有 fallback 的路由模板），detail 带目标 uid 与改前改后。
+func TestAuthSettingsWritesHaveExplicitAudit(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().AuditLogEnabled = true
+	cookies := registerAndLogin(t, app, "auditee", "Auditee123456")
+	user, _ := app.store().FindUserByUsername("auditee")
+
+	// 失败登录：已知账号记目标 uid；未知账号不记原始输入。
+	doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"auditee","password":"WrongPass123"}`, nil)
+	failed, ok := findAudit(app, "login_failed")
+	if !ok || failed.TargetUID != user.UID || failed.Detail["error_code"] != string(ErrLoginInvalid) {
+		t.Fatalf("login_failed audit missing or wrong: ok=%v %+v", ok, failed)
+	}
+	doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"Secret-Typed-Into-Username","password":"x1234567890"}`, nil)
+	for _, entry := range app.store().ListAuditLogs() {
+		if strings.Contains(fmt.Sprint(entry.Detail), "Secret-Typed-Into-Username") {
+			t.Fatalf("unknown identifier must not be stored: %+v", entry)
+		}
+	}
+
+	if resp := doJSON(app, http.MethodPut, "/api/v2/settings/username", `{"new_username":"auditee2"}`, cookies); resp.Code != http.StatusOK {
+		t.Fatalf("rename status=%d", resp.Code)
+	}
+	renamed, ok := findAudit(app, "update_username")
+	if !ok || renamed.TargetUID != user.UID || !strings.Contains(fmt.Sprint(renamed.Detail["username"]), "auditee2") || renamed.Detail["fallback"] != nil {
+		t.Fatalf("update_username audit missing or wrong: ok=%v %+v", ok, renamed)
+	}
+
+	if resp := doJSON(app, http.MethodPut, "/api/v1/users/me", `{"notify_on_login_telegram":true}`, cookies); resp.Code != http.StatusOK {
+		t.Fatalf("update profile status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	profile, ok := findAudit(app, "update_profile")
+	if !ok || profile.TargetUID != user.UID || !strings.Contains(fmt.Sprint(profile.Detail["changes"]), "notify_login_telegram") {
+		t.Fatalf("update_profile audit missing changes: ok=%v %+v", ok, profile)
+	}
+
+	if resp := doJSON(app, http.MethodPost, "/api/v2/auth/logout", "", cookies); resp.Code != http.StatusOK {
+		t.Fatalf("logout status=%d", resp.Code)
+	}
+	if entry, ok := findAudit(app, "logout"); !ok || entry.TargetUID != user.UID {
+		t.Fatalf("logout audit missing: ok=%v %+v", ok, entry)
+	}
+	other := loginCookies(t, app, "auditee2", "Auditee123456")
+	if resp := doJSON(app, http.MethodPost, "/api/v1/auth/logout/all", "", other); resp.Code != http.StatusOK {
+		t.Fatalf("logout all status=%d", resp.Code)
+	}
+	if entry, ok := findAudit(app, "logout_all"); !ok || entry.TargetUID != user.UID {
+		t.Fatalf("logout_all audit missing: ok=%v %+v", ok, entry)
+	}
+}

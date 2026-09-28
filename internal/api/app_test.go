@@ -3197,15 +3197,17 @@ func TestFallbackAuditCoversSuccessfulMutationsWithoutExplicitAudit(t *testing.T
 		t.Fatal(err)
 	}
 
-	rr := doJSON(app, http.MethodPost, "/api/v1/auth/logout", ``, cookies)
+	// 登出已改为明确审计（logout），这里换一个仍只有 fallback 的用户写入路由。
+	app.cfg().BangumiEnabled = true
+	rr := doJSON(app, http.MethodDelete, "/api/v1/bangumi/sync/history", ``, cookies)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("logout status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("clear bangumi history status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	logs := app.store().ListAuditLogs()
 	if len(logs) != 1 {
 		t.Fatalf("expected one fallback audit log, got %#v", logs)
 	}
-	if logs[0].Action != "post_auth_logout" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
+	if logs[0].Action != "delete_bangumi_sync_history" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
 		t.Fatalf("unexpected fallback audit log: %#v", logs[0])
 	}
 }
