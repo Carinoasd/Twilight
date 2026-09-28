@@ -93,68 +93,7 @@ func tomlSectionFieldFromLine(line, currentSection string) (section string, key 
 	return currentSection, strings.TrimSpace(rawKey), true
 }
 
-// maskTOMLSecrets 对磁盘原文 TOML 做行级密钥遮蔽：凡是落在某 section 下、且被
-// configSectionDefs 标记为 Type=="secret" 的非空字段，整行重写为 key = "<哨兵>"。
-// 与 maskConfigSecrets（作用于 values）同口径，保证 handleConfigTOMLGet 的
-// content 与 raw_content 两侧都不外泄真实密钥。section 名按大小写不敏感匹配
-// （isSecretField 内部精确匹配，这里先归一到 configSectionDefs 的规范名）。
-func maskTOMLSecrets(content string) string {
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || key == "" {
-			continue
-		}
-		if !isSecretField(section, strings.ToLower(key)) {
-			continue
-		}
-		// 已是空值的 secret 行无需遮蔽（区分"未配置"与"已配置但遮蔽"）。
-		_, rawVal, _ := strings.Cut(line, "=")
-		if tomlScalarIsEmpty(rawVal) {
-			continue
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(secretMaskValue)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// restoreTOMLSecrets 把 PUT 回传的 TOML 里仍是 secretMaskValue 哨兵的 secret 行
-// 还原为 current（内存配置 values）中的真实值。管理员未改动密钥时前端原样回传
-// 哨兵，这里防止哨兵被写盘覆盖真实密钥。非哨兵值视为显式覆盖，保持不动。
-func restoreTOMLSecrets(content string, current map[string]map[string]any) string {
-	if content == "" {
-		return content
-	}
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || key == "" {
-			continue
-		}
-		lowerKey := strings.ToLower(key)
-		if !isSecretField(section, lowerKey) {
-			continue
-		}
-		_, rawVal, _ := strings.Cut(line, "=")
-		if strings.TrimSpace(rawVal) != strconv.Quote(secretMaskValue) {
-			continue
-		}
-		realValue := ""
-		if fields, ok := current[section]; ok {
-			if text, ok := fields[lowerKey].(string); ok {
-				realValue = text
-			}
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(realValue)
-	}
-	return strings.Join(lines, "\n")
-}
+// maskTOMLSecrets / restoreTOMLSecrets 已改为结构化实现，见 config_secret_toml.go。
 
 // canonicalConfigSection 把 TOML 里出现的 section 名归一到 configSectionDefs 使用
 // 的规范 Key（大小写不敏感匹配）。无法匹配时原样返回，交给 isSecretField 自然
@@ -168,18 +107,12 @@ func canonicalConfigSection(section string) string {
 	return section
 }
 
-// tomlScalarIsEmpty 判断 TOML 标量赋值的值部分是否为"空"（空串 "" / ” 或纯空白）。
-// 用于 maskTOMLSecrets 跳过未配置的 secret 字段。
-func tomlScalarIsEmpty(rawVal string) bool {
-	v := strings.TrimSpace(rawVal)
-	return v == "" || v == `""` || v == "''"
-}
-
 func (a *App) handleConfigTOMLPutSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	content := stringValue(payload, "content")
 	info, status, message := a.editConfig(stringValue(payload, "expected_revision"), func(snapshot configEditSnapshot) (string, error) {
-		return restoreTOMLSecrets(content, configValues(snapshot.file)), nil
+		// 结构化回填：只有位于密钥键路径上的哨兵才换成磁盘同一路径的真值。
+		return restoreTOMLSecrets(content, snapshot.content, configValues(snapshot.file))
 	})
 	if status != http.StatusOK {
 		failConfigEdit(w, status, message)
@@ -222,7 +155,13 @@ func (a *App) handleConfigBackupInspect(w http.ResponseWriter, r *http.Request, 
 	// 管理端预览，必须走 maskTOMLSecrets 与 handleConfigTOMLGet 同口径遮蔽，
 	// 否则"读取任意历史备份"就成了绕过 GET 遮蔽拿明文密钥的旁路。真正的恢复
 	// （handleConfigRestore）读的是磁盘原文、不经此遮蔽，因此预览遮蔽不影响恢复。
-	ok(w, "OK", map[string]any{"backup": backup, "content": stripProtectedAdminConfig(maskTOMLSecrets(string(content))), "config_file": a.configFilePath()})
+	masked, err := maskTOMLSecrets(string(content))
+	if err != nil {
+		// 无法解析就无法可靠遮蔽，宁可拒绝也不回传原文。
+		failWithCode(w, http.StatusBadRequest, ErrConfigBackupInvalid, "配置备份无法解析")
+		return
+	}
+	ok(w, "OK", map[string]any{"backup": backup, "content": stripProtectedAdminConfig(masked), "config_file": a.configFilePath()})
 }
 
 func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Params) {
