@@ -787,6 +787,16 @@ func (a *App) handleGeneratedPassword(w http.ResponseWriter, r *http.Request, _ 
 		failWithCode(w, http.StatusTooManyRequests, ErrRateLimited, "操作过于频繁，请稍后再试")
 		return
 	}
+	// 与手动改密同一道门：只拿到会话（被盗 cookie / XSS）不能把密码换成新值、
+	// 顺手踢掉受害者所有设备，也不能绕过用户自己开启的“改密须邮箱验证”。
+	payload := decodeMap(r)
+	if !security.VerifyPassword(stringValue(payload, "old_password"), p.User.PasswordHash) {
+		failWithCode(w, http.StatusForbidden, ErrPasswordOldMismatch, "原密码不正确")
+		return
+	}
+	if !a.consumePasswordChangeEmailCode(w, payload, p.User, emailPurposeChangePass) {
+		return
+	}
 	// 自动生成密码至少 128 bit 熵：32 hex chars。
 	// 旧实现使用 randomCode(12) = 48 bit，对在线/离线攻击都过弱。
 	password := "Twilight-" + randomCode(generatedPasswordHexLen)

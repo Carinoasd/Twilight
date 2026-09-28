@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,22 @@ func TestNonCanonicalPathCannotReachAdminSessionView(t *testing.T) {
 	app.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("non-canonical path status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// 生成随机密码与手动改密同一道门：只拿到会话不能把密码换掉。
+func TestGeneratedPasswordRequiresOldPassword(t *testing.T) {
+	app := newTestApp(t)
+	_ = registerAndLogin(t, app, "admin", "Admin123456")
+	cookies := registerAndLogin(t, app, "member", "User123456")
+	headers := map[string]string{"X-Twilight-Client": "webui"}
+	for _, path := range []string{"/api/v1/users/me/password", "/api/v2/settings/password/generate"} {
+		if rr := doJSONWithHeaders(app, http.MethodPut, path, `{}`, cookies, headers); rr.Code != http.StatusForbidden {
+			t.Fatalf("%s without old password: %d %s", path, rr.Code, rr.Body.String())
+		}
+	}
+	rr := doJSONWithHeaders(app, http.MethodPut, "/api/v2/settings/password/generate", `{"old_password":"User123456"}`, cookies, headers)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "new_password") {
+		t.Fatalf("with old password: %d %s", rr.Code, rr.Body.String())
 	}
 }
