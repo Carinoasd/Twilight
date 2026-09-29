@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"errors"
+	"go.uber.org/zap"
+	"strings"
 
 	"github.com/prejudice-studio/twilight/internal/store"
 )
@@ -28,6 +31,9 @@ type telegramStatusResult struct {
 type telegramUnbindResult struct {
 	User    *store.User `json:"user"`
 	Message string      `json:"message"`
+	// EmbySuspended / EmbySuspendError 描述解绑后停用 Emby 的结果，供审计与响应使用。
+	EmbySuspended    bool  `json:"-"`
+	EmbySuspendError error `json:"-"`
 }
 
 type telegramRosterStatsResult struct {
@@ -85,12 +91,13 @@ func (s *telegramService) unbind(ctx context.Context, u store.User) (telegramUnb
 		return telegramUnbindResult{}, err
 	}
 	s.app.cleanupUserTelegramResidue(u.UID, u.TelegramID)
-	if updated.EmbyID != "" {
-		sideCtx, sideCancel := schedulerSideEffectContext(ctx)
-		_, _ = s.app.disableRemoteEmbyForWebState(sideCtx, updated)
-		sideCancel()
+	result := telegramUnbindResult{Message: "Telegram unbound. rebinding required"}
+	result.EmbySuspended, result.EmbySuspendError = s.app.suspendEmbyForTelegramRebind(ctx, updated)
+	if latest, ok := s.app.store().User(updated.UID); ok {
+		updated = latest
 	}
-	return telegramUnbindResult{User: &updated, Message: "Telegram unbound. rebinding required"}, nil
+	result.User = &updated
+	return result, nil
 }
 
 func (s *telegramService) rosterStats() (telegramRosterStatsResult, error) {
@@ -161,4 +168,73 @@ func (s *telegramService) rosterStats() (telegramRosterStatsResult, error) {
 
 func (a *App) telegram() *telegramService {
 	return &telegramService{app: a}
+}
+
+// suspendEmbyForTelegramRebind 在解绑进入换绑状态后立即停用远端 Emby。解绑本身已经
+// 提交，远端失败不回滚解绑（否则用户会卡在“已批准但解不掉”）；失败会写日志并由
+// 调用方记入审计，换绑期间 embyShouldEnableUser 仍会挡住所有启用路径。
+func (a *App) suspendEmbyForTelegramRebind(ctx context.Context, u store.User) (bool, error) {
+	if !u.RebindingInProgress || strings.TrimSpace(u.EmbyID) == "" || !a.embyConfigured() {
+		return false, nil
+	}
+	sideCtx, sideCancel := schedulerSideEffectContext(ctx)
+	defer sideCancel()
+	var suspended bool
+	err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+		var err error
+		suspended, err = a.disableRemoteEmbyForWebState(ctx, u)
+		return err
+	})
+	if err != nil {
+		zap.L().Warn("suspend emby for telegram rebind failed", zap.Int64("uid", u.UID), zap.Error(err))
+	}
+	return suspended, err
+}
+
+// finishTelegramRebind 结束换绑：核对群组/频道资格（checkMembership=false 表示调用方
+// 刚做过）、清除换绑状态，并只对“本次换绑停用的 Emby”恢复启用。
+func (a *App) finishTelegramRebind(ctx context.Context, u store.User, checkMembership bool) (store.User, bool, error) {
+	if !u.RebindingInProgress {
+		return u, false, nil
+	}
+	if u.TelegramID == 0 {
+		return u, false, errTelegramRebindNotBound
+	}
+	if checkMembership {
+		missing, err := a.telegramBindRequirementMissing(ctx, u.TelegramID)
+		if err != nil {
+			return u, false, errTelegramRebindMembershipCheck
+		}
+		if len(missing) > 0 {
+			return u, false, telegramRebindMissingError{missing: missing}
+		}
+	}
+	updated, changed, embySuspended, err := a.store().CompleteUserTelegramRebind(u.UID, u.TelegramID, u.RebindingSince)
+	if err != nil || !changed {
+		return updated, changed, err
+	}
+	if embySuspended && updated.EmbyID != "" && a.embyShouldEnableUser(updated) {
+		sideCtx, sideCancel := schedulerSideEffectContext(ctx)
+		if err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+			return a.embyApplyEnabledState(ctx, updated.UID, updated.EmbyID, true)
+		}); err != nil {
+			zap.L().Warn("re-enable emby after telegram rebind failed", zap.Int64("uid", updated.UID), zap.Error(err))
+		}
+		sideCancel()
+		if latest, ok := a.store().User(updated.UID); ok {
+			updated = latest
+		}
+	}
+	return updated, true, nil
+}
+
+var (
+	errTelegramRebindNotBound        = errors.New("telegram rebind: not bound")
+	errTelegramRebindMembershipCheck = errors.New("telegram rebind: membership check failed")
+)
+
+type telegramRebindMissingError struct{ missing []string }
+
+func (e telegramRebindMissingError) Error() string {
+	return "telegram rebind: missing membership " + strings.Join(e.missing, ",")
 }

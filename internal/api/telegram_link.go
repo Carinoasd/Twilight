@@ -333,6 +333,15 @@ func (a *App) confirmTelegramLink(ctx context.Context, token string, telegramID 
 	}
 	if bound {
 		a.auditTelegramAction(telegramID, "bind_telegram_via_telegram", "user", user.UID, map[string]any{"scene": confirmed.Scene})
+		// 换绑中的账号：Bot 刚做过群组/频道校验，这里直接在服务端结束换绑并恢复
+		// 本次停用的 Emby，不依赖网页再调用 rebind-complete（用户关掉网页也不会卡住）。
+		if user.RebindingInProgress {
+			if finished, changed, err := a.finishTelegramRebind(ctx, user, false); err != nil {
+				logTelegramLinkFailure("finish_rebind", err)
+			} else if changed {
+				a.auditTelegramAction(telegramID, "complete_telegram_rebind", "user", finished.UID, map[string]any{"emby_disabled": finished.EmbyDisabled})
+			}
+		}
 	}
 	return telegramLinkResult{Success: true, Code: http.StatusOK, Scene: confirmed.Scene, Message: "绑定已确认"}
 }

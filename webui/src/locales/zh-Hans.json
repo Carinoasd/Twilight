@@ -155,7 +155,9 @@
     "bindCodeRateLimited": "绑定链接请求过于频繁，请稍后再试",
     "openTelegramLink": "在 Telegram 中打开 @{username} 并绑定",
     "retryBindCode": "重新获取绑定链接",
-    "rebindInstructions": "点击下方按钮获取绑定链接，然后在 Telegram 中打开完成验证"
+    "rebindInstructions": "点击下方按钮获取绑定链接，然后在 Telegram 中打开完成验证",
+    "rebindRequiredDescription": "解绑已完成，Emby 账号已暂停使用。请立即绑定新的 Telegram 账号，绑定完成后 Emby 会自动恢复。",
+    "rebindCompleteFailed": "换绑尚未完成"
   },
   "adminConfig": {
     "effectiveValue": "实际生效值",
