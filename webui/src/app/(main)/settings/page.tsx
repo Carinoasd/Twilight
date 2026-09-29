@@ -325,7 +325,11 @@ export default function SettingsPage() {
 
   const loadSettingsResource = useCallback(async (signal?: AbortSignal) => {
     const settingsRes = await api.getMySettings(signal);
-    if (settingsRes.success && settingsRes.data) {
+    if (signal?.aborted) return false;
+    if (!settingsRes.success || !settingsRes.data) {
+      throw new Error(settingsRes.message);
+    }
+    if (settingsRes.data) {
       setSettings(settingsRes.data);
       setBgmMode(settingsRes.data.bgm_mode);
       setBgmManageMode(Boolean(settingsRes.data.bgm_manage_mode));
@@ -359,12 +363,14 @@ export default function SettingsPage() {
         telegram_id_full: data.telegram_id ?? previous?.telegram_id_full,
         telegram_username: data.telegram_username ?? previous?.telegram_username,
         force_bind: previous?.force_bind ?? false,
-        can_unbind: previous?.can_unbind ?? false,
-        can_change: previous?.can_change ?? true,
-        rebind_approved: previous?.rebind_approved,
-        pending_rebind_request: previous?.pending_rebind_request,
-        rebind_request_status: previous?.rebind_request_status,
-        rebind_request_id: previous?.rebind_request_id,
+        // A link confirmation proves the binding, not a new rebind approval.
+        // Keep actions closed until the fresh settings response arrives.
+        can_unbind: false,
+        can_change: false,
+        rebind_approved: false,
+        pending_rebind_request: false,
+        rebind_request_status: null,
+        rebind_request_id: null,
         rebinding_in_progress: previous?.rebinding_in_progress,
       }));
       setTelegramLink(null);
@@ -506,6 +512,19 @@ export default function SettingsPage() {
       if (res.success) {
         toast({ title: t("settings.unbindSuccess"), variant: "success" });
         setTelegramLink(null);
+        setTelegramStatus((previous) => previous && ({
+          ...previous,
+          bound: false,
+          telegram_id: undefined,
+          telegram_id_full: undefined,
+          telegram_username: undefined,
+          can_unbind: false,
+          can_change: false,
+          rebind_approved: false,
+          pending_rebind_request: false,
+          rebind_request_status: null,
+          rebind_request_id: null,
+        }));
         void loadData().catch(() => undefined);
         fetchUser();
       } else {

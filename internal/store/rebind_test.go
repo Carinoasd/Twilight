@@ -19,8 +19,9 @@ func TestConsumeRebindRequestPreservesAuditTrail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	u := telegramBindingUser(t, st, 111)
 
-	created, err := st.CreateRebindRequest(RebindRequest{UID: 7, Username: "alice", OldTelegramID: 111, Reason: "lost access"})
+	created, err := st.CreateRebindRequest(RebindRequest{UID: u.UID, Username: u.Username, OldTelegramID: 111, Reason: "lost access"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,9 +43,9 @@ func TestConsumeRebindRequestPreservesAuditTrail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	final, ok := st.UserLatestRebindRequest(7)
+	final, ok := st.UserLatestRebindRequest(u.UID)
 	if !ok {
-		t.Fatal("expected to find the consumed request for uid 7")
+		t.Fatal("expected to find the consumed request")
 	}
 	if final.Status != "used" {
 		t.Fatalf("consumed request should be marked used, got %q", final.Status)

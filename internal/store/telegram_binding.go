@@ -12,6 +12,26 @@ var (
 	ErrTelegramRebindApprovalRequired = errors.New("telegram rebind approval required")
 )
 
+// finishTelegramRebindRequestsLocked closes permissions from the previous
+// identity/cycle in the same transaction as the binding change. Review metadata
+// remains an audit trail; a new rebind must use a new request.
+func (s *Store) finishTelegramRebindRequestsLocked(uid int64) {
+	for id, req := range s.state.RebindRequests {
+		if req.UID != uid {
+			continue
+		}
+		switch req.Status {
+		case "approved":
+			req.Status = "used"
+		case "pending":
+			req.Status = "revoked"
+		default:
+			continue
+		}
+		s.state.RebindRequests[id] = req
+	}
+}
+
 // BindUnboundUserTelegram is the self-service binding boundary. Changing an
 // existing identity must first pass the approved unbind operation; callers
 // cannot reuse the administrative override to skip that policy.
@@ -45,9 +65,8 @@ func (s *Store) UnbindUserTelegram(uid, expectedTelegramID int64) (User, error) 
 			if !found || req.Status != "approved" || req.OldTelegramID != u.TelegramID {
 				return ErrTelegramRebindApprovalRequired
 			}
-			req.Status = "used"
-			s.state.RebindRequests[req.ID] = req
 		}
+		s.finishTelegramRebindRequestsLocked(uid)
 		previous = u
 		u.TelegramID, u.TelegramUsername = 0, ""
 		if u.Role != RoleAdmin {
@@ -101,6 +120,7 @@ func (s *Store) CompleteUserTelegramRebind(uid, expectedTelegramID, expectedSinc
 				return ErrConflict
 			}
 			embySuspended = u.RebindEmbySuspended
+			s.finishTelegramRebindRequestsLocked(uid)
 			u.RebindingInProgress = false
 			u.RebindingSince = 0
 			u.RebindEmbySuspended = false
@@ -154,6 +174,7 @@ func (s *Store) BeginAdminTelegramRebind(uid, actorUID int64) (User, int64, erro
 			return ErrConflict
 		}
 		previous = u
+		s.finishTelegramRebindRequestsLocked(uid)
 		u.TelegramID, u.TelegramUsername = 0, ""
 		if u.Role != RoleAdmin {
 			u.RebindingInProgress = true

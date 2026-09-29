@@ -87,9 +87,7 @@ func TestTelegramUnbindRejectsStaleIdentityOrApproval(t *testing.T) {
 	if _, err := st.UnbindUserTelegram(u.UID, 111); !errors.Is(err, ErrTelegramRebindApprovalRequired) {
 		t.Fatalf("stale approval accepted: %v", err)
 	}
-	if _, err := other.ReviewRebindRequest(approved.ID, 77, "approved", "approved"); err != nil {
-		t.Fatal(err)
-	}
+	telegramBindingApproval(t, other, u)
 	if _, err := other.UpdateUser(u.UID, func(u *User) error { u.TelegramID = 222; return nil }); err != nil {
 		t.Fatal(err)
 	}
