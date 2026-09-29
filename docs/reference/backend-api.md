@@ -1350,8 +1350,8 @@ WebUI Telegram 管理页面改用 `/api/v2/admin/config/schema`、`/api/v2/admin
 | `is_custom` | 是否已被管理员覆盖（true 时前端显示"已自定义"徽章） |
 | `runtime_params` | 当前生效的运行参数（默认值叠加管理员保存的覆盖） |
 | `schedule_revision` | 计划版本，PUT / DELETE 可带 `expected_revision` 做乐观锁 |
-| `next_run_at` | 下次自动执行时间；手动模式或被配置关闭的任务为 `null` |
-| `auto_disabled` | 是否不会自动执行（手动模式或被配置关闭） |
+| `next_run_at` | 下次自动入队时间，包含当日允许的一次失败重试；漏跑任务显示当前可入队时间。总开关关闭、手动模式、任务被配置关闭或已有排队/执行实例时为 `null`；实际入队需等下一轮调度检查 |
+| `auto_disabled` | 是否不会自动入队（调度总开关关闭、手动模式或任务被配置关闭）；已有任务仍可继续执行 |
 | `is_running` | 是否正在排队或执行 |
 | `last_run` | 最近一次运行摘要（不含 logs） |
 | `last_auto_run_at` / `last_manual_run_at` | 最近一次自动 / 手动执行开始时间 |

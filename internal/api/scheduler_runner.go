@@ -30,6 +30,17 @@ func (a *App) sendExpiryReminders(ctx context.Context, days int) map[string]any 
 	users := []map[string]any{}
 	failedItems := []map[string]any{}
 	sent := 0
+	result := func(aborted string) map[string]any {
+		success := aborted == "" && len(failedItems) == 0
+		out := map[string]any{"success": success, "partial": !success && sent > 0, "sent": sent, "total": len(users), "count": len(users), "users": users, "failed": failedItems, "failed_count": len(failedItems), "telegram_enabled": a.telegramAvailable(), "notification_enabled": a.cfg().NotificationEnabled, "days": days}
+		if aborted != "" {
+			out["aborted"] = aborted
+		}
+		if !success {
+			out["error"] = fmt.Sprintf("reminder delivery incomplete: %d sent, %d failed", sent, len(failedItems))
+		}
+		return out
+	}
 	// 30 msg/s 是 Telegram bot 全局发送上限的安全边界：35ms inter-message
 	// 间隔 ≈ 28.5 msg/s，留 5% 余量给非提醒路径（kick / 双向交互）共享 quota。
 	// 没有这一行，100 个即将到期用户的提醒批从第 31 个开始全部 429，下一轮
@@ -43,6 +54,9 @@ func (a *App) sendExpiryReminders(ctx context.Context, days int) map[string]any 
 	consecutiveRateLimited := 0
 	first := true
 	for _, u := range a.store().ListUsers() {
+		if ctx.Err() != nil {
+			return result("context_canceled")
+		}
 		if u.Active && u.ExpiredAt > now && u.ExpiredAt <= deadline {
 			remaining := u.ExpiredAt - now
 			item := map[string]any{"uid": u.UID, "username": u.Username, "telegram_id": nullableInt(u.TelegramID), "expired_at": u.ExpiredAt, "remaining_seconds": remaining, "remaining_str": formatSeconds(remaining)}
@@ -55,7 +69,7 @@ func (a *App) sendExpiryReminders(ctx context.Context, days int) map[string]any 
 			if !first {
 				select {
 				case <-ctx.Done():
-					return map[string]any{"sent": sent, "total": len(users), "count": len(users), "users": users, "failed": failedItems, "telegram_enabled": a.telegramAvailable(), "notification_enabled": a.cfg().NotificationEnabled, "days": days, "aborted": "context_canceled"}
+					return result("context_canceled")
 				case <-time.After(reminderPerMessageSpacing):
 				}
 			}
@@ -65,11 +79,13 @@ func (a *App) sendExpiryReminders(ctx context.Context, days int) map[string]any 
 				failedItems = append(failedItems, map[string]any{"uid": u.UID, "username": u.Username, "telegram_id": u.TelegramID, "error": err.Error()})
 				if _, isRL := telegramRetryAfterFromError(err); isRL || strings.Contains(strings.ToLower(err.Error()), "too many requests") {
 					consecutiveRateLimited++
-					// 关键：把 retry_after 真实秒数 sleep 出来，下一条才有
-					// 机会通过；R61-3 的 telegramRateLimitPause 已经 cap 在 60s。
-					telegramRateLimitPause(err)
 					if consecutiveRateLimited >= maxConsecutiveRateLimited {
-						return map[string]any{"sent": sent, "total": len(users), "count": len(users), "users": users, "failed": failedItems, "telegram_enabled": a.telegramAvailable(), "notification_enabled": a.cfg().NotificationEnabled, "days": days, "aborted": "rate_limited", "consecutive_rate_limited": consecutiveRateLimited}
+						out := result("rate_limited")
+						out["consecutive_rate_limited"] = consecutiveRateLimited
+						return out
+					}
+					if !telegramRateLimitPauseContext(ctx, err) {
+						return result("context_canceled")
 					}
 					continue
 				}
@@ -80,7 +96,10 @@ func (a *App) sendExpiryReminders(ctx context.Context, days int) map[string]any 
 			sent++
 		}
 	}
-	return map[string]any{"sent": sent, "total": len(users), "count": len(users), "users": users, "failed": failedItems, "telegram_enabled": a.telegramAvailable(), "notification_enabled": a.cfg().NotificationEnabled, "days": days}
+	if ctx.Err() != nil {
+		return result("context_canceled")
+	}
+	return result("")
 }
 
 func (a *App) handleSchedulerRunV2(w http.ResponseWriter, r *http.Request, params Params) {
@@ -170,13 +189,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		for _, rel := range a.store().InviteRelations() {
 			invitedUIDs[rel.ChildUID] = true
 		}
-		batchCount := 0
 		for _, u := range users {
-			batchCount++
-			if batchCount%50 == 0 {
-				if err := r.Context().Err(); err != nil {
-					return map[string]any{"success": false, "terminated": true, "disabled": disabled, "emby_disabled": embyDisabled, "skipped_protected": skippedProtected, "auto_renewed": autoRenewed, "auto_renewal_insufficient": autoRenewalInsufficient, "auto_renewal_ineligible": autoRenewalIneligible, "auto_renewal_failed": autoRenewalFailed, "auto_renewal_points_spent": autoRenewalPointsSpent}, []string{"job terminated"}, err
-				}
+			if r.Context().Err() != nil {
+				break // Keep the audit entries for users already processed.
 			}
 			// 守护管理员 / 白名单不被自动禁用：运维约定"绝不会给 admin 设
 			// finite ExpiredAt"，但 demote-then-repromote 路径 / 手动 SQL /
@@ -288,7 +303,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			expiredLogs = append(expiredLogs, fmt.Sprintf("%d Emby accounts could not be disabled; emby_state_reconcile will retry", embyDisableFailed))
 		}
 		return map[string]any{
-			"success":                         embyDisableFailed == 0,
+			"success":                         embyDisableFailed == 0 && autoRenewalFailed == 0 && autoRenewalEmbyEnableFailed == 0 && r.Context().Err() == nil,
 			"emby_disable_failed":             embyDisableFailed,
 			"emby_disable_failed_uids":        embyDisableFailedUIDs,
 			"disabled_uids":                   disabledUIDs,
@@ -302,7 +317,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			"auto_renewal_points_spent":       autoRenewalPointsSpent,
 			"auto_renewal_emby_enabled":       autoRenewalEmbyEnabled,
 			"auto_renewal_emby_enable_failed": autoRenewalEmbyEnableFailed,
-		}, expiredLogs, nil
+		}, expiredLogs, r.Context().Err()
 	case "check_expiring", "expiry_reminders":
 		defaultDays := a.cfg().NotificationExpiryRemindDays
 		if defaultDays <= 0 {
@@ -311,8 +326,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		days := clamp(jobParamInt(params, "days", queryInt(r, "days", defaultDays)), 1, 365)
 		if jobID == "expiry_reminders" {
 			result := a.sendExpiryReminders(r.Context(), days)
-			result["success"] = true
-			return result, []string{fmt.Sprintf("sent %d reminders for %d expiring users", int(numeric(result["sent"])), int(numeric(result["count"])))}, nil
+			return result, []string{fmt.Sprintf("sent %d reminders for %d expiring users; %d failed", int(numeric(result["sent"])), int(numeric(result["count"])), int(numeric(result["failed_count"])))}, r.Context().Err()
 		}
 		deadline := time.Now().Add(time.Duration(days) * 24 * time.Hour).Unix()
 		count := 0
@@ -611,8 +625,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		skippedPending := 0
 		deletedUsers := []map[string]any{}
 		for _, u := range a.store().ListUsers() {
-			if err := r.Context().Err(); err != nil {
-				return map[string]any{"success": false, "terminated": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "skipped_pending_emby": skippedPending}, []string{"job terminated"}, err
+			if r.Context().Err() != nil {
+				break // Audit completed deletions before returning cancellation.
 			}
 			if a.userIsProtected(u) || u.EmbyID != "" {
 				continue
@@ -661,7 +675,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"users":      deletedUsers,
 			})
 		}
-		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "days": days, "days_threshold": days, "preserve_tg_bound": preserveTG, "skipped_pending_emby": skippedPending}, []string{fmt.Sprintf("processed %d no-Emby web users", candidates)}, nil
+		return map[string]any{"success": failed == 0 && r.Context().Err() == nil, "enabled": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "days": days, "days_threshold": days, "preserve_tg_bound": preserveTG, "skipped_pending_emby": skippedPending}, []string{fmt.Sprintf("processed %d no-Emby web users; %d deleted, %d failed", candidates, deleted, failed)}, r.Context().Err()
 	case "cleanup_pending_emby_entitlements":
 		ignoreEnabled := jobParamBool(params, "ignore_enabled_flag", false)
 		enabled := jobParamBool(params, "enabled", jobParamBool(params, "auto_enabled", a.cfg().AutoCleanupPendingEmby))
@@ -961,13 +975,18 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		deleted := 0
 		deletedIDs := []string{}
+		failed := 0
 		if !dryRun && delete {
 			for _, user := range unlinked {
+				if syncCtx.Err() != nil {
+					break
+				}
 				id := embyRemoteID(user)
 				if id == "" {
 					continue
 				}
 				if err := a.embyDeleteUser(syncCtx, id); err != nil {
+					failed++
 					logs = append(logs, "delete failed for "+id+": "+truncateString(err.Error(), 120))
 					continue
 				}
@@ -982,11 +1001,12 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			a.auditSystem("scheduler", "delete_unlinked_emby", 0, map[string]any{
 				"unlinked":      len(unlinked),
 				"deleted":       deleted,
+				"failed":        failed,
 				"dry_run":       dryRun || !delete,
 				"emby_user_ids": deletedIDs,
 			})
 		}
-		return map[string]any{"success": true, "unlinked": len(unlinked), "deleted": deleted, "dry_run": dryRun || !delete}, logs, nil
+		return map[string]any{"success": failed == 0 && syncCtx.Err() == nil, "unlinked": len(unlinked), "deleted": deleted, "failed": failed, "dry_run": dryRun || !delete}, logs, syncCtx.Err()
 	case "cleanup_ticket_images":
 		retentionDays := jobParamInt(params, "retention_days", a.cfg().TicketImageRetentionDays)
 		if retentionDays <= 0 {
@@ -996,9 +1016,22 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		tickets := a.store().ClosedTicketsWithAttachmentsBefore(cutoff)
 		cleanedTickets := 0
 		removedImages := 0
+		failed := 0
+		logs := []string{}
+		recordFailure := func(ticketID int64, operation string) {
+			failed++
+			if len(logs) < 50 {
+				logs = append(logs, fmt.Sprintf("ticket %d: %s failed", ticketID, operation))
+			}
+		}
 		for _, ticket := range tickets {
+			// Finish files already detached for one ticket, then honor cancellation.
+			if r.Context().Err() != nil {
+				break
+			}
 			removed, err := a.store().DetachExpiredTicketAttachments(ticket.ID, store.TicketRevision(ticket), cutoff)
 			if err != nil {
+				recordFailure(ticket.ID, "detach metadata")
 				zap.L().Warn("清空工单图片元数据失败", zap.Int64("ticket_id", ticket.ID), zap.Error(err))
 				continue
 			}
@@ -1009,18 +1042,22 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			removedImages += len(removed)
 			dir, err := a.ticketAttachmentDir(ticket.ID)
 			if err != nil {
+				recordFailure(ticket.ID, "resolve directory")
 				zap.L().Warn("解析工单图片清理目录失败", zap.Int64("ticket_id", ticket.ID))
 				continue
 			}
 			for _, attachment := range removed {
 				if !ticketImageFilenamePattern.MatchString(attachment.Filename) {
+					recordFailure(ticket.ID, "validate filename")
 					continue
 				}
 				target, err := ResolveWithinRoot(dir, attachment.Filename)
 				if err != nil {
+					recordFailure(ticket.ID, "resolve file")
 					continue
 				}
 				if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+					recordFailure(ticket.ID, "remove file")
 					zap.L().Warn("清理工单图片文件失败", zap.Int64("ticket_id", ticket.ID), zap.Error(err))
 				}
 			}
@@ -1029,10 +1066,11 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			a.auditSystem("scheduler", "cleanup_ticket_images", 0, map[string]any{
 				"tickets": cleanedTickets,
 				"images":  removedImages,
+				"failed":  failed,
 			})
 		}
-		return map[string]any{"success": true, "tickets": cleanedTickets, "images": removedImages},
-			[]string{fmt.Sprintf("cleaned %d tickets, %d images older than %d days", cleanedTickets, removedImages, retentionDays)}, nil
+		logs = append(logs, fmt.Sprintf("cleaned %d tickets, detached %d images older than %d days; %d failures", cleanedTickets, removedImages, retentionDays, failed))
+		return map[string]any{"success": failed == 0 && r.Context().Err() == nil, "tickets": cleanedTickets, "images": removedImages, "failed": failed}, logs, r.Context().Err()
 	case "refresh_bangumi_collections":
 		if !a.cfg().BangumiManageEnabled {
 			return map[string]any{"success": true, "enabled": false, "refreshed_users": 0}, []string{"Bangumi manage disabled"}, nil

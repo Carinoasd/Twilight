@@ -413,11 +413,28 @@ func (a *App) schedulerNextRunAt(jobID string, spec map[string]any, now time.Tim
 	// 重跑挤出 SchedulerRuns(20) 时把 last 退化成 0，让前端"下次自动运行"
 	// 时间显示成 now / 当天而不是真正的次日。
 	snapshot := a.store().SchedulerRunSnapshot(jobID, 1)
-	return schedulerNextRunAtFromSnapshot(spec, now, snapshot)
+	return a.schedulerNextAutomaticRunAt(jobID, spec, now, snapshot)
+}
+
+func (a *App) schedulerNextAutomaticRunAt(jobID string, spec map[string]any, now time.Time, snapshot store.SchedulerRunSnapshot) int64 {
+	if !a.cfg().SchedulerEnabled {
+		return 0
+	}
+	next := schedulerNextRunAtFromSnapshot(spec, now, snapshot)
+	if next == 0 {
+		return 0
+	}
+	if retryAt := a.schedulerRetryAt(jobID, spec, now, snapshot); retryAt > 0 && retryAt < next {
+		next = retryAt
+		if next < now.Unix() {
+			next = now.Unix()
+		}
+	}
+	return next
 }
 
 func schedulerNextRunAtFromSnapshot(spec map[string]any, now time.Time, snapshot store.SchedulerRunSnapshot) int64 {
-	if schedulerTriggerDisabled(spec) {
+	if schedulerTriggerDisabled(spec) || schedulerSnapshotRecentlyRunning(snapshot, now) {
 		return 0
 	}
 	last := int64(0)
@@ -432,16 +449,20 @@ func schedulerNextRunAtFromSnapshot(spec map[string]any, now time.Time, snapshot
 		hour := clamp(int(numeric(spec["hour"])), 0, 23)
 		minute := clamp(int(numeric(spec["minute"])), 0, 59)
 		due := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
-		if !now.Before(due) || last >= due.Unix() {
-			due = due.AddDate(0, 0, 1)
+		if last >= due.Unix() {
+			due = time.Date(now.Year(), now.Month(), now.Day()+1, hour, minute, 0, 0, now.Location())
+		}
+		// An overdue cycle is queued on the next scheduler tick, not tomorrow.
+		if now.After(due) {
+			return now.Unix()
 		}
 		return due.Unix()
 	case "interval":
 		seconds := clamp(int(numeric(spec["seconds"])), 60, 604800)
-		if last == 0 {
+		if last == 0 || last+int64(seconds) < now.Unix() {
 			return now.Unix()
 		}
-		return time.Unix(last+int64(seconds), 0).Unix()
+		return last + int64(seconds)
 	default:
 		return 0
 	}
