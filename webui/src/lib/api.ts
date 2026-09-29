@@ -306,6 +306,34 @@ class ApiClient {
   }
 
   // Auth
+  async createTelegramLogin(signal?: AbortSignal) {
+    return this.request<{ id: string; secret: string; deep_link: string; check_code: string; expires_in: number }>("/auth/telegram/requests", {
+      method: "POST", headers: TELEGRAM_LINK_CREATE_HEADERS, cache: "no-store", signal,
+    }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+
+  async getTelegramLogin(id: string, secret: string, signal?: AbortSignal) {
+    return this.request<{ status: string }>(`/auth/telegram/requests/${encodeURIComponent(id)}`, {
+      headers: { [TELEGRAM_LINK_SECRET_HEADER]: secret }, cache: "no-store", signal,
+    }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+
+  async cancelTelegramLogin(id: string, secret: string) {
+    return this.request(`/auth/telegram/requests/${encodeURIComponent(id)}`, {
+      method: "DELETE", headers: { ...TELEGRAM_LINK_CREATE_HEADERS, [TELEGRAM_LINK_SECRET_HEADER]: secret }, cache: "no-store",
+    }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+
+  async consumeTelegramLogin(id: string, secret: string, signal?: AbortSignal) {
+    const res = await this.request<V2LoginResponse>(`/auth/telegram/requests/${encodeURIComponent(id)}/consume`, {
+      method: "POST", headers: { ...TELEGRAM_LINK_CREATE_HEADERS, [TELEGRAM_LINK_SECRET_HEADER]: secret }, cache: "no-store", signal,
+    }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+    if (res.success && res.data?.user?.avatar) {
+      res.data.user.avatar = this.toAbsoluteAssetUrl(res.data.user.avatar) || undefined;
+    }
+    return res;
+  }
+
   async login(username: string, password: string, signal?: AbortSignal) {
     return this.loginV2({ username, password }, signal);
   }

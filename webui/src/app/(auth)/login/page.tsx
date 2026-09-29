@@ -14,6 +14,7 @@ import { sanitizeExternalUrl } from "@/lib/safe-url";
 import { friendlyError } from "@/lib/validators";
 import { safeProtectedRedirectTarget } from "@/lib/auth-routes";
 import { useI18n } from "@/lib/i18n";
+import { TelegramLogin } from "@/components/telegram-login";
 import { AuthBrand, AUTH_PRIMARY_BTN, AUTH_GHOST_LINK } from "../auth-ui";
 
 function loginRedirectTarget(): string {
@@ -34,6 +35,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [qrBusy, setQrBusy] = useState(false);
 
   useEffect(() => {
     if (systemInfo?.setup?.available) {
@@ -58,6 +60,7 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (qrBusy || isLoading) return;
 
     if (!username || !password) {
       toast({ title: t("auth.login.incomplete"), variant: "destructive" });
@@ -166,7 +169,7 @@ export default function LoginPage() {
           </div>
         </div>
 
-        <Button type="submit" className={AUTH_PRIMARY_BTN} disabled={isLoading}>
+        <Button type="submit" className={AUTH_PRIMARY_BTN} disabled={isLoading || qrBusy}>
           {isLoading ? (
             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
           ) : (
@@ -175,6 +178,8 @@ export default function LoginPage() {
           {t("auth.login.submit")}
         </Button>
       </form>
+
+      {systemInfo?.features?.telegram_login && <TelegramLogin disabled={isLoading} onBusyChange={setQrBusy} onSuccess={() => router.replace(loginRedirectTarget())} />}
 
       {forgotPasswordEnabled && (
         <div className="text-center text-sm">
