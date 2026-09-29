@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { useI18n } from "@/lib/i18n";
 import type { PlayRankGroupBy, PlayRankMediaItem } from "@/lib/api";
+import { PlayRankImage } from "@/components/play-rank-image";
 
 // 媒体榜一行的标题区。两个页面（用户侧 / 管理侧）共用，避免"哪边改了另一边没改"。
 //
@@ -11,7 +12,20 @@ import type { PlayRankGroupBy, PlayRankMediaItem } from "@/lib/api";
 //
 // 集数怎么显示由这里决定，后端只给 season_number / episode_number 两个数字，不替
 // 前端拼任何文案——拼出来的字符串没法翻译，也没法让不同语言按自己的习惯表达。
-export function PlayRankMediaLabel({
+export function PlayRankMediaLabel(props: {
+  item: PlayRankMediaItem;
+  groupBy: PlayRankGroupBy;
+  showViewers?: boolean;
+}) {
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+      <PlayRankImage src={props.item.poster_url} kind="poster" />
+      <MediaLabel {...props} />
+    </div>
+  );
+}
+
+function MediaLabel({
   item,
   groupBy,
   showViewers = false,

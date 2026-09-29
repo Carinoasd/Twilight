@@ -8,6 +8,14 @@
 
 ## 1. 文档说明
 
+### 播放排行榜图片
+
+排行榜响应新增可选的 `media[].poster_url` 和 `users[].avatar_url`；字段缺失时客户端显示缺图占位。剧集海报使用整剧的 Emby 图片，电影海报使用电影条目图片。
+
+`GET /api/v2/emby/play-rank/avatars/:filename` 需要登录。普通用户必须同时满足 `play_rank_enabled` 与 `play_rank_user_visible`，管理员可读取。只允许有播放记录的现存用户目前使用的本地头像，文件名必须匹配上传白名单；未分配、已更换或不存在的头像返回 404，普通用户在开关关闭时返回 403。响应为图片，缓存策略为 `private, no-store`。个人头像接口仍限本人/管理员，不因排行展示而放宽。
+
+头像会向排行榜读者展示，用户名继续打码且普通响应不包含 UID。完整行为见[播放排行榜](../features/playback-rank.md)。
+
 - Base URL（**默认**）：`http://localhost:5000/api/v2`
 - 兼容 Base URL：`http://localhost:5000/api/v1`，仅用于外部 API Key 集成，或前端显式设置 `NEXT_PUBLIC_USE_V1_COMPAT=true` 时回退
 - OpenAPI 文档：`GET /api/v2/openapi.json`（V1 `/api/v1/openapi.json` 继续兼容）

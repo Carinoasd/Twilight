@@ -40,7 +40,7 @@ test("dashboard line counters are translated under dashboard.*", () => {
 test("user-facing error helpers no longer hardcode Chinese text", () => {
   const han = /[一-鿿]/;
   for (const file of ["src/lib/password.ts", "src/hooks/use-async-handler.ts", "src/app/error.tsx", "src/store/auth.ts"]) {
-    const lines = fs.readFileSync(path.join(root, file), "utf8").split("\n");
+    const lines = fs.readFileSync(path.join(root, file), "utf8").split(/\r?\n/);
     const offenders = lines
       .map((line, index) => ({ line, index }))
       .filter(({ line }) => {

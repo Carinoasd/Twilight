@@ -747,6 +747,7 @@ export type PlayRankRange = "day" | "week" | "month" | "all";
 
 export interface PlayRankMediaItem {
   item_id: string;
+  poster_url?: string;
   title: string;
   series_name?: string;
   media_type: string;
@@ -765,6 +766,7 @@ export interface PlayRankMediaItem {
 
 export interface PlayRankUserItem {
   user_name: string;
+  avatar_url?: string;
   plays: number;
   duration: number;
   items: number;

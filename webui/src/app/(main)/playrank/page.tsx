@@ -10,18 +10,14 @@ import { useSystemStore } from "@/store/system";
 import { useI18n } from "@/lib/i18n";
 import { api, type PlayRankGroupBy, type PlayRankRange, type PlayRankResponse, type PlayRankSortBy } from "@/lib/api";
 import { PlayRankMediaLabel } from "@/components/play-rank-media-label";
+import { PlayRankImage } from "@/components/play-rank-image";
+import { PlayRankMetrics } from "@/components/play-rank-metrics";
 
 const rankRanges: PlayRankRange[] = ["day", "week", "month", "all"];
 // 三个榜单一次只看一个：剧集榜、电影榜、用户榜。单集明细不再在界面上展示。
 type RankBoard = "series" | "movie" | "users";
 const rankBoards: RankBoard[] = ["series", "movie", "users"];
 const rankSorts: PlayRankSortBy[] = ["plays", "duration"];
-
-// 当前排序指标用正常字重显示，另一个压暗。不这么做的话，两列数字并排、
-// 看的人不知道这一屏究竟是照哪一列排的。
-function metricClass(active: boolean): string {
-  return active ? "text-sm font-medium text-foreground" : "text-xs text-muted-foreground";
-}
 
 function rangeHintKey(range: PlayRankRange): "playRank.dayHint" | "playRank.weekHint" | "playRank.monthHint" | "playRank.allHint" {
   if (range === "week") return "playRank.weekHint";
@@ -252,16 +248,18 @@ export default function PlayRankPage() {
             ]}
           >
             {users.map((item, index) => (
-              <div key={`${item.user_name}-${index}`} className="flex items-center gap-3 border-b border-border/50 px-3 py-2.5 last:border-0">
+              <div key={`${item.user_name}-${index}`} className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-b border-border/50 px-3 py-2.5 last:border-0 sm:flex sm:gap-3">
                 <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{item.user_name || t("playRank.unknown")}</p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {t("playRank.titles")} {item.items}
-                  </p>
+                <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+                  <PlayRankImage src={item.avatar_url} kind="avatar" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{item.user_name || t("playRank.unknown")}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {t("playRank.titles")} {item.items}
+                    </p>
+                  </div>
                 </div>
-                <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
-                <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
+                <PlayRankMetrics plays={item.plays} duration={formatDuration(item.duration)} sortBy={sortBy} />
               </div>
             ))}
           </RankCard>
@@ -278,11 +276,10 @@ export default function PlayRankPage() {
             ]}
           >
             {media.map((item, index) => (
-              <div key={`${item.item_id || item.title}-${index}`} className="flex items-center gap-3 border-b border-border/50 px-3 py-2.5 last:border-0">
+              <div key={`${item.item_id || item.title}-${index}`} className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-b border-border/50 px-3 py-2.5 last:border-0 sm:flex sm:gap-3">
                 <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
                 <PlayRankMediaLabel item={item} groupBy={groupBy} showViewers />
-                <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
-                <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
+                <PlayRankMetrics plays={item.plays} duration={formatDuration(item.duration)} sortBy={sortBy} />
               </div>
             ))}
           </RankCard>
@@ -325,10 +322,10 @@ function RankCard({
           <h2 className="text-sm font-semibold">{title}</h2>
           {empty && <Badge variant="secondary" className="ml-auto text-xs">0</Badge>}
         </div>
-        <div className="flex items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground">
+        <div className="hidden items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground sm:flex">
           <span className="w-6 shrink-0 text-center">{header[0]?.label}</span>
           <span className="min-w-0 flex-1">{header[1]?.label}</span>
-          <span className={`shrink-0 ${header[2]?.active ? "text-foreground" : ""}`}>{header[2]?.label}</span>
+          <span className={`w-12 shrink-0 text-right ${header[2]?.active ? "text-foreground" : ""}`}>{header[2]?.label}</span>
           <span className={`w-20 shrink-0 text-right ${header[3]?.active ? "text-foreground" : ""}`}>{header[3]?.label}</span>
         </div>
         {empty ? (
