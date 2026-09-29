@@ -993,6 +993,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		logs = append(logs, fmt.Sprintf("cleaned %d tickets, detached %d images older than %d days; %d failures", cleanedTickets, removedImages, retentionDays, failed))
 		return map[string]any{"success": failed == 0 && r.Context().Err() == nil, "tickets": cleanedTickets, "images": removedImages, "failed": failed}, logs, r.Context().Err()
+	case "sync_bangumi_watching":
+		return a.runBangumiWatchSync(r.Context())
 	case "refresh_bangumi_collections":
 		if !a.cfg().BangumiManageEnabled {
 			return map[string]any{"success": true, "enabled": false, "refreshed_users": 0}, []string{"Bangumi manage disabled"}, nil

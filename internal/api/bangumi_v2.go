@@ -68,8 +68,8 @@ func (a *App) handleV2BangumiSummary(w http.ResponseWriter, r *http.Request, _ P
 	u := current(r).User
 	logs := a.store().ListBangumiSyncLogs(u.UID, 50)
 	syncedCount := 0
-	for _, log := range logs {
-		if log.Status == "success" {
+	for _, item := range bangumiWatchItems(u, a.store().PlaybackRecords(u.UID, 0, 5000)) {
+		if item.Status == "success" {
 			syncedCount++
 		}
 	}
@@ -87,7 +87,7 @@ func (a *App) handleV2BangumiSummary(w http.ResponseWriter, r *http.Request, _ P
 	}
 	summary := v2BangumiSummary{Status: status}
 
-	if u.BGMToken == "" || !a.cfg().BangumiManageEnabled || !u.BGMManageMode {
+	if u.BGMToken == "" || (!a.cfg().BangumiManageEnabled && !a.cfg().BangumiEnabled) {
 		ok(w, "OK", summary)
 		return
 	}
@@ -106,6 +106,16 @@ func (a *App) handleV2BangumiSummary(w http.ResponseWriter, r *http.Request, _ P
 		return
 	}
 
+	if _, err := a.rememberBangumiAccount(u, me); err != nil {
+		summary.AccountError = true
+	}
+	currentUser, _ := a.store().User(u.UID)
+	summary.Status.SyncedCount = 0
+	for _, item := range bangumiWatchItems(currentUser, a.store().PlaybackRecords(u.UID, 0, 5000)) {
+		if item.Status == "success" {
+			summary.Status.SyncedCount++
+		}
+	}
 	account := publicBangumiAccount(me)
 	summary.Account = &account
 	username := asString(me["username"])
@@ -118,6 +128,10 @@ func (a *App) handleV2BangumiSummary(w http.ResponseWriter, r *http.Request, _ P
 		return
 	}
 
+	if !a.cfg().BangumiManageEnabled || !u.BGMManageMode {
+		ok(w, "OK", summary)
+		return
+	}
 	collections, partial := a.loadV2BangumiPreviews(ctx, u, username)
 	summary.Collections = collections
 	summary.CollectionsPartial = partial
@@ -224,6 +238,9 @@ func bangumiCollectionPublicEntries(entries []map[string]any, collectionType int
 			"type":            int(numeric(entry["type"])),
 			"ep_status":       int(numeric(entry["ep_status"])),
 			"rate":            int(numeric(entry["rate"])),
+			"comment":         truncateString(asString(entry["comment"]), 4000),
+			"private":         boolish(entry["private"]),
+			"tags":            bangumiPublicTags(entry["tags"]),
 			"updated_at":      bangumiTimestamp(entry["updated_at"]),
 			"collection_type": collectionType,
 		}

@@ -191,17 +191,20 @@ type User struct {
 	// EmbyAutoDisabled 表示当前的 Emby 停用是本系统按 Web 状态（停用 / 过期）自动做的，
 	// 而不是管理员单独封禁 Emby。Emby 状态对账任务只会把带这个标记、且 Web 已恢复的
 	// 账号重新启用；EmbyDisabled=false 时恒为 false。
-	EmbyAutoDisabled   bool   `json:"emby_auto_disabled,omitempty"`
-	Avatar             string `json:"avatar,omitempty"`
-	Background         string `json:"background,omitempty"`
-	BGMMode            bool   `json:"bgm_mode"`
-	BGMManageMode      bool   `json:"bgm_manage_mode"`
-	BGMToken           string `json:"bgm_token,omitempty"`
-	CreatedAt          int64  `json:"created_at"`
-	RegisterTime       int64  `json:"register_time"`
-	EmbyGrantLocked    bool   `json:"emby_grant_locked"`
-	RegistrationSource string `json:"registration_source,omitempty"`
-	RegistrationCode   string `json:"registration_code,omitempty"`
+	EmbyAutoDisabled    bool                          `json:"emby_auto_disabled,omitempty"`
+	Avatar              string                        `json:"avatar,omitempty"`
+	Background          string                        `json:"background,omitempty"`
+	BGMMode             bool                          `json:"bgm_mode"`
+	BGMManageMode       bool                          `json:"bgm_manage_mode"`
+	BGMToken            string                        `json:"bgm_token,omitempty"`
+	BangumiWatch        map[string]BangumiWatchRecord `json:"bangumi_watch,omitempty"`
+	BGMAccountID        string                        `json:"bgm_account_id,omitempty"`
+	BGMAccountTokenHash string                        `json:"bgm_account_token_hash,omitempty"`
+	CreatedAt           int64                         `json:"created_at"`
+	RegisterTime        int64                         `json:"register_time"`
+	EmbyGrantLocked     bool                          `json:"emby_grant_locked"`
+	RegistrationSource  string                        `json:"registration_source,omitempty"`
+	RegistrationCode    string                        `json:"registration_code,omitempty"`
 	// EmbyUnboundAt 是最近一次解除 Emby 绑定的时间。cleanup_no_emby 以
 	// max(注册时间, EmbyUnboundAt) 计算「多久没有 Emby」，避免把刚解绑的老用户直接删掉。
 	EmbyUnboundAt   int64 `json:"emby_unbound_at,omitempty"`

@@ -110,6 +110,8 @@ func (a *App) registerV2Routes() {
 	a.add(http.MethodDelete, "/api/v2/invite/codes/:code", AuthUser, a.handleV2DeleteInviteCode)
 	a.add(http.MethodPost, "/api/v2/invite/children/:uid/detach-expired", AuthUser, a.handleV2DetachExpiredInviteChild)
 	a.add(http.MethodPost, "/api/v2/invite/me/detach-expired", AuthUser, a.handleV2DetachMyExpiredInvite)
+	a.add(http.MethodGet, "/api/v2/bangumi/records", AuthUser, a.handleBangumiWatchRecords)
+	a.add(http.MethodPut, "/api/v2/bangumi/records/:key", AuthUser, a.handleBangumiWatchUpdate)
 	a.add(http.MethodGet, "/api/v2/bangumi/summary", AuthUser, a.handleV2BangumiSummary)
 	a.add(http.MethodPost, "/api/v2/bangumi/sync", AuthUser, a.handleV2BangumiSync)
 	a.add(http.MethodDelete, "/api/v2/bangumi/sync/history", AuthUser, a.handleV2BangumiClearHistory)

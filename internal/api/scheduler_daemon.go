@@ -523,6 +523,8 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 		return dailySpec(a.cfg().SchedulerCleanupAuditLogsTime, 4, 30)
 	case "cleanup_ticket_images":
 		return dailySpec(a.cfg().SchedulerCleanupTicketImagesTime, 4, 45)
+	case "sync_bangumi_watching":
+		return map[string]any{"type": "interval", "seconds": 900}
 	case "refresh_bangumi_collections":
 		return map[string]any{"type": "interval", "seconds": 3600}
 	case "sync_emby_activity_logs":

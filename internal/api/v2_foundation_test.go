@@ -149,6 +149,7 @@ func TestV2BangumiSummaryDoesNotExposeToken(t *testing.T) {
 	app := newTestApp(t)
 	cookies := registerAndLogin(t, app, "bangumi-summary-user", "BangumiSummary123456")
 	app.cfg().BangumiEnabled = true
+	mockBangumiWatch(t, app)
 	app.cfg().BangumiManageEnabled = false
 	user, ok := app.store().FindUserByUsername("bangumi-summary-user")
 	if !ok {

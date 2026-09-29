@@ -201,6 +201,10 @@ type Config struct {
 	TelegramParseMode                string   // 消息解析模式：""（纯文本）、Markdown、MarkdownV2、HTML
 	BotInternalSecret                string
 	BangumiEnabled                   bool
+	BangumiAutoAddCollection         bool
+	BangumiPrivateCollection         bool
+	BangumiMinProgressPercent        int
+	BangumiBlockKeywords             []string
 	BangumiManageEnabled             bool
 	BangumiWebhookSecret             string
 	// BangumiWebhookAllowLegacyToken 兼容期开关：true 时仍接受共享 token（头或 ?token=）鉴权并记警告；
@@ -492,6 +496,13 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.TelegramDisabledCommands = reader.stringListValue(cfg.TelegramDisabledCommands, "Telegram.disabled_commands", "telegram_disabled_commands")
 	cfg.TelegramParseMode = reader.stringValue(cfg.TelegramParseMode, "Telegram.parse_mode", "telegram_parse_mode")
 	cfg.BangumiEnabled = reader.boolValue(cfg.BangumiEnabled, "BangumiSync.enabled", "bangumi_sync_enabled")
+	cfg.BangumiAutoAddCollection = reader.boolValue(cfg.BangumiAutoAddCollection, "BangumiSync.auto_add_collection")
+	cfg.BangumiPrivateCollection = reader.boolValue(cfg.BangumiPrivateCollection, "BangumiSync.private_collection")
+	cfg.BangumiMinProgressPercent = reader.intValue(cfg.BangumiMinProgressPercent, "BangumiSync.min_progress_percent")
+	if cfg.BangumiMinProgressPercent < 1 || cfg.BangumiMinProgressPercent > 100 {
+		cfg.BangumiMinProgressPercent = 85
+	}
+	cfg.BangumiBlockKeywords = reader.stringListValue(cfg.BangumiBlockKeywords, "BangumiSync.block_keywords")
 	cfg.BangumiManageEnabled = reader.boolValue(cfg.BangumiManageEnabled, "BangumiSync.manage_enabled", "bangumi_sync_manage_enabled")
 	cfg.BangumiWebhookSecret = reader.stringValue(cfg.BangumiWebhookSecret, "BangumiSync.webhook_secret", "webhook_secret")
 	cfg.BangumiWebhookAllowLegacyToken = reader.boolValue(cfg.BangumiWebhookAllowLegacyToken, "BangumiSync.webhook_allow_legacy_token")
@@ -780,6 +791,9 @@ func defaults() Config {
 		TMDBAPIURL:                           "https://api.themoviedb.org/3",
 		TMDBImageURL:                         "https://image.tmdb.org/t/p",
 		BangumiAPIURL:                        "https://api.bgm.tv/v0",
+		BangumiAutoAddCollection:             true,
+		BangumiPrivateCollection:             true,
+		BangumiMinProgressPercent:            85,
 		BangumiWebhookAllowLegacyToken:       true,
 		MediaRequestEnabled:                  true,
 		MaxConcurrentRequestsPerUser:         3,

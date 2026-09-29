@@ -97,10 +97,12 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | POST | `/api/v2/invite/me/detach-expired` | User | V2 当前用户主动清理符合条件的上级关系及 Emby |
 | GET | `/api/v2/bangumi/summary` | User | 聚合 Bangumi 同步状态、公开账号资料、五类收藏数量与最近条目；私有 `no-store` 响应，Token 不出现在响应 |
 | POST | `/api/v2/bangumi/sync` | User | V2 手动触发 Bangumi 同步；复用功能开关、Token、外部同步和审计规则 |
+| GET | `/api/v2/bangumi/records` | User | 本人观看记录，按状态筛选和分页；同步检查点按 Bangumi 账号隔离 |
+| PUT | `/api/v2/bangumi/records/{key}` | User | 确认条目/集数、忽略或重试本人观看记录，记录操作审计 |
 | DELETE | `/api/v2/bangumi/sync/history` | User | V2 清除当前用户的 Bangumi 同步日志 |
 | PUT | `/api/v2/bangumi/preferences` | User | V2 更新 Bangumi Token/同步与管理模式；后端重新校验功能开关和 Token |
 | GET | `/api/v2/bangumi/collections` | User | V2 服务端分页读取单类收藏；外部读取和本地缓存由后端控制 |
-| PATCH | `/api/v2/bangumi/collections/{subject_id}` | User | V2 更新单条收藏状态、评分或进度 |
+| PATCH | `/api/v2/bangumi/collections/{subject_id}` | User | V2 更新单条收藏状态、评分、进度、短评、标签及私密设置 |
 | GET | `/api/v2/bangumi/covers/{subject_id}` | Public | V2 获取 Bangumi 封面；本地优先、CDN 回退，按日公开缓存 |
 | GET | `/api/v2/admin/bangumi/users` | Admin | V2 管理员 Bangumi 用户分页资源；仅返回当前页状态与有限计数 |
 | GET | `/api/v2/admin/bangumi/users/{uid}/records` | Admin | V2 按 UID 按需读取有界播放记录详情 |

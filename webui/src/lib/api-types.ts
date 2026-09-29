@@ -1515,6 +1515,35 @@ export interface ViolationLog {
 }
 
 // ==================== Bangumi 同步 ====================
+export interface BangumiWatchItem {
+  key: string;
+  title: string;
+  series_name: string;
+  media_type: string;
+  index_number: number;
+  played_at: number;
+  subject_id?: string;
+  subject_name?: string;
+  episode?: number;
+  completed?: boolean;
+  status: "pending" | "success" | "needs_review" | "failed" | "ignored";
+  message?: string;
+}
+export interface BangumiSummary {
+  status: BangumiSyncStatus & { token_set: boolean };
+  account?: {
+    id?: number;
+    username?: string;
+    nickname?: string;
+    sign?: string;
+    avatar?: Record<string, string>;
+    expired?: boolean;
+  };
+  account_error?: boolean;
+  collections_partial?: boolean;
+  collections?: Record<string, { entries: any[]; total: number; cached: boolean }>;
+  recent_activity?: any[];
+}
 export interface BangumiSyncStatus {
   bgm_mode: boolean;
   bgm_manage_mode: boolean;

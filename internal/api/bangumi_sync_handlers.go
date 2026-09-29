@@ -21,8 +21,8 @@ func (a *App) handleBangumiSyncStatus(w http.ResponseWriter, r *http.Request, _ 
 	records := a.store().PlaybackRecords(u.UID, 0, 0)
 	totalRecords := len(records)
 	syncedCount := 0
-	for _, log := range logs {
-		if log.Status == "success" {
+	for _, item := range bangumiWatchItems(u, records) {
+		if item.Status == "success" {
 			syncedCount++
 		}
 	}
@@ -52,7 +52,8 @@ func (a *App) handleBangumiSyncTrigger(w http.ResponseWriter, r *http.Request, _
 	ctx := r.Context()
 	zap.L().Info("bangumi sync triggered by user", zap.Int64("uid", u.UID))
 	synced, skipped, failed, logs := a.syncBangumiForUser(ctx, u.UID)
-	ok(w, "同步完成", map[string]any{
+	a.audit(r, "sync_bangumi", "user", u.UID, map[string]any{"synced": synced, "failed": failed, "skipped": skipped})
+	ok(w, "同步处理结束", map[string]any{
 		"synced":  synced,
 		"skipped": skipped,
 		"failed":  failed,
@@ -85,6 +86,7 @@ func (a *App) handleBangumiClearHistory(w http.ResponseWriter, r *http.Request, 
 		failWithCode(w, http.StatusInternalServerError, ErrInternal, "清除失败: "+err.Error())
 		return
 	}
+	a.audit(r, "clear_bangumi_history", "user", p.User.UID, nil)
 	ok(w, "已清除同步历史", nil)
 }
 
@@ -360,7 +362,7 @@ func (a *App) handleBangumiCollections(w http.ResponseWriter, r *http.Request, _
 	}
 
 	ok(w, "OK", map[string]any{
-		"entries":          entries,
+		"entries":          bangumiCollectionPublicEntries(entries, collectType),
 		"total":            total,
 		"limit":            limit,
 		"offset":           offset,
@@ -391,21 +393,21 @@ func (a *App) handleUpdateBangumiCollection(w http.ResponseWriter, r *http.Reque
 	}
 
 	payload := decodeMap(r)
-	collectType := int(numeric(payload["type"])) // 1: 想看, 2: 看过, 3: 在看, 4: 搁置, 5: 抛弃
+	collectType, validType := strictBangumiInt(payload["type"], 1, 5)
 	_, hasEpStatus := payload["ep_status"]
-	epStatus := int(numeric(payload["ep_status"]))
+	epStatus, validEp := strictBangumiInt(payload["ep_status"], 0, 5000)
 	_, hasRate := payload["rate"]
-	rate := int(numeric(payload["rate"]))
+	rate, validRate := strictBangumiInt(payload["rate"], 0, 10)
 
-	if collectType <= 0 || collectType > 5 {
+	if !validType {
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "收藏状态不合法 (应为 1-5)")
 		return
 	}
-	if hasRate && (rate < 0 || rate > 10) {
+	if hasRate && !validRate {
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "评分分值不合法 (应为 0-10)")
 		return
 	}
-	if hasEpStatus && epStatus < 0 {
+	if hasEpStatus && collectType != 2 && !validEp {
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "观看进度不能小于 0")
 		return
 	}
@@ -417,14 +419,10 @@ func (a *App) handleUpdateBangumiCollection(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	if err := a.updateBangumiCollection(ctx, subjectID, u.BGMToken, collectType, rate, hasRate); err != nil {
-		failWithCode(w, http.StatusBadGateway, ErrInternal, "更新 Bangumi 收藏失败: "+err.Error())
-		return
-	}
 	if collectType == 2 {
 		fullEpStatus, err := a.bangumiSubjectMainEpisodeCount(ctx, subjectID, u.BGMToken)
 		if err != nil {
-			failWithCode(w, http.StatusBadGateway, ErrInternal, "读取 Bangumi 总集数失败: "+err.Error())
+			failWithCode(w, http.StatusBadGateway, ErrInternal, bangumiSyncError(err))
 			return
 		}
 		if fullEpStatus > 0 {
@@ -432,9 +430,26 @@ func (a *App) handleUpdateBangumiCollection(w http.ResponseWriter, r *http.Reque
 			hasEpStatus = true
 		}
 	}
+	extras, validExtras := bangumiCollectionExtras(payload)
+	if !validExtras {
+		failWithCode(w, 400, ErrBadRequest, "短评、标签或私密设置不合法")
+		return
+	}
+	release, acquired, lockErr := a.store().LockBangumiSync(ctx, u.UID)
+	if lockErr != nil || !acquired {
+		failWithCode(w, 409, ErrConflict, "同步正在运行，请稍后重试")
+		return
+	}
+	defer release()
+	// Invalidate even on partial remote success, so a refresh shows actual state.
+	defer a.store().DeleteBangumiCollectionCache(u.UID, 0)
+	if err := a.updateBangumiCollection(ctx, subjectID, u.BGMToken, collectType, rate, hasRate, extras); err != nil {
+		failWithCode(w, 502, ErrInternal, bangumiSyncError(err))
+		return
+	}
 	if hasEpStatus {
 		if err := a.updateBangumiEpisodeProgress(ctx, subjectID, u.BGMToken, epStatus); err != nil {
-			failWithCode(w, http.StatusBadGateway, ErrInternal, "更新 Bangumi 观看进度失败: "+err.Error())
+			failWithCode(w, http.StatusBadGateway, ErrInternal, "收藏可能已部分更新，请刷新核对后重试")
 			return
 		}
 	}
@@ -446,8 +461,10 @@ func (a *App) handleUpdateBangumiCollection(w http.ResponseWriter, r *http.Reque
 	if hasRate {
 		detail["rate"] = rate
 	}
-	a.audit(r, "update_bangumi_collection", "user", 0, detail)
-	_ = a.store().DeleteBangumiCollectionCache(u.UID, 0)
+	for key := range extras {
+		detail[key+"_changed"] = true
+	}
+	a.audit(r, "update_bangumi_collection", "user", u.UID, detail)
 	ok(w, "更新成功", nil)
 }
 

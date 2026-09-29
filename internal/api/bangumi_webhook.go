@@ -166,6 +166,10 @@ func (a *App) handleBangumiWebhook(w http.ResponseWriter, r *http.Request, _ Par
 	}
 	payload := decodeMap(r)
 	item, _ := payload["Item"].(map[string]any)
+	// Jellyfin's official webhook plugin sends item fields at the top level.
+	if item == nil && asString(payload["ItemId"]) != "" {
+		item = map[string]any{"Id": payload["ItemId"], "Name": payload["Name"], "Type": payload["ItemType"], "SeriesName": payload["SeriesName"], "IndexNumber": payload["EpisodeNumber"], "ParentIndexNumber": payload["SeasonNumber"], "RunTimeTicks": payload["RunTimeTicks"]}
+	}
 	eventName := strings.ToLower(firstNonEmpty(asString(payload["Event"]), asString(payload["NotificationType"]), asString(payload["Name"])))
 	if item != nil && (strings.Contains(eventName, "stop") || strings.Contains(eventName, "played") || payload["PlaybackPositionTicks"] != nil) {
 		userID := firstNonEmpty(asString(payload["UserId"]), asString(payload["UserID"]))
@@ -181,8 +185,8 @@ func (a *App) handleBangumiWebhook(w http.ResponseWriter, r *http.Request, _ Par
 		}
 		if local, okUser := a.store().FindUserByEmbyID(userID); okUser {
 			duration := numeric(payload["PlaybackPositionTicks"]) / 10000000
-			if duration <= 0 {
-				duration = numeric(item["RunTimeTicks"]) / 10000000
+			if duration < 0 {
+				duration = 0
 			}
 			// PlayedAt 优先用 header 时间戳：同一份字节重放总是命中相同 PlayedAt，
 			// store 层的 (uid, item_id, played_at) 唯一键保证去重；只有缺 header
@@ -206,13 +210,35 @@ func (a *App) handleBangumiWebhook(w http.ResponseWriter, r *http.Request, _ Par
 				PlayedAt:    playedAt,
 			})
 			if err != nil {
-				zap.L().Warn("failed to record Bangumi playback webhook", zap.Int64("uid", local.UID), zap.Error(err))
+				failWithCode(w, http.StatusServiceUnavailable, ErrInternal, "观看记录保存失败")
+				return
 			} else if !inserted {
 				zap.L().Info(
 					"bangumi webhook playback record deduplicated by idempotency key",
 					zap.Int64("uid", local.UID),
 					zap.String("item_id", firstNonEmpty(asString(item["Id"]), asString(item["ID"]))),
 				)
+			}
+			runtime := numeric(item["RunTimeTicks"])
+			position := numeric(payload["PlaybackPositionTicks"])
+			threshold := a.cfg().BangumiMinProgressPercent
+			if threshold < 1 || threshold > 100 {
+				threshold = 85
+			}
+			completed := runtime > 0 && float64(position) >= float64(runtime)*float64(threshold)/100
+			if played, ok := payload["PlayedToCompletion"].(bool); ok && played {
+				completed = true
+			}
+			rec := store.PlaybackRecord{ItemID: firstNonEmpty(asString(item["Id"]), asString(item["ID"])), SeriesName: asString(item["SeriesName"]), MediaType: asString(item["Type"]), IndexNumber: int(intValue(item, "IndexNumber", 0))}
+			if rec.ItemID != "" {
+				err := a.store().UpdateBangumiWatch(local.UID, store.BangumiRecordKey(rec), "", func(v *store.BangumiWatchRecord) {
+					v.Completed = v.Completed || completed
+					v.Season = int(intValue(item, "ParentIndexNumber", 0))
+				})
+				if err != nil {
+					failWithCode(w, http.StatusServiceUnavailable, ErrInternal, "观看完成状态保存失败")
+					return
+				}
 			}
 		}
 	}
