@@ -1,4 +1,23 @@
 {
+  "telegramQR": {
+    "imageAlt": "Telegram 二维码",
+    "scanHint": "用手机扫码打开 Telegram",
+    "loginTitle": "Telegram 扫码登录",
+    "checkCode": "核对码：{code}",
+    "safetyHint": "请在 Bot 中核对相同的码，仅确认自己发起的登录。需使用已绑定 Telegram 的账号。",
+    "expires": "剩余 {seconds} 秒",
+    "idle": "准备登录",
+    "creating": "正在生成登录请求…",
+    "pending": "等待扫码",
+    "scanned": "请在 Telegram Bot 中确认登录",
+    "consuming": "正在登录…",
+    "expired": "请求已过期，请重新生成二维码。",
+    "rejected": "已拒绝登录，可以重新发起。",
+    "failed": "无法完成登录，请重新生成二维码或使用密码登录。",
+    "done": "登录成功",
+    "networkError": "连接中断，稍后自动重新查询…",
+    "openBot": "打开 Telegram"
+  },
   "email": {
     "verified": "已验证",
     "unverified": "未验证",

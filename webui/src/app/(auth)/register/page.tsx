@@ -1,5 +1,7 @@
 "use client";
 
+import { TelegramQR } from "@/components/telegram-qr";
+
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -528,6 +530,7 @@ export default function RegisterPage() {
 
       {telegramLink && !bindConfirmed ? (
         <div className="space-y-3 rounded-lg border border-border/70 bg-muted/50 px-3 py-3 text-sm">
+          <TelegramQR key={telegramLink.link_id} url={telegramLink.deep_link} expiresIn={telegramLink.expires_in} />
           {telegramLink.deep_link ? (
             <Button asChild type="button" className={AUTH_PRIMARY_BTN}>
               <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">

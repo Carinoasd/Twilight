@@ -1,5 +1,7 @@
 "use client";
 
+import { TelegramQR } from "@/components/telegram-qr";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Copy, Bot, Check, AlertCircle, Send } from "lucide-react";
@@ -143,6 +145,7 @@ export default function RebindGuard() {
 
             {telegramLink && !isBound && (
               <div className="space-y-3">
+                <TelegramQR key={telegramLink.link_id} url={telegramLink.deep_link} expiresIn={telegramLink.expires_in} />
                 {telegramLink.deep_link && (
                   <Button className="w-full" size="lg" asChild>
                     <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">

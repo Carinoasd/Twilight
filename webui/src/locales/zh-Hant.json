@@ -1,4 +1,23 @@
 {
+  "telegramQR": {
+    "idle": "準備登入",
+    "imageAlt": "Telegram QR 碼",
+    "scanHint": "用手機掃碼開啟 Telegram",
+    "loginTitle": "Telegram 掃碼登入",
+    "checkCode": "核對碼：{code}",
+    "safetyHint": "請在 Bot 中核對相同的碼，僅確認自己發起的登入。需使用已綁定 Telegram 的帳號。",
+    "expires": "剩餘 {seconds} 秒",
+    "creating": "正在產生登入請求…",
+    "pending": "等待掃碼",
+    "scanned": "請在 Telegram Bot 中確認登入",
+    "consuming": "正在登入…",
+    "expired": "請求已過期，請重新產生 QR 碼。",
+    "rejected": "已拒絕登入，可以重新發起。",
+    "failed": "無法完成登入，請重新產生 QR 碼或使用密碼登入。",
+    "done": "登入成功",
+    "networkError": "連線中斷，稍後自動重新查詢…",
+    "openBot": "開啟 Telegram"
+  },
   "auth": {
     "login": {
       "incomplete": "請填寫完整資訊",

@@ -1,5 +1,7 @@
 "use client";
 
+import { TelegramQR } from "@/components/telegram-qr";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
@@ -1118,6 +1120,7 @@ export default function SettingsPage() {
             {telegramLink && !telegramStatus?.bound && (
               <div className="rounded-lg bg-blue-500/10 p-4 space-y-3">
                 <p className="font-medium text-blue-500">{t("settings.bindCodeGenerated")}</p>
+                <TelegramQR key={telegramLink.link_id} url={telegramLink.deep_link} expiresIn={telegramLink.expires_in} />
                 {telegramLink.deep_link && (
                   <Button asChild>
                     <a href={telegramLink.deep_link} target="_blank" rel="noopener noreferrer">

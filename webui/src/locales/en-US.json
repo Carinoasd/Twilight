@@ -1,4 +1,23 @@
 {
+  "telegramQR": {
+    "idle": "Ready to sign in",
+    "imageAlt": "Telegram QR code",
+    "scanHint": "Scan with your phone to open Telegram",
+    "loginTitle": "Log in with Telegram QR",
+    "checkCode": "Verification code: {code}",
+    "safetyHint": "Match this code in the bot and confirm only a login you started yourself. Use an account already linked to Telegram.",
+    "expires": "{seconds}s remaining",
+    "creating": "Creating a login request…",
+    "pending": "Waiting for scan",
+    "scanned": "Please confirm in the Telegram bot",
+    "consuming": "Signing in…",
+    "expired": "Request expired. Generate a new QR code.",
+    "rejected": "Login was declined. You can start again.",
+    "failed": "Login could not be completed. Generate a new QR code or use your password.",
+    "done": "Login successful",
+    "networkError": "Connection interrupted. Checking again shortly…",
+    "openBot": "Open Telegram"
+  },
   "auth": {
     "login": {
       "incomplete": "Please fill in all fields",

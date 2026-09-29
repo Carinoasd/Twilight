@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // refreshSession rotates one authenticated session. The HTTP layer owns the
@@ -27,5 +29,8 @@ func (a *App) revokeSession(ctx context.Context, token string) {
 }
 
 func (a *App) revokeAllSessions(ctx context.Context, uid int64) {
+	if err := a.store().RevokeTelegramLogins(ctx, uid); err != nil {
+		zap.L().Warn("revoke telegram login requests failed", zap.Int64("uid", uid))
+	}
 	a.sessions().DeleteUser(ctx, uid)
 }

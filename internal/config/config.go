@@ -166,6 +166,7 @@ type Config struct {
 	EmbyPublicURL                  string
 	EmbyWhitelistURL               string
 	TelegramMode                   bool
+	TelegramLoginEnabled           bool
 	ForceBindTelegram              bool
 	TelegramBotToken               string
 	TelegramAPIURL                 string
@@ -458,6 +459,7 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.EmbyURLList = parseLinesList(reader.stringListValue(nil, "Emby.emby_url_list", "emby_url_list"))
 	cfg.EmbyWhitelistURLList = parseLinesList(reader.stringListValue(nil, "Emby.emby_url_list_for_whitelist", "emby_url_list_for_whitelist"))
 	cfg.TelegramMode = reader.boolValue(cfg.TelegramMode, "Global.telegram_mode", "telegram_mode")
+	cfg.TelegramLoginEnabled = reader.boolValue(cfg.TelegramLoginEnabled, "Telegram.login_enabled")
 	cfg.ForceBindTelegram = reader.boolValue(cfg.ForceBindTelegram, "Global.force_bind_telegram", "force_bind_telegram")
 	cfg.TelegramBotToken = reader.stringValue(cfg.TelegramBotToken, "Telegram.bot_token", "bot_token")
 	cfg.TelegramAPIURL = reader.stringValue(cfg.TelegramAPIURL, "Telegram.telegram_api_url", "telegram_api_url")
@@ -979,6 +981,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("TWILIGHT_TELEGRAM_BOT_TOKEN"); v != "" {
 		cfg.TelegramBotToken = v
+	}
+	if v := os.Getenv("TWILIGHT_TELEGRAM_LOGIN_ENABLED"); v != "" {
+		cfg.TelegramLoginEnabled = boolValue(v, cfg.TelegramLoginEnabled)
 	}
 	if v := os.Getenv("TWILIGHT_TELEGRAM_ADMIN_ID"); v != "" {
 		cfg.TelegramAdminIDs = int64ListValue(v)

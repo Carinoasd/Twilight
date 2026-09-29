@@ -1501,7 +1501,7 @@ func (s *Store) LoadSnapshot(data []byte) error {
 	}
 	raw, version, err := s.saveStateInTxLocked(ctx, tx, true)
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links`)
+		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links; DELETE FROM twilight_telegram_logins`)
 	}
 	if err == nil {
 		// 恢复后 UID 可能被重新分配给别人：会话只绑定 uid，必须一并作废。

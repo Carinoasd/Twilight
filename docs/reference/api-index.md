@@ -63,6 +63,10 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | POST | `/api/v2/registration` | Public | 创建 Web 账号；后端最终校验密码、注册码和 Telegram 绑定码 |
 | GET | `/api/v2/registration/availability` | Public | 返回注册开关、容量和用户名可用性摘要 |
 | POST | `/api/v2/registration/telegram/link` | Public | 签发注册阶段 Telegram 绑定链接（deep link）；需 `X-Twilight-Intent: create-telegram-link`；响应含 `link_id`、`start_token`、`deep_link`、`manual_command`、`link_secret` |
+| POST | `/api/v2/auth/telegram/requests` | Public | 创建 3 分钟扫码登录请求；需现有 WebUI 意图头，返回独立 id、secret、deep_link、check_code |
+| GET | `/api/v2/auth/telegram/requests/{id}` | Public | 仅凭 `X-Telegram-Link-Secret` 查询状态；不返回用户身份、不签发会话 |
+| DELETE | `/api/v2/auth/telegram/requests/{id}` | Public | 凭网页 secret 及意图头取消请求 |
+| POST | `/api/v2/auth/telegram/requests/{id}/consume` | Public | Bot 私聊明确确认后，凭网页 secret、原设备及意图头兑换一次登录会话 |
 | GET | `/api/v2/dashboard/summary` | User | 聚合当前用户、公开能力和在线人数摘要；Emby 失败时通过 `viewers.available=false` 独立降级 |
 | GET | `/api/v2/settings` | User | 当前用户设置、Telegram/Emby 状态和密码安全策略；私有 `no-store` |
 | PUT | `/api/v2/settings/preferences` | User | 更新通知、自动续期和密码安全偏好；仅接受严格 JSON 布尔值 |

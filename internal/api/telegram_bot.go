@@ -256,6 +256,9 @@ func (a *App) handleTelegramUpdate(ctx context.Context, update *telegramUpdate) 
 	}
 	a.observeTelegramRoster(update)
 	if callback := update.CallbackQuery; callback != nil {
+		if a.telegramHandleLoginCallback(ctx, callback) {
+			return
+		}
 		if a.telegramHandleDeveloperJSCallback(ctx, callback) {
 			return
 		}
@@ -314,6 +317,12 @@ func (a *App) handleTelegramUpdate(ctx context.Context, update *telegramUpdate) 
 			return
 		}
 		if command == "/start" {
+			if len(args) > 0 && strings.HasPrefix(args[0], "login_") {
+				if !message.From.IsBot && chatID == fromID {
+					a.telegramScanLogin(ctx, fromID, strings.TrimPrefix(args[0], "login_"))
+				}
+				return
+			}
 			// deep link：t.me/<bot>?start=<token> 会以 "/start <token>" 送达。
 			if len(args) > 0 && telegramLinkTokenPattern.MatchString(args[0]) {
 				a.telegramConfirmLinkFromChat(ctx, chatID, fromID, username, args[0])

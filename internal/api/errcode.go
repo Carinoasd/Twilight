@@ -253,7 +253,10 @@ const (
 	ErrRebindBatchSizeInvalid ErrCode = "REBIND_BATCH_SIZE_INVALID"
 
 	// === Telegram 配置 ===
-	ErrTGNotConfigured ErrCode = "TG_NOT_CONFIGURED"
+	ErrTGNotConfigured          ErrCode = "TG_NOT_CONFIGURED"
+	ErrTelegramLoginUnavailable ErrCode = "TG_LOGIN_UNAVAILABLE"
+	ErrTelegramLoginInvalid     ErrCode = "TG_LOGIN_INVALID"
+	ErrTelegramLoginFailed      ErrCode = "TG_LOGIN_FAILED"
 
 	// === handlers.go 历史遗留：登录 / 资料 / 绑定 / 上传 / 管理员维护 ===
 	// handlers.go 在拆分前包含 90+ fail()，下面这一段把它们按业务域归类进

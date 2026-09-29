@@ -74,6 +74,9 @@ interface AuthState {
   isHydrated: boolean;
   initialize: () => Promise<void>;
   login: (username: string, password: string) => Promise<LoginResult>;
+
+  loginTelegram: (id: string, secret: string) => Promise<LoginResult>;
+  authenticate: (credentials: { username: string; password: string } | { id: string; secret: string }) => Promise<LoginResult>;
   logout: () => Promise<void>;
   fetchUser: (options?: { silent?: boolean }) => Promise<FetchUserResult>;
   setUser: (user: UserInfo | null) => void;
@@ -209,12 +212,16 @@ export const useAuthStore = create<AuthState>()(
         return tracked;
       },
 
-      login: async (username: string, password: string) => {
+      login: (username, password) => get().authenticate({ username, password }),
+      loginTelegram: (id, secret) => get().authenticate({ id, secret }),
+      authenticate: async (credentials) => {
         const generation = bumpAuthGeneration();
         const controller = new AbortController();
         inFlight.loginController = controller;
         try {
-          const res = await api.login(username, password, controller.signal);
+          const res = "id" in credentials
+            ? await api.consumeTelegramLogin(credentials.id, credentials.secret, controller.signal)
+            : await api.login(credentials.username, credentials.password, controller.signal);
           if (generation !== inFlight.generation) {
             return { ok: false, message: translate("authStore.sessionChanged"), errorCode: "AUTH_SESSION_CHANGED" };
           }
