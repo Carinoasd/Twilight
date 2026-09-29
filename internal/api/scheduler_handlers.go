@@ -12,6 +12,7 @@ import (
 )
 
 var schedulerJobs = []map[string]any{
+	{"id": "sync_bangumi_watching", "name": "同步 Bangumi 观看记录", "description": "每 15 分钟同步已开启同步用户的完成记录；歧义记录由用户确认。", "manual_only": false, "enabled": true},
 	{"id": "check_expired", "name": "检查已过期用户", "description": "扫描已过期账号，先按签到配置尝试自动积分续期，再禁用未续期账号并清除过期会话。", "manual_only": false, "enabled": true},
 	{"id": "check_expiring", "name": "检查即将到期用户", "description": "统计近期即将到期的用户数量，供管理员评估续期风险。", "manual_only": false, "enabled": true},
 	{"id": "expiry_reminders", "name": "发送到期提醒", "description": "向即将到期且已绑定 Telegram 的用户发送续期通知。", "manual_only": false, "enabled": true},

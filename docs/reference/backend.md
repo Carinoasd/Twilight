@@ -254,6 +254,8 @@ Go 后端按统一的业务状态与前端响应形状实现，主要模块：
 
 Bangumi 收藏缓存采用两层结构：`BangumiSubjectCache` 以 Bangumi `subject_id`（BGMID）全局缓存作品详情，`BangumiCollectionCache` 以 `uid:type` 缓存用户收藏索引与进度/评分等用户态字段；读取时再按 `subject_id` 回填作品详情。这个设计避免不同用户收藏同一作品时在 state 中重复保存封面、标签和评分等大对象。
 
+Bangumi 观看完成证据与每账号同步检查点存于 `User.BangumiWatch`，与同步日志独立；换 Token 或清日志不删除检查点。`sync_bangumi_watching` 默认每 900 秒处理启用同步且配置个人 Token 的有效用户，每用户每轮最多 25 个项目、60 秒。API、排程与收藏编辑用 PostgreSQL 事务级 advisory lock 排除同用户并发写入；锁随事务或上下文结束释放。每用户检查点上限 20000，满额时报错，不自动删历史。部署需要媒体 Webhook 和运行中的调度服务，详见 [Bangumi 记录管理与观看同步](../features/bangumi.md)。
+
 > 旧文档把邀请、公告等描述为「新增 `db/invites.db` / `announcements.db`」「`invite_relations` 单表」「`ALTER TABLE announcements 增列`」「自动建表」等，均为过时说法。当前实现中这些都是单一状态文档（`internal/store`）里的字段。
 
 运行期只有一种后端（`OpenPostgres`）：

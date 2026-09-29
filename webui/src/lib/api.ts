@@ -8,6 +8,8 @@ import type {
   AuditLog,
   AuditActionCount,
   BangumiSyncLog,
+  BangumiSummary,
+  BangumiWatchItem,
   BangumiSyncResult,
   BangumiSyncStatus,
   BangumiUserInfo,
@@ -503,6 +505,27 @@ class ApiClient {
     }, { apiVersion: "v2" });
   }
 
+  async getBangumiSummary(signal?: AbortSignal) {
+    return this.request<BangumiSummary>("/bangumi/summary", { signal, cache: "no-store" }, {
+      apiVersion: "v2", cacheRead: false, dedupe: false,
+    });
+  }
+  async getBangumiWatchRecords(page = 1, status = "", signal?: AbortSignal) {
+    const params = new URLSearchParams({ page: String(page), status, per_page: "20" });
+    return this.request<{
+      items: BangumiWatchItem[]; total: number; page: number; per_page: number;
+      counts: Record<string, number>; account_verified: boolean;
+    }>(`/bangumi/records?${params}`, { signal, cache: "no-store" }, {
+      apiVersion: "v2", cacheRead: false, dedupe: false,
+    });
+  }
+  async updateBangumiWatch(key: string, data: {
+    action: "confirm" | "ignore" | "retry"; subject_id?: string; episode?: number;
+  }) {
+    return this.request(`/bangumi/records/${encodeURIComponent(key)}`, {
+      method: "PUT", body: JSON.stringify(data),
+    }, { apiVersion: "v2" });
+  }
   async getBangumiSyncStatus(signal?: AbortSignal) {
     const res = await this.request<BangumiSyncStatus & {
       status?: BangumiSyncStatus & { token_set?: boolean };
@@ -557,10 +580,12 @@ class ApiClient {
       offset: number;
       cached?: boolean;
       cache_updated_at?: number | null;
-    }>(`/bangumi/collections?${params.toString()}`, { signal });
+    }>(`/bangumi/collections?${params.toString()}`, { signal, cache: "no-store" }, { cacheRead: false, dedupe: false });
   }
 
-  async updateBangumiCollection(subjectId: string, data: { type: number; ep_status?: number; rate?: number }) {
+  async updateBangumiCollection(subjectId: string, data: {
+    type: number; ep_status?: number; rate?: number; comment?: string; tags?: string[]; private?: boolean;
+  }) {
     return this.request(`/bangumi/collections/${subjectId}`, {
       method: "PATCH",
       body: JSON.stringify(data),

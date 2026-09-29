@@ -37,6 +37,9 @@ func newTestApp(t *testing.T) *App {
 		ExpiryNotifyTelegramEnabled:    true,
 		TicketNotifyTelegramEnabled:    true,
 		SchedulerNotifyTelegramEnabled: true,
+		BangumiAutoAddCollection:       true,
+		BangumiPrivateCollection:       true,
+		BangumiMinProgressPercent:      85,
 
 		AppName:                      "Twilight Test",
 		Version:                      "test",
@@ -3213,17 +3216,18 @@ func TestFallbackAuditCoversSuccessfulMutationsWithoutExplicitAudit(t *testing.T
 		t.Fatal(err)
 	}
 
-	// 登出已改为明确审计（logout），这里换一个仍只有 fallback 的用户写入路由。
-	app.cfg().BangumiEnabled = true
-	rr := doJSON(app, http.MethodDelete, "/api/v1/bangumi/sync/history", ``, cookies)
+	// Use a dedicated test route so newly explicit business audits cannot hide
+	// regressions in the fallback mechanism itself.
+	app.add(http.MethodPost, "/api/v1/test-fallback-audit", AuthUser, func(w http.ResponseWriter, r *http.Request, _ Params) { ok(w, "OK", nil) })
+	rr := doJSON(app, http.MethodPost, "/api/v1/test-fallback-audit", `{}`, cookies)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("clear bangumi history status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("fallback route status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	logs := app.store().ListAuditLogs()
 	if len(logs) != 1 {
 		t.Fatalf("expected one fallback audit log, got %#v", logs)
 	}
-	if logs[0].Action != "delete_bangumi_sync_history" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
+	if logs[0].Action != "post_test_fallback_audit" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
 		t.Fatalf("unexpected fallback audit log: %#v", logs[0])
 	}
 }

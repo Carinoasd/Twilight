@@ -468,6 +468,13 @@ Admin user listing `/admin/users` and `filteredBatchUserUIDs` must interpret fil
 
 ## Bangumi Rules
 
+- `bangumi_watch_handlers.go` owns the authenticated current-user record list and confirm/ignore/retry operations; never accept another user's UID from the client.
+- `User.BangumiWatch` stores completion evidence under the media key and checkpoints under `accountID:mediaKey`. Replace the map on mutation; published maps are immutable. Preserve historical checkpoints on token changes and log clearing.
+- Verify the personal token's account identity before outbound sync. `sync_bangumi_watching` runs every 900 seconds, bounds each user to 25 attempts / 60 seconds, and shares a PostgreSQL advisory lock with manual sync and collection edits.
+- Automatic sync requires completion evidence or explicit user confirmation, unique exact normalized matching, and a season mapping for later seasons. Mark only the observed episode, preserving existing collection metadata and completed status. Full-series progress rules below apply to explicit collection edits.
+- Honor `BangumiSync.auto_add_collection`, `private_collection`, `block_keywords`, and `min_progress_percent`. Missing position is not full runtime; old activity duration alone is not completion evidence.
+- User Bangumi pages must use abortable no-store reads, preserve drafts on failed writes, check partial sync failures, and translate labels in all catalogs. Collection edits support bounded comment/tags/private fields.
+
 - `BangumiSubjectCache` is global and keyed by Bangumi `subject_id` / BGMID.
 - `BangumiCollectionCache` is per `uid:type` and stores only user-state fields; subjects are hydrated on read.
 - `UpsertBangumiCollectionCache` owns the split between subject payload and user collection state.

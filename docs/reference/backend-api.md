@@ -862,9 +862,17 @@ curl -X GET "http://localhost:5000/api/v1/emby/status" \
 
 `POST /emby/bangumi/webhook`
 
-- 说明：接收 Emby 播放事件，按规则回写 Bangumi 观看进度。
+- 说明：接收 Emby/Jellyfin 播放停止事件并保存完成证据；观看同步由用户或 `sync_bangumi_watching` 排程执行，自动同步仅标记实际观看的单集。
 - 认证：公开（`AuthPublic`），但携带 `X-Twilight-Bangumi-Timestamp` 时会做 ±300 秒 replay-window 校验，落在窗口外的请求被拒。
 - 详见 [Bangumi 同步](../features/bangumi.md)。
+
+### 8.7 Bangumi 用户记录与收藏管理
+
+- `GET /api/v2/bangumi/records`：仅本人记录；`page`、`per_page`（1–50）、`status`（pending/needs_review/failed/success/ignored）。返回 `items`、`total`、分页字段、状态计数和 `account_verified`。最多读取最近 5000 条原始记录，按媒体去重。
+- `PUT /api/v2/bangumi/records/{key}`：`action` 为 `confirm`、`ignore` 或 `retry`；confirm 需有效 `subject_id` 与整数 `episode`（剧集至少 1），并表示用户明确确认已看完。验证个人 Token 和记录归属，按已验证的 Bangumi 账号保存状态。
+- 收藏 PATCH 新增可选 `comment`（最多 1000 字）、`tags`（最多 10 个无空白标签，每个最多 30 字）、`private`（布尔）。type/rate/ep_status 必须为范围内的 JSON 整数；明确设置 type 2 完成整部，忽略前端 ep_status。
+- 同步和收藏修改共用跨进程的用户级锁。远端部分成功时返回失败并失效缓存，提示刷新核对。同步响应中的 `failed` 必须由调用方检查，HTTP 200 不等于全部项目成功。
+- 清同步日志和更换 Token 保留检查点；同一 Bangumi 账号继续去重，不同账号分开保存。默认每 15 分钟运行观看同步，收藏缓存刷新仍是独立任务。
 
 ## 9. Admin 模块
 

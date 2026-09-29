@@ -1,544 +1,121 @@
-# Bangumi 同步
+# Bangumi 记录管理与观看同步
 
-本文介绍 Twilight 与 Bangumi（bgm.tv）相关的完整能力：通过 Emby / Jellyfin 播放 Webhook 采集观看记录 → 自动/手动同步到 Bangumi 点格子（添加收藏 / 标记看过），以及在求片搜索中使用 Bangumi 作为媒体数据源。同时说明 Webhook 鉴权、重放窗口、幂等去重、同步流程、前端页面与 Emby / Jellyfin 端配置等真实机制。
+Twilight 通过 Emby / Jellyfin 的播放停止 Webhook 保存观看记录，再由排程或用户手动同步到 Bangumi.tv。用户也可以管理收藏状态、进度、评分、短评、个人标签和私密设置。
 
-## 涉及代码
+## 启用步骤
 
-| 关注点 | 源码位置 |
-| --- | --- |
-| Webhook 鉴权、重放窗口、幂等记录 | `internal/api/bangumi_webhook.go` |
-| Bangumi 同步服务（搜索匹配 → 收藏 → 标记剧集） | `internal/api/bangumi_sync_service.go` |
-| Bangumi 同步 API（用户端 + 管理员端 handler） | `internal/api/bangumi_sync_handlers.go` |
-| Bangumi API 客户端（求片搜索 / 详情） | `internal/api/bangumi_client.go` |
-| Webhook 路由注册 | `internal/api/routes.go` |
-| 观看记录存储与去重 | `internal/store/playback.go` |
-| 同步日志与收藏缓存存储（`BangumiSyncLog` / `BangumiCollectionCache` / `BangumiSubjectCache`） | `internal/store/store.go` |
-| 配置项解析 | `internal/config/config.go` |
-| 用户级 `bgm_mode` / `bgm_token` 处理 | `internal/api/handlers.go` |
-| V2 用户端摘要接口 | `internal/api/bangumi_v2.go` (`GET /api/v2/bangumi/summary`) |
+1. 管理员在「系统配置 → Bangumi 管理与同步」开启需要的功能。
+2. 用户在「Bangumi → 设置」填写自己的 [Access Token](https://next.bgm.tv/demo/access-token)，开启同步或收藏管理并保存。Token 只写入后端，页面读取只返回是否已配置。
+3. 将媒体服务器的播放停止事件发送到 `POST /api/v2/emby/bangumi/webhook`，配置下述鉴权和事件字段。V1 同路径仍兼容。
+4. 运行 Twilight 的 `scheduler` 或 `all` 服务并启用调度器。`sync_bangumi_watching` 默认每 15 分钟执行，也可在任务管理中手动执行或调整间隔。
+5. 在用户的「观看记录」查看待同步、待确认、成功、失败和忽略状态；无法唯一匹配的记录由用户填写 Bangumi 条目 ID 和集数，明确确认已看完后再同步。
 
-## 功能总览
+仅开启同步而没有播放事件来源，不会产生自动完成记录。旧 Emby ActivityLog 记录可供查看和人工确认，但只有活动时长无法证明看完，不会直接写入 Bangumi。
 
-```
-Emby/Jellyfin 播放停止
-        │
-        ▼
-┌──────────────────────┐
-│  Webhook (AuthPublic) │  ← X-Twilight-Bangumi-Token / replay window / 幂等去重
-└──────┬───────────────┘
-       │ 落库 PlaybackRecord (UID / ItemID / Title / SeriesName / IndexNumber / Duration / PlayedAt)
-       ▼
-┌──────────────────────┐
-│  PlaybackRecords      │  本地观看记录（最多 5000 条）
-└──────┬───────────────┘
-       │ 用户 / 管理员触发同步
-       ▼
-┌──────────────────────┐
-│  Bangumi Sync Service │  用户个人 Token → 搜索匹配 → 添加收藏 → 标记剧集看过
-└──────┬───────────────┘
-       │ 落库 BangumiSyncLog (success / failed / skipped)
-       ▼
-     Bangumi (bgm.tv)
-```
+## 配置
 
-## 功能开关
-
-Bangumi 功能有两个独立开关，互不影响：
-
-### 同步开关 `BangumiSync.enabled`
-
-对应后端配置字段 `BangumiEnabled`，仅控制同步相关功能：
-
-- Webhook 入口 `POST /api/v1/emby/bangumi/webhook` 处理请求（关闭时返回 `BANGUMI_SYNC_DISABLED`，HTTP 400）。
-- 同步触发 API（`POST /api/v1/bangumi/sync/trigger` 和管理员 `POST /api/v1/admin/bangumi/sync/:uid`）。
-- 同步历史查看和清除（`GET/DELETE /api/v1/bangumi/sync/history`）。
-- 用户设置中的 `bgm_mode` / `bgm_token` 写入（关闭时返回 `BANGUMI_SYNC_DISABLED`，HTTP 403）。
-
-**不影响**：个人收藏查看/管理、收藏修改等管理功能。
-
-### 管理开关 `BangumiSync.manage_enabled`
-
-对应后端配置字段 `BangumiManageEnabled`，仅控制管理相关功能：
-
-- 用户 Bangumi 个人页（`GET /api/v1/bangumi/me`），关闭时返回 `bgm_manage_disabled: true`。
-- 收藏列表查看（`GET /api/v1/bangumi/collections`），关闭时返回 `BANGUMI_MANAGE_DISABLED`。
-- 收藏状态/进度/评分修改（`PATCH /api/v1/bangumi/collections/:subject_id`），关闭时返回 `BANGUMI_MANAGE_DISABLED`。
-- 用户设置中 `bgm_manage_mode` 写入（关闭时返回 `BANGUMI_MANAGE_DISABLED`，HTTP 403）。
-
-**不影响**：Webhook、同步触发、同步历史等同步功能。
-
-`config.toml` 示例：
+同步与收藏管理是独立开关，用户还需开启对应个人模式。两项都关闭时，前端显示功能关闭提示。
 
 ```toml
 [BangumiSync]
 enabled = true
 manage_enabled = true
 webhook_secret = "replace-with-random-secret"
+webhook_allow_legacy_token = false
+auto_add_collection = true
+private_collection = true
+min_progress_percent = 85
+block_keywords = []
 ```
 
-`webhook_secret` 对应后端配置字段 `BangumiWebhookSecret`，由 `internal/config/config.go` 读取键 `BangumiSync.webhook_secret`。
-
-> 关于 `auto_add_collection` / `private_collection` / `block_keywords` / `min_progress_percent`：这些键虽然出现在仓库自带的 `config.toml` / `config.production.toml` 的 `[BangumiSync]` 段里，但当前 `internal/config/config.go` **并不读取它们**，后端 `Config` 结构体也没有对应字段，因此它们当前是惰性（无效）配置，不会影响任何行为。
-
-## Bangumi Token 配置
-
-Bangumi 涉及两类 Token，用途不同：
-
-### 全局 Token（求片搜索 / 详情）
-
-全局 Token 仅用于站点级 Bangumi API 请求——即求片功能里用 Bangumi 作为媒体源进行搜索与拉取条目详情（`internal/api/bangumi_client.go` 的 `searchBangumi` / `getBangumi`，由 `internal/api/media_service.go` 调用）。它**不会**作为任何用户点格子的兜底 Token。
-
-```toml
-[Global]
-bangumi_token = ""
-bangumi_api_url = "https://api.bgm.tv/v0"
-bangumi_app_id = ""
-```
-
-对应后端配置字段与读取键：
-
-| 配置键 | 后端字段 | 默认值 | 用途 |
-| --- | --- | --- | --- |
-| `Global.bangumi_token` | `BangumiToken` | 空 | Bangumi 同步链路（`/users/-/collections` 等私有端点）的 `Authorization: Bearer` 凭据；求片搜索 / 详情不使用 |
-| `Global.bangumi_api_url` | `BangumiAPIURL` | `https://api.bgm.tv/v0` | Bangumi API 基址（出站请求受 SSRF 校验约束） |
-| `Global.bangumi_app_id` | `BangumiAppID` | 空 | Bangumi 应用 ID（保留字段） |
-
-> `BangumiAPIURL` 的出站请求与 Emby / Telegram / TMDB 共享 SSRF 否决策略：拒绝 link-local、云元数据 IP、非 http(s) scheme，以及带 query / fragment 的裸基址。
-
-### 用户个人 Token
-
-每个用户可在 Bangumi 仪表盘页面或设置页中填写自己的 Bangumi Access Token，并开启同步开关：
-
-- `bgm_mode`（布尔）：是否开启该用户的 Bangumi 同步。
-- `bgm_token`（字符串）：该用户的 Bangumi Access Token，长度上限 4096 字节，超出返回 `BANGUMI_TOKEN_TOO_LONG`。
-
-后端在 `internal/store/store.go` 中以 `BGMMode` / `BGMToken` 字段保存，写入逻辑在 `internal/api/handlers.go` 的 `handleUpdateMe`：
-
-- 总开关 `BangumiSync.enabled` 关闭时，写入 `bgm_mode` 或 `bgm_token` 一律 403（`BANGUMI_SYNC_DISABLED`）。
-- 开启 `bgm_mode=true` 但既无已存 Token 又未在本次请求带 Token，返回 `BANGUMI_TOKEN_MISSING`，提示先填写个人 Token。
-
-接口对外只回 `bgm_token_set`（是否已配置）和 `bgm_sync_ready`（`bgm_mode && bgm_token != ""`），不回明文 Token。
-
-Token 获取地址：<https://next.bgm.tv/demo/access-token>
-
-## Emby / Jellyfin Webhook 配置
-
-这是 Banugmi 同步的数据来源端配置。你需要让 Emby / Jellyfin 在**播放停止**时向 Twilight 发送 Webhook 通知。
-
-### 第一步：生成随机密钥
-
-```bash
-# 生成一个安全的随机密钥（Linux / macOS）
-openssl rand -hex 32
-
-# 或使用 PowerShell（Windows）
-[Convert]::ToHexString((New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes(32))
-```
-
-将生成的密钥填入 `config.toml`：
-
-```toml
-[BangumiSync]
-webhook_secret = "你生成的随机密钥"
-```
-
-重启 Twilight 后端使配置生效。
-
-### 第二步：在 Emby 中添加 Webhook 通知
-
-1. 打开 Emby 管理后台 → **通知**（Notifications）。
-2. 点击 **+ 添加通知**（Add Notification）。
-3. 通知类型选择 **Webhook**。
-4. 填写以下配置：
-
-| 配置项 | 值 |
-| --- | --- |
-| **Webhook URL** | `https://你的Twilight域名/api/v1/emby/bangumi/webhook` |
-| **Webhook 请求头** | 见下方 |
-| **事件** | 勾选 **播放停止**（Playback Stop） |
-
-**请求头配置（推荐方式）：**
-
-添加自定义请求头：
-
-| 请求头名 | 值 |
-| --- | --- |
-| `X-Twilight-Bangumi-Token` | 你在第一步生成的 `webhook_secret` |
-| `Content-Type` | `application/json` |
-
-截图式参考——Emby Webhook 通知配置示例：
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 名称:        Twilight Bangumi Sync                          │
-│ 通知方式:    Webhook                                         │
-│                                                             │
-│ Webhook URL: https://你的域名/api/v1/emby/bangumi/webhook    │
-│                                                             │
-│ 自定义请求头:                                                │
-│   X-Twilight-Bangumi-Token: your-secret-here                 │
-│   Content-Type: application/json                            │
-│                                                             │
-│ ☑ 播放停止 (Playback Stop)                                   │
-│ ☑ 向所有用户发送                                            │
-│ ☑ 包含项目数据                                              │
-└─────────────────────────────────────────────────────────────┘
-```
-
-> **注意**：必须勾选「包含项目数据」（Send all item properties / Include item data），否则 Emby 发送的 JSON 不包含 `Item.Id`、`Item.SeriesName`、`Item.IndexNumber` 等关键字段，导致同步匹配失败。
-
-### 第三步：在 Jellyfin 中添加 Webhook 通知
-
-Jellyfin 10.9+ 使用插件方式配置 Webhook：
-
-1. 在 Jellyfin 管理后台 → **插件** → **目录**，安装 **Webhook** 插件。
-2. 重启 Jellyfin 后，管理后台 → **插件** → **Webhook** → **添加 Generic Destination**。
-3. 填写以下配置：
-
-| 配置项 | 值 |
-| --- | --- |
-| **Webhook Name** | Twilight Bangumi Sync |
-| **Webhook Url** | `https://你的Twilight域名/api/v1/emby/bangumi/webhook` |
-| **Notification Type** | 勾选 **Playback Stop** |
-| **Request Header** 的 Key | `X-Twilight-Bangumi-Token` |
-| **Request Header** 的 Value | 你在第一步生成的 `webhook_secret` |
-| **Template** | 留空（使用 Jellyfin 默认 JSON 负载） |
-| **Send All Properties** | 开启（`true`） |
-
-### 第四步（可选）：配置 Emby Webhook 插件自动添加时间戳头
-
-如果你使用插件版 Emby Webhook（如 Jellyfin 的 Webhook 插件或 Emby 的第三方 webhook 扩展），可额外配置 `X-Twilight-Bangumi-Timestamp` 请求头为 `{Timestamp}` 或 `{Now}` 模板变量（取决于具体插件），以启用重放窗口校验。Emby 原生 Webhook 不支持动态请求头模板，缺少该头时仅打 Warn 日志、正常处理。
-
-### 第五步：验证 Webhook 是否正常
-
-在 Emby / Jellyfin 中播放任意媒体，等待数秒后**停止播放**。然后检查 Twilight 后端日志，应能看到类似输出：
-
-```
-bangumi webhook playback record stored   uid=123  item_id=abc  title="第 3 话"
-```
-
-或去重日志（同一播放记录重复投递）：
-
-```
-bangumi webhook playback record deduplicated by idempotency key
-```
-
-如果看不到任何日志，请检查：
-
-- Emby / Jellyfin 的 Webhook 通知日志（通常在其管理面板的「通知日志」中可见发送状态与响应码）。
-- 确认 Emby 账号已在 Twilight 中绑定（`FindUserByEmbyID` 能映射到本地账号）。
-- 确认通知事件勾选了「播放停止」并开启了「包含项目数据」。
-
-## Webhook 鉴权
-
-Webhook 路由：
-
-```text
-POST /api/v1/emby/bangumi/webhook
-```
-
-该路由鉴权级别为 `AuthPublic`（免登录），凭据是与 `webhook_secret` 匹配的密钥。鉴权在解析请求体之前完成，未通过鉴权的请求不会读取 body，避免无凭据投递大体积 JSON 触发资源放大。
-
-### 签名模式（推荐）
-
-请求同时携带：
-
-- `X-Twilight-Bangumi-Timestamp`：Unix 秒级时间戳（**必填**）。
-- `X-Twilight-Bangumi-Signature`：`sha256=` + 十六进制的 `HMAC-SHA256(webhook_secret, "<timestamp>.<原始请求体>")`。
-
-服务端先限量读取 body（256KB）再验签，签名覆盖时间戳与整个 body，因此截获的请求无法改写 `UserId` 等字段；时间戳偏差超过 **300 秒** 返回 410，缺失返回 401，非法返回 400；同一签名在窗口内只接受一次，逐字节重放返回 409。Emby / Jellyfin 的 Webhook 插件只能发静态请求头，无法计算签名，需要在两者之间放一个转发脚本（示例）：
-
-```bash
-ts=$(date +%s)
-sig=$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | sed 's/^.* //')
-curl -X POST "https://你的后端域名/api/v1/emby/bangumi/webhook" \
-  -H "Content-Type: application/json" \
-  -H "X-Twilight-Bangumi-Timestamp: $ts" \
-  -H "X-Twilight-Bangumi-Signature: sha256=$sig" \
-  --data-binary "$body"
-```
-
-### 共享 Token 模式（兼容期，已淘汰）
-
-未带签名头时按旧方式校验共享 token，**仅在 `BangumiSync.webhook_allow_legacy_token = true`（默认，兼容期）时接受**，每次命中都会打 Warn 日志：
-
-1. 请求头 `X-Twilight-Bangumi-Token`。
-2. 请求头 `X-Webhook-Token`（兼容别名）。
-3. 查询参数 `?token=`（已淘汰：查询字符串可能被上游代理 / CDN 的 access log 记录）。
-
-密钥与 `BangumiWebhookSecret` 用常量时间比较；为空或不匹配返回 HTTP 403（"Webhook 密钥无效"）。共享 token 只是口令，持有者可以替任意 `UserId` 写观看记录，时间戳也可以自填，因此确认改用签名后请把 `webhook_allow_legacy_token` 设为 `false`，此时旧式请求返回 401。
-
-兼容模式下 `X-Twilight-Bangumi-Timestamp` 仍可选：带了就按 300 秒窗口校验（过期 410、非法 400），不带则回落到服务器时间。
-
-### 幂等去重（uid, item_id, played_at）
-
-观看记录写入走 `AddPlaybackRecordIdempotent`（`internal/store/playback.go`），以 `(UID, ItemID, PlayedAt)` 三元组作为幂等键：当三者均非空且已存在相同记录时，跳过写入并返回 `inserted=false`，Webhook 会打 Info 日志"deduplicated by idempotency key"。
-
-- `PlayedAt` 优先取自 `X-Twilight-Bangumi-Timestamp`，因此同一份字节重放会命中相同 `PlayedAt`，即便落在重放窗口内、甚至同一秒内重放，也会被幂等键挡住，避免观看记录无限堆积。
-- 缺少时间戳头的兼容路径才回落到 `time.Now()`。
-- 这是"重放窗口 + 幂等键"的双层防御：窗口拦窗口外的重放，幂等键兜底窗口内 / 同字节重放。
-
-> `ItemID` 为空的记录（例如管理员手动注入的测试事件）不参与幂等检查，允许重复写入。
-
-## Emby / Jellyfin 通知负载与记录字段
-
-Webhook 期望接收 JSON 通知。后端从负载中按以下规则解析：
-
-- 事件名取自 `Event` / `NotificationType` / `Name` 任一字段（小写后匹配）。
-- 当存在 `Item` 且满足以下任一条件时才会落库：事件名包含 `stop` 或 `played`，或负载带有 `PlaybackPositionTicks` 字段。
-- 用户 ID 依次尝试 `UserId` / `UserID` → `User.Id` / `User.ID` → `Session.UserId` / `Session.UserID`，再用 `FindUserByEmbyID` 映射到本地账号；映射不到则不落库（HTTP 仍返回 accepted）。
-
-落库的观看记录字段来源：
-
-| 记录字段 | 来源 | 用途 |
+| 键 | 缺省值 | 行为 |
 | --- | --- | --- |
-| `UID` | 由 Emby 用户 ID 映射出的本地账号 UID | 归属用户标识 |
-| `ItemID` | `Item.Id` / `Item.ID` | 幂等去重键、同步日志关联 |
-| `Title` | `Item.Name`，回退 `Item.SeriesName` | 条目搜索查询 |
-| `SeriesName` | `Item.SeriesName` | Bangumi 搜索匹配（优先于 Title） |
-| `MediaType` | `Item.Type` | 条目类型标识 |
-| `IndexNumber` | `Item.IndexNumber` | Bangumi 剧集编号（标记第几话看过） |
-| `Duration`（秒） | `PlaybackPositionTicks / 1e7`，为 0 时回退 `Item.RunTimeTicks / 1e7` | 观看进度统计 |
-| `PlayedAt` | `X-Twilight-Bangumi-Timestamp`，缺失时为 `time.Now()` | 幂等去重键、时间排序 |
+| `enabled` | `false` | Webhook、观看记录 API、同步与日志功能 |
+| `manage_enabled` | `false` | 收藏查看和修改 |
+| `auto_add_collection` | `true` | 同步时创建尚未收藏的条目；关闭时要求用户先收藏，再重试 |
+| `private_collection` | `true` | 仅控制自动新建收藏的私密状态，保留已有收藏的隐私设置 |
+| `min_progress_percent` | `85` | 播放位置达到总片长的此百分比才视为看完；范围 1–100，非法值回退 85 |
+| `block_keywords` | `[]` | 标题或剧集名包含关键词时忽略，不区分大小写 |
+| `webhook_secret` | 空 | 为空时拒绝 Webhook |
+| `webhook_allow_legacy_token` | `true` | 兼容旧共享 Token 鉴权；推荐完成签名接入后关闭 |
 
-通知负载示例：
+**升级注意：** `auto_add_collection`、`private_collection`、`min_progress_percent`、`block_keywords` 以前只是示例配置，现在真正参与执行。仓库生产示例原有 `min_progress_percent = 80`，保留该值的部署会按 80% 判断完成；不是统一改成 85%。
 
-```json
-{
-  "Event": "playback.stop",
-  "User": { "Id": "emby-user-id", "Name": "embyname" },
-  "Item": {
-    "Type": "Episode",
-    "Id": "12345",
-    "Name": "第 3 话",
-    "SeriesName": "番剧名",
-    "IndexNumber": 3,
-    "RunTimeTicks": 14400000000
-  }
-}
-```
+用户字段：`bgm_mode` 控制同步，`bgm_manage_mode` 控制收藏管理，`bgm_token` 是该用户自己的 Token。全局 `Global.bangumi_token` 不作为个人同步的兜底凭据。`Global.bangumi_api_url` 默认 `https://api.bgm.tv/v0`。
 
-无论是否成功落库，鉴权与重放校验通过后接口都会返回成功 envelope，`data` 形如：
+## Webhook 接入
 
-```json
-{ "accepted": true, "subject_name": "番剧名", "episode": 3 }
-```
+在 Emby / Jellyfin 插件中选择播放停止（Playback Stop）事件，发送 JSON，并保证媒体用户 ID 对应本地账号绑定的 Emby ID。Twilight 接收以下两种结构：
 
-## 同步到 Bangumi（点格子）
+- Emby 嵌套结构：`UserId`，`Item.Id`、`Item.Name`、`Item.Type`、`Item.SeriesName`、`Item.IndexNumber`、`Item.ParentIndexNumber`、`Item.RunTimeTicks`，以及顶层 `PlaybackPositionTicks`。
+- Jellyfin 官方 Webhook 平铺结构：`UserId`、`ItemId`、`ItemType`、`Name`、`SeriesName`、`EpisodeNumber`、`SeasonNumber`、`RunTimeTicks`、`PlaybackPositionTicks`、`PlayedToCompletion`。
 
-### 同步流程
+媒体类型支持 `Episode` 和 `Movie`；Ticks 每秒 10000000。缺少播放位置时不会拿总片长补齐。布尔值 `PlayedToCompletion: true` 也可作为完成证据；字符串 `"true"` 不接受。
 
-当用户或管理员触发同步时，后端 `syncBangumiForUser`（`internal/api/bangumi_sync_service.go`）执行以下流程：
+### 推荐：签名鉴权
 
-1. **读取用户状态**：检查 `BGMMode` 与 `BGMToken`，不满足则跳过。
-2. **获取未同步记录**：读取用户所有 `PlaybackRecord`，排除已在 `BangumiSyncLog` 中标记为 `success` 的条目。
-3. **逐条同步**（每步均检查 context 取消以确保可中断）：
-   - **搜索匹配**：以 `SeriesName`（回退 `Title`）在 Bangumi 搜索 `/search/subjects`，取第一条匹配结果。
-   - **添加收藏**：对匹配到的 `subject_id` 调用 `POST /users/-/collections/{subject_id}`，`type=3`（看过），如已在收藏中（400/409）不视为错误。
-   - **标记剧集**：若 `IndexNumber > 0`，调用 `POST /users/-/collections/{subject_id}/episodes`，`type=2`（看过）标记该剧集。
-   - **写入日志**：成功 / 失败均写入 `BangumiSyncLog`，成功记录含 `SubjectID`、`SubjectName`、`Episode`。
+签名发送端或中间转发器应设置：
 
-4. **返回摘要**：`synced` / `skipped` / `failed` 三计数 + 详细 `logs`。
+- `Content-Type: application/json`
+- `X-Twilight-Bangumi-Timestamp: <Unix 秒数>`
+- `X-Twilight-Bangumi-Signature: sha256=<十六进制 HMAC-SHA256>`
 
-### 触发方式
+HMAC 密钥是 `webhook_secret`，消息是 `timestamp + "." + 原始请求体字节`。时间允许偏差 ±300 秒；重复签名会被拒绝。发送端必须对实际发送的字节签名，不能在签名后重新序列化 JSON。
 
-| 触发方式 | 接口 | 鉴权 |
+不支持动态签名的插件可在兼容开关开启时使用 `X-Twilight-Bangumi-Token` 头；这种方式没有签名的防篡改、防重放能力。不要把密钥放在 URL 查询参数中。此次功能不改变既有鉴权策略或 CORS／CSRF。
+
+### 持久化与完成证据
+
+记录按 `(uid, item_id, played_at)` 幂等写入。用户观看状态另存于 `User.BangumiWatch`，完成证据只会从未完成变成已完成。收到已看完事件后，原先因缺少完成证据而待确认的记录可再次自动尝试。
+
+媒体库重命名或更换媒体 ID 可能形成新的本地记录；仍需检查其对应条目。播放停止的位置比例不等于连续观看时长，跳播到结尾也可能达到比例阈值。
+
+## 同步规则
+
+- 先用个人 Token 验证 Bangumi 账号，再读取最近最多 5000 条本地播放记录并按媒体去重。
+- 每用户每轮最多尝试 25 个项目、最长 60 秒；按上次尝试时间轮转，避免较旧的待处理记录被较新的成功记录挡住。
+- 搜索名称经大小写和标点归一化后必须唯一匹配。无匹配、同名多条目、第二季及以后或缺少集数时，转为待确认，不猜测条目。
+- 剧集只标记这次实际观看的那一集，不补齐前面的集数，不把已有「看过」收藏降级成「在看」。已有短评、标签、评分和私密状态保留。
+- 电影确认完成后将对应收藏标为「看过」。
+- 未收藏条目按 `auto_add_collection` 决定是否新建；新建剧集为「在看」，电影为「看过」。
+- API 与调度进程使用同一 PostgreSQL 用户级锁；收藏编辑也使用此锁，避免与同步同时写入。
+- 超时、网络失败、权限错误和限流不会记为成功。未完成项目可重试；待确认或忽略的项目不会在每轮自动重复尝试。
+
+### 日志、检查点与换 Token
+
+成功检查点与可清理的同步日志独立。检查点按已验证的 Bangumi 账号 ID 隔离：
+
+- 同一账号换 Token 后沿用既有成功状态。
+- 换到另一个账号后使用该账号的同步状态，保留之前账号的历史。
+- 清除同步日志不清除检查点，也不重置同步进度。
+- 每用户最多 20000 项证据和检查点；达到上限时拒绝新增并返回错误，不自动删除历史。
+
+远端 API 与本地数据库没有跨系统事务；如果远端已成功而本地保存失败，可能再次提交同一集的「看过」状态。手动收藏编辑也可能只完成部分请求，此时返回失败，需刷新核对后再试。
+
+## 用户界面与 API
+
+首页使用一次摘要读取，显示账号、同步概况、五类收藏入口和近期同步日志。「观看记录」分页并支持状态筛选、确认条目/集数、忽略和重试。收藏页支持服务器分页、当前页名称或个人标签筛选、排序、列表/卡片展示。
+
+| 方法 | V2 路径 | 功能 |
 | --- | --- | --- |
-| 用户手动触发 | `POST /api/v1/bangumi/sync/trigger` | `AuthUser` |
-| 管理员触发单个用户 | `POST /api/v1/admin/bangumi/sync/:uid` | `AuthAdmin` |
+| GET | `/api/v2/bangumi/summary` | 本地同步状态、公开账号信息和收藏摘要；不返回 Token |
+| GET | `/api/v2/bangumi/records` | 本人记录，`page`、`per_page`（1–50）、`status` 筛选 |
+| PUT | `/api/v2/bangumi/records/{key}` | 本人记录 `confirm` / `ignore` / `retry`；确认需 `subject_id`、整数 `episode` |
+| POST | `/api/v2/bangumi/sync` | 手动同步，返回 `synced`、`skipped`、`failed`；HTTP 成功不代表所有项目成功 |
+| DELETE | `/api/v2/bangumi/sync/history` | 清除本人同步日志，保留检查点 |
+| GET | `/api/v2/bangumi/collections` | 按收藏类型分页；`refresh=1` 跳过正常缓存 |
+| PATCH | `/api/v2/bangumi/collections/{subject_id}` | 状态、进度、评分、短评、标签、私密设置 |
 
-> 同步超时默认 5 分钟（管理员触发时 `context.WithTimeout` 5min），用户触发沿用请求 context。
+收藏修改：`type` 为整数 1–5，`rate` 为整数 0–10，`comment` 最多 1000 字，`tags` 最多 10 个无空白标签、每个最多 30 字，`private` 必须为 JSON 布尔值。空短评或空标签数组可清除对应值。
 
-### 同步日志
+手动设为「看过」（type 2）表示整部完成，后端查询本篇章节并标记全篇，忽略客户端 `ep_status`。手动「在看」（type 3）的 `ep_status` 表示看到第几集；降低它会取消后续本篇集数的看过状态。这与自动同步仅标记单集的语义不同。
 
-同步日志以 `BangumiSyncLog` 实体持久化（`internal/store/store.go`），最多保留 1000 条，超出自动裁剪。日志字段：
+前端读取可取消过期请求，弹窗与记录区域有手机/Firefox 滚动边界；操作失败保留编辑内容，刷新后显示服务端实际状态。
 
-| 字段 | 说明 |
-| --- | --- |
-| `ID` | 自增 ID |
-| `UID` | 用户 UID |
-| `RecordItemID` | 关联的播放记录 `ItemID` |
-| `SubjectID` | 匹配到的 Bangumi 条目 ID |
-| `SubjectName` | 匹配到的 Bangumi 条目标题 |
-| `Episode` | 标记的剧集编号 |
-| `Status` | `success` / `failed` / `skipped` |
-| `Message` | 结果描述 |
-| `CreatedAt` | 同步时间（Unix 秒） |
+## 维护与验证
 
-用户可查看自己的最近 50 条同步日志，管理员可查看任意用户的最近 100 条日志。用户和管理员均可清除同步日志。
+主要代码：`bangumi_webhook.go`（采集）、`bangumi_sync_service.go`（同步）、`bangumi_watch_handlers.go`（记录与任务）、`bangumi_sync_handlers.go`（收藏）、`internal/store/bangumi_watch.go`（状态与锁）。前端为 `webui/src/app/(main)/bangumi` 与 `bangumi-watch-records.tsx`。
 
-## 观看记录的去向
+回归覆盖完成比例、Emby/Jellyfin 结构、只标记单集、同名歧义、Token 更换、清日志去重、跨进程锁、失败重试、记录归属、收藏字段和排程用户筛选。使用独立 PostgreSQL，按开发指南设置两个测试数据库环境变量后运行 `go test -p 1 ./...`。
 
-成功落库的 `PlaybackRecord` 进入单一状态文档（`internal/store`）的 `PlaybackRecords` 列表，最多保留 5000 条（超出按时间裁剪）。这些记录用于：
-
-- **Bangumi 同步**：同步服务读取未同步记录，调用 Bangumi API 点格子。
-- Telegram Bot 的个人观看汇总。
-
-## 收藏管理与缓存
-
-收藏查看与修改由 `BangumiSync.manage_enabled` 控制。后端通过用户个人 Token 访问 Bangumi `/users/-/collections`，并在本地维护两层持久化缓存，减少重复外部请求和 state 体积：
-
-| 缓存 | Key | 内容 | 作用域 |
-| --- | --- | --- | --- |
-| `BangumiSubjectCache` | Bangumi `subject_id`（BGMID） | 作品详情 `subject`（标题、图片、评分、标签等） | 全局共享 |
-| `BangumiCollectionCache` | `uid:type` | 用户收藏态字段（`subject_id`、收藏 `type`、`ep_status`、`rate` 等） | 单用户单收藏类型 |
-
-写入缓存时，`UpsertBangumiCollectionCache` 会把 Bangumi API 返回条目中的 `subject` 抽入全局 `BangumiSubjectCache`，用户收藏 `Entries` 只保存 `subject_id` 和用户态字段。读取缓存时，`BangumiCollectionCache()` 再按 `subject_id` 回填作品详情，因此 API 响应仍保持前端需要的完整 `entries[].subject` 结构。这样不同用户收藏同一作品时只保存一份作品详情，避免重复存封面、评分、标签等大对象。
-
-### 缓存 TTL 与刷新
-
-- TTL：`bangumiCollectionCacheTTLSeconds = 3600` 秒。
-- 容量：全局 `BangumiSubjectCache` 上限 `maxBangumiSubjectCacheEntries = 5000`，超出后按 `UpdatedAt` 淘汰最旧作品。
-- 后台任务：`refresh_bangumi_collections` 每小时为开启 `BGMManageMode` 且配置个人 Token 的用户刷新 `想看(type=1)`、`看过(type=2)`、`在看(type=3)` 三类缓存。
-- 手动刷新：`GET /api/v1/bangumi/collections?refresh=1` 绕过用户收藏缓存，直接拉取 Bangumi 并重建缓存。
-- 降级行为：实时拉取 Bangumi 失败时，如果已有缓存能覆盖请求范围，接口会返回旧缓存并标记 `cached=true`，避免收藏页完全不可用。
-
-### 缓存失效
-
-- `PATCH /api/v1/bangumi/collections/:subject_id` 修改收藏后，会删除该用户所有 `BangumiCollectionCache`，下一次读取重新拉取。
-- 用户修改或清空个人 `bgm_token` 后，会删除该用户所有 `BangumiCollectionCache`，避免新 Token 继续读取旧账号收藏索引。
-- 删除用户时会清理该用户 `BangumiCollectionCache`；全局 `BangumiSubjectCache` 不随用户删除，因为其他用户可能仍引用同一作品。
-- 旧版 state 如果已经存了“用户缓存内嵌 subject”的条目，`State.ensure()` 会在加载时迁移到全局作品缓存，后续保存会落成新结构。
-
-## 前端页面
-
-### 用户端：Bangumi 页面
-
-`webui/`（Next.js）是唯一产品前端，页面位于 `/bangumi` 与 Bangumi 收藏分类视图。仪表盘首屏只请求一次 `/api/v2/bangumi/summary`，由后端返回本地同步状态、公开 Bangumi 账号字段、五个收藏分类的总数和每类最多 8 条预览；收藏分类走服务端分页读，不把完整收藏列表复制到浏览器。
-
-同步、清理历史、Token 与开关修改都通过 `/api/v2/bangumi/*` 提交。响应不会包含 Bangumi Token。收藏分类在后端独立读取，单类失败只标记 `collections_partial`，不影响其他分类和本地同步状态。
-
-### 用户端：Bangumi 仪表盘
-
-路径：`/bangumi`
-
-功能：
-
-- **同步状态卡片**：四格统计（总记录数 / 已同步数 / 就绪状态 / Token 配置状态）。
-- **同步操作**：「开始同步」按钮手动触发同步；「清除历史」按钮清除同步日志。
-- **Bangumi 设置**：开启/关闭同步开关；开启/关闭管理功能开关；填写 / 清除个人 Access Token。
-- **同步历史**：最近 50 条同步日志，含状态图标（成功/失败/跳过）、匹配的 Bangumi 条目名、时间。
-- **个人收藏视图**（需开启管理功能）：显示 Bangumi 账号关联信息（头像、昵称、签名）、在看/想看/看过三列精选卡片（每类 8 条）。
-  - 卡片显示：封面、标题、进度话数、评分（StarRating 组件）。
-  - 「进度/状态」按钮打开编辑对话框，支持修改：观看状态（想看/看过/在看）、观看进度（话数）、评分（0-10 点选）。
-  - 「查看全部」跳转到 `/bangumi/collections/[type]` 独立分页页浏览该分类所有条目，并支持手动刷新绕过缓存。
-  - 每张卡片底部显示 Bangumi 详情链接，点击跳转 Bangumi 条目页。
-
-### 管理员端：Bangumi 管理
-
-路径：`/admin/bangumi`
-
-管理员用户列表按页查询（默认每页 20 条，后端最多接受 100 条），搜索和分页不会把全部用户复制到浏览器。WebUI 使用 URL 状态和 `/api/v2/admin/bangumi/users` 资源，播放记录与同步日志只在打开指定 UID 的详情时通过 `/records`、`/logs` 读取；后台页面的长内容使用受限 `dvh` Firefox 滚动区域，移动端用户操作会自动换行。V1 资源仅保留给外部兼容调用与 `NEXT_PUBLIC_USE_V1_COMPAT` 回退。
-
-管理员用户列表的播放记录数和最近 100 条同步日志成功数由 Store 批量读取：PostgreSQL 使用一次 `GROUP BY` 统计，兼容回退路径只扫描一次有限的本地记录。页面分页、搜索和状态字段的语义不变，不会为当前页每个用户重复查询播放记录或同步日志。
-
-功能：
-
-- **用户列表**（分页展示，默认每页 20 条，支持搜索用户名/UID 和上下翻页）：所有用户及其 Bangumi 同步状态（同步开关 / 管理开关 / Token 配置 / 就绪 / 播放记录数 / 已同步数）。
-- **逐用户操作**：
-  - 「播放记录」按钮：弹窗查看该用户的播放记录列表，已同步条目标注匹配的 Bangumi 条目名。
-  - 「同步日志」按钮：弹窗查看该用户的同步历史。
-  - 「同步」按钮：为该用户手动触发一次同步。
-  - 删除按钮：清除该用户的同步日志。
-
-## 求片中的 Bangumi 数据源
-
-求片搜索可使用 Bangumi 作为媒体源：
-
-- 路由 `GET /api/v1/media/search/bangumi`（`AuthUser`）与 `GET /api/v1/media/bangumi/:bgm_id`（`AuthUser`）。
-- 搜索请求 `POST {BangumiAPIURL}/search/subjects`，`filter.type` 取 `[2, 6]`（动画 / 三次元），允许 NSFW，按 `match` 排序。
-- 详情请求 `GET {BangumiAPIURL}/subjects/{id}`，`id` 必须为正整数。
-- 搜索与详情为无需鉴权的公开端点，不带任何 `Authorization`（见下方「求片搜索与 Token」）；`Global.bangumi_token` 仅供同步链路访问 `/users/-/collections` 等私有端点时使用。
-
-返回结果被规整为统一媒体结构，包含标题（优先 `name_cn`）、海报、类型（书籍 / 动画 / 音乐 / 游戏 / 三次元）、简介、首播日期、评分、标签等。
-
-## API 路由索引
-
-### 用户端
-
-| 方法 | 路径 | 鉴权 | 说明 |
-| --- | --- | --- | --- |
-| `GET` | `/api/v1/bangumi/sync/status` | `AuthUser` | 获取当前用户的同步状态与最近日志 |
-| `POST` | `/api/v1/bangumi/sync/trigger` | `AuthUser` | 手动触发一次同步 |
-| `GET` | `/api/v1/bangumi/sync/history` | `AuthUser` | 获取同步历史日志（`?limit=`） |
-| `DELETE` | `/api/v1/bangumi/sync/history` | `AuthUser` | 清除当前用户的同步历史 |
-| `GET` | `/api/v1/bangumi/me` | `AuthUser` | 获取 Bangumi 用户资料 + 在看/想看/看过精选（各 8 条） |
-| `GET` | `/api/v1/bangumi/collections` | `AuthUser` | 分页获取 Bangumi 收藏列表（`?type=&limit=&offset=&refresh=1`，响应含 `cached` / `cache_updated_at`） |
-| `PATCH` | `/api/v1/bangumi/collections/:subject_id` | `AuthUser` | 修改收藏状态/进度/评分（优先 PATCH，404 时回退 POST） |
-
-### 管理员端
-
-| 方法 | 路径 | 鉴权 | 说明 |
-| --- | --- | --- | --- |
-| `GET` | `/api/v2/admin/bangumi/users` | `AuthAdmin` | V2 分页列出用户的 Bangumi 同步状态 |
-| `GET` | `/api/v2/admin/bangumi/users/:uid/records` | `AuthAdmin` | V2 按 UID 查看有界播放记录 |
-| `POST` | `/api/v2/admin/bangumi/users/:uid/sync` | `AuthAdmin` | V2 为指定用户触发同步 |
-| `GET` | `/api/v2/admin/bangumi/users/:uid/logs` | `AuthAdmin` | V2 按 UID 查看有界同步日志 |
-| `DELETE` | `/api/v2/admin/bangumi/users/:uid/logs` | `AuthAdmin` | V2 清除指定用户同步日志 |
-| `GET` | `/api/v1/admin/bangumi/users` | `AuthAdmin` | V1 兼容：列出所有用户的 Bangumi 同步状态 |
-| `GET` | `/api/v1/admin/bangumi/records/:uid` | `AuthAdmin` | 查看某用户的播放记录（`?limit=`） |
-| `POST` | `/api/v1/admin/bangumi/sync/:uid` | `AuthAdmin` | 为某用户触发同步 |
-| `GET` | `/api/v1/admin/bangumi/logs/:uid` | `AuthAdmin` | 查看某用户的同步日志（`?limit=`） |
-| `DELETE` | `/api/v1/admin/bangumi/logs/:uid` | `AuthAdmin` | 清除某用户的同步日志 |
-
-### Webhook（公开）
-
-| 方法 | 路径 | 鉴权 | 说明 |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/emby/bangumi/webhook` | `AuthPublic` | 接收 Emby/Jellyfin 播放通知 |
-
-## 错误码
-
-| 错误码 | HTTP | 触发场景 |
-| --- | --- | --- |
-| `BANGUMI_SYNC_DISABLED` | 400 / 403 | 同步开关未开启（Webhook / 触发同步 / 同步历史 / 写入同步设置） |
-| `BANGUMI_MANAGE_DISABLED` | 400 / 403 | 管理开关未开启（收藏查看 / 收藏修改 / 写入管理设置） |
-| `UNAUTHORIZED` | 403 | Webhook 密钥为空或不匹配 |
-| `UNAUTHORIZED` | 410 | 时间戳超出重放窗口（"Webhook 请求已过期"） |
-| `UNAUTHORIZED` | 400 | 时间戳非法（"Webhook timestamp 非法"） |
-| `BANGUMI_TOKEN_TOO_LONG` | 400 | 个人 `bgm_token` 超过 4096 字节 |
-| `BANGUMI_TOKEN_MISSING` | 400 | 开启 `bgm_mode` 或触发同步但未提供个人 Token |
-
-### 收藏管理约束
-
-Bangumi API 对 `ep_status`（完成度）的修改有限制：**只能用于修改书籍类条目（subject_type=1）的完成度**。对于动画/剧集（subject_type=2）修改 `ep_status` 会返回 400。因此：
-
-- 后端 `updateBangumiCollection` 仅当 `ep_status > 0` 时才将其包含在请求体中。
-- 前端编辑对话框在切换收藏类型为非「在看」（type=3）或「看过」（type=2）时自动将 `ep_status` 置为 0 并阻止发送。
-- 如需修改动画/剧集的剧集进度，请直接使用 Bangumi 网站操作。
-
-### 收藏修改请求处理
-
-`PATCH /api/v1/bangumi/collections/:subject_id` 处理流程：
-
-1. 先尝试 `PATCH /v0/users/-/collections/{subject_id}`（修改已有收藏）。
-2. 若收到 404（条目未收藏），回退 `POST /v0/users/-/collections/{subject_id}`（新建收藏）。
-3. `ep_status` 仅当 > 0 时才包含在请求体中（适配 Bangumi API 约束）。
-4. 请求体固定包含 `type`（收藏类型）和 `rate`（评分）。
-
-## 排错
-
-### Webhook 端
-
-- Webhook 返回"Bangumi 同步未启用"：检查 `BangumiSync.enabled=true`。
-- Webhook 返回"Webhook 密钥无效"（403）：检查请求头 `X-Twilight-Bangumi-Token`（或兼容的 `X-Webhook-Token` / `?token=`）是否与 `webhook_secret` 一致。
-- Webhook 返回"Webhook 请求已过期"（410）：检查 Emby 与后端时钟是否同步，必要时校准 NTP；偏差需在 300 秒内。
-- Webhook 返回"Webhook timestamp 非法"（400）：`X-Twilight-Bangumi-Timestamp` 必须是 Unix 秒级整数。
-- 日志出现"仍在使用 ?token= 查询参数"Warn：把密钥从 URL 迁移到请求头。
-- 日志出现"deduplicated by idempotency key"Info：同一 `(uid, item_id, played_at)` 被重复投递，属正常去重，不是错误。
-- 接口返回成功但未生成观看记录：确认该 Emby 账号已在 Twilight 中绑定（`FindUserByEmbyID` 能映射到本地账号），且事件名 / 字段满足落库条件。同时确认 Emby Webhook 通知开启了「包含项目数据」。
-- 记录中缺少 `SeriesName` / `IndexNumber`：检查 Emby/Jellyfin Webhook 配置中是否开启了「发送所有属性 / Include item data」，未开启会导致 JSON 负载缺少这些关键字段，影响同步匹配精度。
-
-### 同步端
-
-- 用户设置写 `bgm_mode` / `bgm_token` 报 403：先开启 `BangumiSync.enabled`。
-- 启用同步报 `BANGUMI_TOKEN_MISSING`：先填写个人 Token 再开启 `bgm_mode`。
-- 同步时大量 `failed`（匹配失败）：检查用户 Token 是否有效（可在 Bangumi 个人设置中重新获取）。匹配依赖 `SeriesName` 命中率，若 Emby 中条目名与 Bangumi 差异大（如译名不一致），可能导致匹配失败。当前使用 Bangumi `/search/subjects` 取第一条结果，精度有限。
-- 同步成功但 Bangumi 上没有标记：确认 Bangumi Access Token 是否过期；确认 Bangumi API 是否可达（`Global.bangumi_api_url`）。
-
-## 相对文档
-
-- 安全机制（CORS、SSRF、鉴权级别）：[../guides/security.md](../guides/security.md)
-- 后端架构与配置项：[../reference/backend.md](../reference/backend.md)
-- API 路由索引：[../reference/api-index.md](../reference/api-index.md)
-- 求片功能相关 API：[../reference/backend-api.md](../reference/backend-api.md)
+接口依据：[Bangumi 官方 OpenAPI](https://github.com/bangumi/server/blob/master/openapi/v0.yaml)、[Jellyfin 官方 Webhook 插件](https://github.com/jellyfin/jellyfin-plugin-webhook)。

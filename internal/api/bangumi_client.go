@@ -352,7 +352,7 @@ func (a *App) bangumiUserHeaders(token string) map[string]string {
 	}
 }
 
-func (a *App) updateBangumiCollection(ctx context.Context, subjectID string, token string, collectType int, rate int, hasRate bool) error {
+func (a *App) updateBangumiCollection(ctx context.Context, subjectID string, token string, collectType int, rate int, hasRate bool, extras ...map[string]any) error {
 	endpoint, err := bangumiEndpoint(a.cfg().BangumiAPIURL, "/users/-/collections/"+subjectID, nil)
 	if err != nil {
 		return err
@@ -362,6 +362,11 @@ func (a *App) updateBangumiCollection(ctx context.Context, subjectID string, tok
 	}
 	if hasRate {
 		body["rate"] = rate
+	}
+	for _, extra := range extras {
+		for key, value := range extra {
+			body[key] = value
+		}
 	}
 	headers := a.bangumiUserHeaders(token)
 	var result map[string]any
@@ -383,6 +388,19 @@ func (a *App) updateBangumiEpisodeProgress(ctx context.Context, subjectID string
 	if err != nil {
 		return err
 	}
+	currentDone, err := a.bangumiDoneEpisodeIDSet(ctx, subjectID, token)
+	if err != nil {
+		return err
+	}
+	maxEpisode := 0
+	for _, ep := range episodes {
+		if ep.Number > maxEpisode {
+			maxEpisode = ep.Number
+		}
+	}
+	if epStatus > maxEpisode {
+		return fmt.Errorf("观看进度超出章节范围")
+	}
 	watchedIDs := bangumiEpisodeIDsThrough(episodes, epStatus)
 	if epStatus > 0 && len(watchedIDs) == 0 {
 		return fmt.Errorf("未找到 Bangumi 第 %d 话以内的本篇章节", epStatus)
@@ -391,10 +409,6 @@ func (a *App) updateBangumiEpisodeProgress(ctx context.Context, subjectID string
 		if err := a.patchBangumiEpisodes(ctx, subjectID, token, watchedIDs, 2); err != nil {
 			return err
 		}
-	}
-	currentDone, err := a.bangumiDoneEpisodeIDSet(ctx, subjectID, token)
-	if err != nil {
-		return err
 	}
 	clearIDs := make([]int, 0)
 	for _, episode := range episodes {
@@ -461,6 +475,9 @@ func (a *App) bangumiEpisodes(ctx context.Context, subjectID string, token strin
 	const pageLimit = 200
 	episodes := make([]bangumiEpisodeRef, 0)
 	for offset := 0; ; offset += pageLimit {
+		if offset >= 5000 {
+			return nil, fmt.Errorf("Bangumi 章节超过读取上限")
+		}
 		values := url.Values{
 			"subject_id": {subjectID},
 			"type":       {"0"},
@@ -481,9 +498,20 @@ func (a *App) bangumiEpisodes(ctx context.Context, subjectID string, token strin
 			if item == nil {
 				continue
 			}
-			episodeNumber := int(numeric(item["ep"]))
+			rawEpisode, ok := item["ep"].(float64)
+			if !ok {
+				rawEpisode = float64(numeric(item["ep"]))
+			}
+			if rawEpisode != float64(int(rawEpisode)) {
+				continue
+			}
+			episodeNumber := int(rawEpisode)
 			if episodeNumber <= 0 {
-				episodeNumber = int(numeric(item["sort"]))
+				var valid bool
+				episodeNumber, valid = strictBangumiInt(item["sort"], 1, 10000)
+				if !valid {
+					continue
+				}
 			}
 			id := int(numeric(item["id"]))
 			if id > 0 && episodeNumber > 0 {
@@ -509,31 +537,33 @@ func bangumiEpisodeIDsThrough(episodes []bangumiEpisodeRef, epStatus int) []int 
 }
 
 func (a *App) bangumiDoneEpisodeIDSet(ctx context.Context, subjectID string, token string) (map[int]bool, error) {
-	values := url.Values{
-		"episode_type": {"0"},
-		"limit":        {"1000"},
-		"offset":       {"0"},
-	}
-	endpoint, err := bangumiEndpoint(a.cfg().BangumiAPIURL, "/users/-/collections/"+subjectID+"/episodes", values)
-	if err != nil {
-		return nil, err
-	}
-	var payload map[string]any
-	if err := getJSON(ctx, endpoint, a.bangumiUserHeaders(token), &payload); err != nil {
-		return nil, err
-	}
-	rows, _ := payload["data"].([]any)
-	out := make(map[int]bool, len(rows))
-	for _, row := range rows {
-		item, _ := row.(map[string]any)
-		if item == nil || int(numeric(item["type"])) != 2 {
-			continue
+	out := map[int]bool{}
+	for offset := 0; offset < 5000; offset += 200 {
+		values := url.Values{"episode_type": {"0"}, "limit": {"200"}, "offset": {strconv.Itoa(offset)}}
+		endpoint, err := bangumiEndpoint(a.cfg().BangumiAPIURL, "/users/-/collections/"+subjectID+"/episodes", values)
+		if err != nil {
+			return nil, err
 		}
-		episode, _ := item["episode"].(map[string]any)
-		id := int(numeric(episode["id"]))
-		if id > 0 {
-			out[id] = true
+		var payload map[string]any
+		if err := getJSON(ctx, endpoint, a.bangumiUserHeaders(token), &payload); err != nil {
+			return nil, err
+		}
+		rows, _ := payload["data"].([]any)
+		for _, row := range rows {
+			item, _ := row.(map[string]any)
+			if item == nil || int(numeric(item["type"])) != 2 {
+				continue
+			}
+			ep, _ := item["episode"].(map[string]any)
+			id := int(numeric(ep["id"]))
+			if id > 0 {
+				out[id] = true
+			}
+		}
+		total := int(numeric(payload["total"]))
+		if len(rows) < 200 || (total > 0 && offset+len(rows) >= total) {
+			return out, nil
 		}
 	}
-	return out, nil
+	return nil, fmt.Errorf("Bangumi 章节超过读取上限")
 }
