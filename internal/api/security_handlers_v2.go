@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"strings"
+
+	"github.com/prejudice-studio/twilight/internal/store"
 )
 
 func (a *App) handleV2UserDevices(w http.ResponseWriter, r *http.Request, params Params) {
@@ -25,12 +27,11 @@ func (a *App) handleV2BlockDevice(w http.ResponseWriter, r *http.Request, params
 	if written {
 		return
 	}
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
-	if err := a.security().blockDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().blockDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "block_device", "admin", uid, map[string]any{"device_id": deviceID})
@@ -39,9 +40,8 @@ func (a *App) handleV2BlockDevice(w http.ResponseWriter, r *http.Request, params
 
 func (a *App) handleV2TrustDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	if err := a.security().trustDevice(uid, deviceID); statusFromError(w, err) {
@@ -53,12 +53,11 @@ func (a *App) handleV2TrustDevice(w http.ResponseWriter, r *http.Request, params
 
 func (a *App) handleV2DeleteDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
-	if err := a.security().deleteDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().deleteDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "delete_device", "user", uid, map[string]any{"device_id": deviceID})
@@ -93,6 +92,12 @@ func (a *App) handleV2AddIPBlacklist(w http.ResponseWriter, r *http.Request, _ P
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
 	}
+	normalizedIP, validIP := store.NormalizeIPBlacklistEntry(ip)
+	if !validIP {
+		failWithCode(w, http.StatusBadRequest, ErrIPInvalid, "IP 或 CIDR 格式无效")
+		return
+	}
+	ip = normalizedIP
 
 	const maxBlacklistHours = 24 * 365 * 10
 	hours := intValue(payload, "hours", -1)
@@ -106,15 +111,12 @@ func (a *App) handleV2AddIPBlacklist(w http.ResponseWriter, r *http.Request, _ P
 	}
 
 	reason := stringValue(payload, "reason")
-	if err := a.security().addIPBlacklist(ip, reason, hours); statusFromError(w, err) {
+	expireAt, err := a.security().addIPBlacklist(ip, reason, hours)
+	if statusFromError(w, err) {
 		return
 	}
-
-	expireAt := int64(-1)
-	if hours > 0 {
-		expireAt = int64(hours)
-	}
-	a.audit(r, "add_ip_blacklist", "admin", 0, map[string]any{"ip": ip, "expire_at": expireAt, "reason": reason})
+	// expire_at 记真实的过期时间戳（原实现误记成小时数）。
+	a.audit(r, "add_ip_blacklist", "admin", 0, map[string]any{"ip": ip, "expire_at": expireAt, "hours": hours, "reason": reason})
 	ok(w, "IP 已加入黑名单", nil)
 }
 

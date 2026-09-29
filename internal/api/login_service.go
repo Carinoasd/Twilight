@@ -10,6 +10,7 @@ import (
 	"github.com/prejudice-studio/twilight/internal/config"
 	"github.com/prejudice-studio/twilight/internal/security"
 	"github.com/prejudice-studio/twilight/internal/store"
+	"go.uber.org/zap"
 )
 
 type loginInput struct {
@@ -99,24 +100,34 @@ func (a *App) authenticateLogin(ctx context.Context, input loginInput) (store.Us
 }
 
 func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) (loginResult, error) {
-	token, expiry, err := a.sessions().Create(r.Context(), user.UID)
+	deviceID := loginDeviceID(input.DeviceID, input.UserAgent, input.IP)
+	// 管理员封禁的设备不能再登录：先于签发会话拦截，并顺手吊销该设备上残留的会话
+	// （封禁发生在本修复之前、当时没有吊销的旧会话）。
+	if device, found := a.store().Device(user.UID, deviceID); found && device.Blocked {
+		a.revokeDeviceSessions(r.Context(), user.UID, deviceID)
+		a.auditWithUser(r, user.UID, user.Username, "login_blocked_device", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
+		return loginResult{}, loginFail(http.StatusForbidden, ErrDeviceBlocked, "该设备已被管理员封禁，无法登录")
+	}
+	token, expiry, err := a.sessions().Create(r.Context(), user.UID, deviceID)
 	if err != nil {
 		return loginResult{}, loginFail(http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 	}
 
 	now := time.Now().Unix()
-	deviceID := firstNonEmpty(input.DeviceID, input.UserAgent, input.IP)
 	userAgent := firstNonEmpty(input.UserAgent, "unknown")
-	_ = a.store().UpdateDevice(user.UID, deviceID, func(device *store.Device) {
+	// 设备更新与登录记录合并为一次整份写入（旧流程每次登录写两次整份 state）。
+	// 写失败不阻断登录（会话已建立），但必须留下日志，不能像旧代码那样静默丢掉登录记录。
+	if err := a.store().RecordLogin(user.UID, deviceID, func(device *store.Device) {
 		device.DeviceName = userAgent
 		device.Client = "web"
 		device.LastIP = input.IP
 		device.LastSeen = now
-	})
-	_ = a.store().AddLoginLog(store.LoginLog{
+	}, store.LoginLog{
 		UID: user.UID, IP: input.IP, DeviceID: deviceID, DeviceName: userAgent, Client: "web", Time: now,
-	})
-	a.auditWithUser(r, user.UID, user.Username, "login", "user", 0, map[string]any{"ip": input.IP, "device": deviceID})
+	}); err != nil {
+		zap.L().Warn("record login device/log failed", zap.Int64("uid", user.UID), zap.Error(err))
+	}
+	a.auditWithUser(r, user.UID, user.Username, "login", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
 
 	// 使用统一的模板参数系统，支持所有用户状态参数
 	templateParams := a.NewTemplateParams(r.Context(), user).BuildWithExtra(map[string]string{
@@ -145,7 +156,11 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 			RenderTemplate(bodyTemplate, templateParams))
 	}
 	if cfg := a.cfg(); cfg.DeviceLimitEnabled && cfg.MaxDevices > 0 {
-		_ = a.store().EnforceDeviceLimit(user.UID, cfg.MaxDevices)
+		// 被淘汰的设备要一并吊销会话，否则只是删了记录，旧设备照样在线，上限不生效。
+		if evicted, err := a.store().EnforceDeviceLimit(user.UID, cfg.MaxDevices, deviceID); err == nil && len(evicted) > 0 {
+			a.revokeDeviceSessions(r.Context(), user.UID, evicted...)
+			a.auditWithUser(r, user.UID, user.Username, "device_limit_evicted", "user", user.UID, map[string]any{"evicted_devices": evicted, "max_devices": cfg.MaxDevices})
+		}
 	}
 	return loginResult{User: user, Token: token, Expiry: expiry}, nil
 }
@@ -167,6 +182,7 @@ func (a *App) handleLoginResource(w http.ResponseWriter, r *http.Request) {
 	user, err := a.authenticateLogin(r.Context(), input)
 	if err != nil {
 		if failure, ok := err.(*loginFailure); ok {
+			a.auditLoginFailure(r, input, failure)
 			failWithCode(w, failure.Status, failure.Code, failure.Message)
 			return
 		}

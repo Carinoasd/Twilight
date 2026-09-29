@@ -183,3 +183,33 @@ func TestFirstRegisterWithoutAdminConfigStaysNormalUser(t *testing.T) {
 		t.Fatalf("first normal registration unexpectedly became admin: %#v", u)
 	}
 }
+
+// TestSetupDoesNotPersistEnvOrLocalOverrides 防回归：setup 落盘只能以配置文件本身
+// 为底稿，env 与 .local 覆盖层里的密钥不得被写进 config.toml。
+func TestSetupDoesNotPersistEnvOrLocalOverrides(t *testing.T) {
+	app := newSetupTestApp(t)
+	t.Setenv("TWILIGHT_BOT_INTERNAL_SECRET", "ENV_INTERNAL_SECRET_VALUE")
+	t.Setenv("TWILIGHT_TELEGRAM_BOT_TOKEN", "ENV_BOT_TOKEN_VALUE")
+	// 模拟启动时 Load() 合并了 env / .local 覆盖层后的生效值（写 .local 文件会触发
+	// 热重载改变 setup 状态，这里直接设置内存生效值）。
+	app.cfg().BotInternalSecret = "ENV_INTERNAL_SECRET_VALUE"
+	app.cfg().TelegramBotToken = "ENV_BOT_TOKEN_VALUE"
+	app.cfg().SMTPPassword = "LOCAL_SMTP_SECRET"
+	body := `{"admin":{"username":"owner","password":"Owner123456"},"global":{"server_name":"My Twilight"}}`
+	rr := doJSONWithHeaders(app, http.MethodPost, "/api/v1/setup/complete", body, nil, setupIntentHeaders())
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("setup status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	content, err := os.ReadFile(app.cfg().ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"ENV_INTERNAL_SECRET_VALUE", "ENV_BOT_TOKEN_VALUE", "LOCAL_SMTP_SECRET"} {
+		if strings.Contains(string(content), secret) {
+			t.Fatalf("override secret %q persisted into config.toml:\n%s", secret, content)
+		}
+	}
+	if !strings.Contains(string(content), "My Twilight") {
+		t.Fatalf("setup payload not written:\n%s", content)
+	}
+}

@@ -625,6 +625,10 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 			if err := validate.ValidateUsername(username); err != nil {
 				return err
 			}
+			// 配置文件里的管理员用户名对普通用户保留，防止改名顶替后被提权。
+			if a.usernameReservedForConfiguredAdmin(username, *u) {
+				return errReservedAdminUsername
+			}
 			u.Username = username
 		}
 		if bgmModeSet {
@@ -688,10 +692,12 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 	if bgmTokenChanged {
 		_ = a.store().DeleteBangumiCollectionCache(u.UID, 0)
 	}
+	// target_uid 填本人，按目标用户筛选时才能查到自助操作；detail 记改前改后。
+	changes := selfProfileChanges(p.User, u)
 	if signinAutoRenewalSet {
-		a.audit(r, "update_signin_auto_renewal", "user", 0, map[string]any{"enabled": signinAutoRenewalNext})
+		a.audit(r, "update_signin_auto_renewal", "user", u.UID, map[string]any{"enabled": signinAutoRenewalNext, "changes": changes})
 	} else {
-		a.audit(r, "update_profile", "user", 0, nil)
+		a.audit(r, "update_profile", "user", u.UID, map[string]any{"changes": changes})
 	}
 	ok(w, "更新成功", publicUser(u))
 }
@@ -711,13 +717,23 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 		failWithCode(w, http.StatusBadRequest, ErrUsernameInvalid, err.Error())
 		return
 	}
+	// 配置文件里的管理员用户名对普通用户保留：否则名字空出后任何人都能改名顶替，
+	// 下次启动/重载配置时被 applyConfiguredAdmins 提权为管理员。
+	if a.usernameReservedForConfiguredAdmin(username, p.User) {
+		failWithCode(w, http.StatusConflict, ErrUsernameTaken, "用户名已被占用，请换一个用户名")
+		return
+	}
 	u, err := a.store().UpdateUser(p.User.UID, func(u *store.User) error {
+		if a.usernameReservedForConfiguredAdmin(username, *u) {
+			return errReservedAdminUsername
+		}
 		u.Username = username
 		return nil
 	})
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "update_username", "user", u.UID, map[string]any{"username": auditFromTo(p.User.Username, u.Username)})
 	ok(w, "用户名已更新", publicUser(u))
 }
 
@@ -727,8 +743,14 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 // 与 handleAdminResetPassword / handleForgotPassword 的「改密即吊销旧会话」口径一致。
 // 失败时已写响应，返回 ok=false，调用方直接 return。
 func (a *App) rotateSessionsAfterPasswordChange(w http.ResponseWriter, r *http.Request, uid int64) (string, bool) {
+	// 新会话沿用当前会话的设备归属。
+	var deviceID string
+	if p := current(r); p.Token != "" {
+		record, _ := a.sessions().GetRecord(r.Context(), p.Token)
+		deviceID = record.DeviceID
+	}
 	a.sessions().DeleteUser(r.Context(), uid)
-	token, expires, err := a.sessions().Create(r.Context(), uid)
+	token, expires, err := a.sessions().Create(r.Context(), uid, deviceID)
 	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 		return "", false
@@ -785,6 +807,16 @@ func (a *App) handleGeneratedPassword(w http.ResponseWriter, r *http.Request, _ 
 	}
 	if !a.allowRate(r.Context(), rateKey("gen-pwd:", p.User.UID), 5, time.Minute) {
 		failWithCode(w, http.StatusTooManyRequests, ErrRateLimited, "操作过于频繁，请稍后再试")
+		return
+	}
+	// 与手动改密同一道门：只拿到会话（被盗 cookie / XSS）不能把密码换成新值、
+	// 顺手踢掉受害者所有设备，也不能绕过用户自己开启的“改密须邮箱验证”。
+	payload := decodeMap(r)
+	if !security.VerifyPassword(stringValue(payload, "old_password"), p.User.PasswordHash) {
+		failWithCode(w, http.StatusForbidden, ErrPasswordOldMismatch, "原密码不正确")
+		return
+	}
+	if !a.consumePasswordChangeEmailCode(w, payload, p.User, emailPurposeChangePass) {
 		return
 	}
 	// 自动生成密码至少 128 bit 熵：32 hex chars。
@@ -878,11 +910,12 @@ func (a *App) handleBindEmby(w http.ResponseWriter, r *http.Request, _ Params) {
 			return
 		}
 	}
+	inviteCap := a.inviteActivationExpiryCap(p.User)
 	u, _, err := a.store().BindUserEmbyAtomicWithUpdate(p.User.UID, embyID, firstNonEmpty(asString(embyUser["Name"]), embyUsername), false, func(u *store.User, before store.User) error {
 		if strings.TrimSpace(before.EmbyID) != "" {
 			return store.ErrConflict
 		}
-		a.consumePendingEmbyEntitlementOnBind(u, before)
+		a.consumePendingEmbyEntitlementOnBind(u, before, inviteCap)
 		return nil
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -901,7 +934,8 @@ func (a *App) handleBindEmby(w http.ResponseWriter, r *http.Request, _ Params) {
 	ok(w, "Emby account linked", map[string]any{"emby_id": u.EmbyID, "emby_username": u.EmbyUsername, "user": publicUser(u)})
 }
 
-func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.User) {
+// inviteCap 为 inviteActivationExpiryCap 的结果（锁外预先计算），0 表示不封顶。
+func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.User, inviteCap int64) {
 	if !before.PendingEmby {
 		return
 	}
@@ -920,6 +954,9 @@ func (a *App) consumePendingEmbyEntitlementOnBind(u *store.User, before store.Us
 		u.ExpiredAt = permanentExpiryUnix
 	} else {
 		u.ExpiredAt = expiryFromDays(days, time.Now())
+	}
+	if u.Role != store.RoleAdmin && u.Role != store.RoleWhitelist {
+		u.ExpiredAt = boundedInviteExpiry(u.ExpiredAt, inviteCap)
 	}
 }
 
@@ -962,6 +999,16 @@ func (a *App) handleRegisterEmby(w http.ResponseWriter, r *http.Request, params 
 		failWithCode(w, http.StatusConflict, ErrEmbyCapacityReached, fmt.Sprintf("Emby 用户数量已达上限 %d/%d", current, limit))
 		return
 	}
+	// 邀请来源的待开通资格：开通后的到期不得超过邀请人当前到期；邀请人已到期时
+	// 直接拒绝，避免先建出远端账号再立刻判为过期。
+	inviteCap := int64(0)
+	if p.User.PendingEmby && p.User.Role != store.RoleAdmin && p.User.Role != store.RoleWhitelist {
+		inviteCap = a.inviteActivationExpiryCap(p.User)
+		if inviteCap > 0 && inviteCap <= time.Now().Unix() {
+			failWithCode(w, http.StatusForbidden, ErrInviterDaysShort, "邀请人有效期已到期，暂不能开通 Emby")
+			return
+		}
+	}
 	createdUser, err := a.embyCreateUser(r.Context(), embyUsername, embyPassword)
 	if err != nil {
 		failWithCode(w, http.StatusBadGateway, ErrEmbyCreateFailed, "创建 Emby 用户失败，请稍后重试")
@@ -996,6 +1043,9 @@ func (a *App) handleRegisterEmby(w http.ResponseWriter, r *http.Request, params 
 			u.ExpiredAt = permanentExpiryUnix
 		} else {
 			u.ExpiredAt = expiryFromDays(days, time.Now())
+		}
+		if hadPendingEmby && u.Role != store.RoleAdmin && u.Role != store.RoleWhitelist {
+			u.ExpiredAt = boundedInviteExpiry(u.ExpiredAt, inviteCap)
 		}
 		return nil
 	})
@@ -1085,11 +1135,15 @@ func (a *App) handleRenew(w http.ResponseWriter, r *http.Request, _ Params) {
 	if a.rejectRegcodeWriteIfStorageMismatch(w) {
 		return
 	}
+	var expiredBefore int64
+	var renewDays int
 	u, _, err := a.store().ConsumeRegCodeAndUpdateUser(regCode, p.User.UID, p.User.TelegramID, func(u *store.User, code store.RegCode) error {
 		if err := validateSelfServiceRenewalTarget(*u); err != nil {
 			return err
 		}
+		expiredBefore = u.ExpiredAt
 		days := normalizeRegCodeDays(code.Days)
+		renewDays = days
 		// 用 renewExpiryAndReactivate 而不是裸 ExpiredAt = ...：自助续费会
 		// 把曾被 check_expired 设成 Active=false 的非邀请账号同步解禁，避免
 		// "续完仍登不上"的死循环。
@@ -1108,7 +1162,10 @@ func (a *App) handleRenew(w http.ResponseWriter, r *http.Request, _ Params) {
 		failWithCode(w, http.StatusBadRequest, ErrRegcodeInvalid, "注册码无效、已用完或已过期")
 		return
 	}
-	a.audit(r, "renew_account", "user", 0, map[string]any{"code": regCode})
+	a.audit(r, "renew_account", "user", 0, map[string]any{
+		"code_hint": regcodeAuditHint(regCode), "days": renewDays,
+		"expired_at_before": publicExpiryUnix(expiredBefore), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	})
 	ok(w, "续期成功", map[string]any{"expire_status": expireStatus(u.ExpiredAt), "expired_at": publicExpiryUnix(u.ExpiredAt), "user": publicUser(u)})
 }
 
@@ -1299,22 +1356,27 @@ func (a *App) handleBlockDevice(w http.ResponseWriter, r *http.Request, params P
 	if written {
 		return
 	}
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Blocked = true; d.Trusted = false }); statusFromError(w, err) {
 		return
 	}
+	// 封禁要立即生效：吊销该设备上已签发的会话。
+	a.revokeDeviceSessions(r.Context(), uid, deviceID)
 	a.audit(r, "block_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
 	ok(w, "device blocked", nil)
 }
 
 func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params Params) {
 	uid := current(r).User.UID
-	deviceID := params["device_id"]
-	if err := a.store().UpdateDevice(uid, deviceID, func(d *store.Device) { d.Trusted = true; d.Blocked = false }); statusFromError(w, err) {
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
+		return
+	}
+	// 只信任已存在且未被封禁的设备：不新建设备、不解除管理员封禁。
+	if err := a.security().trustDevice(uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "trust_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
@@ -1322,13 +1384,12 @@ func (a *App) handleTrustDevice(w http.ResponseWriter, r *http.Request, params P
 }
 
 func (a *App) handleDeleteDevice(w http.ResponseWriter, r *http.Request, params Params) {
-	deviceID := params["device_id"]
-	if deviceID == "" {
-		failWithCode(w, http.StatusBadRequest, ErrDeviceIDRequired, "设备 ID 不能为空")
+	deviceID, valid := requireDeviceIDParam(w, params)
+	if !valid {
 		return
 	}
 	uid := current(r).User.UID
-	if err := a.store().DeleteDevice(uid, deviceID); statusFromError(w, err) {
+	if err := a.security().deleteDevice(r.Context(), uid, deviceID); statusFromError(w, err) {
 		return
 	}
 	a.audit(r, "delete_device", auditCategoryForRole(current(r).User.Role), uid, map[string]any{"device_id": deviceID})
@@ -1341,11 +1402,18 @@ func (a *App) handleIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params
 
 func (a *App) handleAddIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
-	ip := stringValue(payload, "ip")
+	ip := strings.TrimSpace(stringValue(payload, "ip"))
 	if ip == "" {
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
 	}
+	// 校验并规范化（支持 CIDR），格式错误直接拒绝，避免写入永远匹配不到的条目。
+	normalizedIP, validIP := store.NormalizeIPBlacklistEntry(ip)
+	if !validIP {
+		failWithCode(w, http.StatusBadRequest, ErrIPInvalid, "IP 或 CIDR 格式无效")
+		return
+	}
+	ip = normalizedIP
 	// hours 上限：10 年。time.Duration 是 int64 纳秒，hours * time.Hour 在 hours
 	// 接近 math.MaxInt32 时会整数溢出，得到一个绕到过去的 expireAt（负数）。
 	// admin 误填或 admin 凭据被盗时可借此构造"永久封禁"或"立即解封"的歧义状态，
@@ -1373,7 +1441,7 @@ func (a *App) handleAddIPBlacklist(w http.ResponseWriter, r *http.Request, _ Par
 }
 
 func (a *App) handleDeleteIPBlacklist(w http.ResponseWriter, r *http.Request, _ Params) {
-	ip := stringValue(decodeMap(r), "ip")
+	ip := strings.TrimSpace(stringValue(decodeMap(r), "ip"))
 	if ip == "" {
 		failWithCode(w, http.StatusBadRequest, ErrIPRequired, "IP 不能为空")
 		return
@@ -1711,6 +1779,8 @@ func (a *App) systemStatsData() map[string]any {
 		},
 		"routes": len(a.routes),
 		"uptime": int64(time.Since(runtimeStartedAt).Seconds()),
+		// 审计写入失败计数，便于发现操作日志静默丢失。
+		"audit_log": auditWriteFailureStats(),
 	}
 }
 
@@ -1737,6 +1807,7 @@ func (a *App) databaseHealth(parent context.Context) map[string]any {
 		"storage_warning":   a.databaseMismatchWarning(),
 		"state_read_ok":     true,
 		"user_count":        userCount,
+		"audit_log":         auditWriteFailureStats(),
 	}
 	if storageMismatch {
 		result["status"] = "configuration_mismatch"
@@ -1892,7 +1963,7 @@ func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Para
 	// 会成为绕过 schema 遮蔽、把全部密钥（Postgres DSN、Emby Token、Bot Token、
 	// BotInternalSecret、Webhook Secret 等）泄露到浏览器 DOM/缓存/历史的旁路。
 	//   - content（规范化渲染）：先在 values 上 maskConfigSecrets 再 render；
-	//   - raw_content（磁盘原文）：按 section 上下文做行级 maskTOMLSecrets。
+	//   - raw_content（磁盘原文）：用 TOML 解析器按键路径结构化遮蔽（maskTOMLSecrets）。
 	// 两侧用同一哨兵，completed 比较仍对非密钥字段有效。PUT 路径
 	// （handleConfigTOMLPutSafe）会把回传的哨兵还原为真实值，避免写盘覆盖。
 	snapshot, err := a.configEditSnapshot()
@@ -1903,7 +1974,12 @@ func (a *App) handleConfigTOMLGet(w http.ResponseWriter, r *http.Request, _ Para
 	maskedValues := configValues(snapshot.file)
 	maskConfigSecrets(maskedValues)
 	normalizedContent := stripProtectedAdminConfig(renderConfigTOML(maskedValues))
-	rawContent := stripProtectedAdminConfig(maskTOMLSecrets(snapshot.content))
+	maskedRaw, err := maskTOMLSecrets(snapshot.content)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "配置读取失败")
+		return
+	}
+	rawContent := stripProtectedAdminConfig(maskedRaw)
 	ok(w, "OK", map[string]any{"content": normalizedContent, "raw_content": rawContent, "path": path, "revision": snapshot.revision, "completed": normalizedContent != rawContent})
 }
 
@@ -1920,6 +1996,8 @@ func (a *App) handleConfigSchemaUpdate(w http.ResponseWriter, r *http.Request, _
 }
 
 func (a *App) handleConfigSweep(w http.ResponseWriter, r *http.Request, _ Params) {
+	// 目前清扫不修改任何键；仍写明确审计，便于与其他配置操作一起追溯。
+	a.audit(r, "config_sweep", "admin", 0, map[string]any{"changed": false, "removed_keys": []string{}})
 	ok(w, "config check completed", map[string]any{"changed": false, "config_file": a.cfg().ConfigFile})
 }
 

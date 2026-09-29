@@ -180,25 +180,32 @@ type Config struct {
 	TelegramGroupActionConcurrency int
 	TelegramBanOnLeave             bool
 	TelegramAutoEnableRejoined     bool
-	TelegramEnablePanel            bool
-	TelegramBotStartText           string
-	TelegramBotGroupStartText      string
-	TelegramBotStartTitle          string
-	TelegramBotStartIntro          string
-	TelegramBotBindPromptText      string
-	TelegramBotHelpText            string
-	TelegramBotAdminHelpText       string
-	TelegramBotHelpHeader          string
-	TelegramBotHelpFooter          string
-	TelegramBotAbout               string
-	TelegramGroupUserPanelTemplate string
-	TelegramCustomCommands         []TelegramCommandReply
-	TelegramDisabledCommands       []string // 被禁用的内置指令列表
-	TelegramParseMode              string   // 消息解析模式：""（纯文本）、Markdown、MarkdownV2、HTML
-	BotInternalSecret              string
-	BangumiEnabled                 bool
-	BangumiManageEnabled           bool
-	BangumiWebhookSecret           string
+	// 群成员巡检熔断：本轮拟停用人数超过扫描人数的百分比（0=关闭），或超过绝对人数
+	// （0=关闭）时整轮中止、不做任何停用。防止群 ID 配错 / Bot 被踢时一轮禁用全站。
+	TelegramMembershipBreakerPercent int
+	TelegramMembershipBreakerMax     int
+	TelegramEnablePanel              bool
+	TelegramBotStartText             string
+	TelegramBotGroupStartText        string
+	TelegramBotStartTitle            string
+	TelegramBotStartIntro            string
+	TelegramBotBindPromptText        string
+	TelegramBotHelpText              string
+	TelegramBotAdminHelpText         string
+	TelegramBotHelpHeader            string
+	TelegramBotHelpFooter            string
+	TelegramBotAbout                 string
+	TelegramGroupUserPanelTemplate   string
+	TelegramCustomCommands           []TelegramCommandReply
+	TelegramDisabledCommands         []string // 被禁用的内置指令列表
+	TelegramParseMode                string   // 消息解析模式：""（纯文本）、Markdown、MarkdownV2、HTML
+	BotInternalSecret                string
+	BangumiEnabled                   bool
+	BangumiManageEnabled             bool
+	BangumiWebhookSecret             string
+	// BangumiWebhookAllowLegacyToken 兼容期开关：true 时仍接受共享 token（头或 ?token=）鉴权并记警告；
+	// false 时 webhook 只接受 HMAC 签名请求。
+	BangumiWebhookAllowLegacyToken bool
 	TMDBAPIKey                     string
 	TMDBAPIURL                     string
 	TMDBImageURL                   string
@@ -272,12 +279,28 @@ type Config struct {
 	RateLimitAdminIconPerMinute       int
 	RateLimitAPIKeyDefaultPerMinute   int
 
-	SchedulerEnabled                  bool
-	SchedulerExpiredCheckTime         string
-	SchedulerExpiringCheckTime        string
-	SchedulerDailyStatsTime           string
-	SchedulerSessionCleanupInterval   int
-	SchedulerCleanupNoEmbyTime        string
+	SchedulerEnabled                bool
+	SchedulerExpiredCheckTime       string
+	SchedulerExpiringCheckTime      string
+	SchedulerDailyStatsTime         string
+	SchedulerSessionCleanupInterval int
+	// SchedulerEmbyReconcileInterval 是 emby_state_reconcile 的默认执行间隔（小时）。
+	SchedulerEmbyReconcileInterval int
+	SchedulerCleanupNoEmbyTime     string
+	// SchedulerTimezone 是 cron_daily 任务的时区（IANA 名，如 Asia/Shanghai）；留空用进程本地时区。
+	SchedulerTimezone string
+	// 群成员巡检与 Telegram 绑定检查的每日执行时间，原本没有专属设置、全挤在 03:00。
+	SchedulerGroupMembershipCheckTime  string
+	SchedulerTelegramBindingsCheckTime string
+	// SchedulerFailureNotify：任务失败（及恢复）时用 Telegram 通知管理员。
+	SchedulerFailureNotify bool
+	// SchedulerRetryFailedAfterMinutes：可安全重放的每日任务失败后，过这么多分钟自动重试一次；0 关闭。
+	SchedulerRetryFailedAfterMinutes int
+	// 定期数据库备份：默认关闭；开启后每天 SchedulerAutoBackupTime 备份一次，只保留最近
+	// SchedulerAutoBackupKeep 份自动备份（手动备份不受影响）。
+	SchedulerAutoBackupEnabled        bool
+	SchedulerAutoBackupTime           string
+	SchedulerAutoBackupKeep           int
 	SchedulerCleanupPendingEmbyTime   string
 	SchedulerCleanupUnusedUploadsTime string
 	SchedulerCleanupAuditLogsTime     string
@@ -443,6 +466,8 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.TelegramGroupActionConcurrency = reader.intValue(cfg.TelegramGroupActionConcurrency, "Telegram.group_action_concurrency", "group_action_concurrency")
 	cfg.TelegramBanOnLeave = reader.boolValue(cfg.TelegramBanOnLeave, "Telegram.ban_on_leave", "ban_on_leave")
 	cfg.TelegramAutoEnableRejoined = reader.boolValue(cfg.TelegramAutoEnableRejoined, "Telegram.auto_enable_rejoined", "auto_enable_rejoined")
+	cfg.TelegramMembershipBreakerPercent = reader.intValue(cfg.TelegramMembershipBreakerPercent, "Telegram.membership_breaker_percent", "membership_breaker_percent")
+	cfg.TelegramMembershipBreakerMax = reader.intValue(cfg.TelegramMembershipBreakerMax, "Telegram.membership_breaker_max", "membership_breaker_max")
 	cfg.TelegramEnablePanel = reader.boolValue(cfg.TelegramEnablePanel, "Telegram.enable_tg_panel", "enable_tg_panel")
 	cfg.TelegramBotStartText = reader.stringValue(cfg.TelegramBotStartText, "Telegram.bot_start_text", "bot_start_text")
 	cfg.TelegramBotGroupStartText = reader.stringValue(cfg.TelegramBotGroupStartText, "Telegram.bot_group_start_text", "bot_group_start_text")
@@ -461,6 +486,7 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.BangumiEnabled = reader.boolValue(cfg.BangumiEnabled, "BangumiSync.enabled", "bangumi_sync_enabled")
 	cfg.BangumiManageEnabled = reader.boolValue(cfg.BangumiManageEnabled, "BangumiSync.manage_enabled", "bangumi_sync_manage_enabled")
 	cfg.BangumiWebhookSecret = reader.stringValue(cfg.BangumiWebhookSecret, "BangumiSync.webhook_secret", "webhook_secret")
+	cfg.BangumiWebhookAllowLegacyToken = reader.boolValue(cfg.BangumiWebhookAllowLegacyToken, "BangumiSync.webhook_allow_legacy_token")
 	cfg.TMDBAPIKey = reader.stringValue(cfg.TMDBAPIKey, "Global.tmdb_api_key", "tmdb_api_key")
 	cfg.TMDBAPIURL = reader.stringValue(cfg.TMDBAPIURL, "Global.tmdb_api_url", "tmdb_api_url")
 	cfg.TMDBImageURL = reader.stringValue(cfg.TMDBImageURL, "Global.tmdb_image_url", "tmdb_image_url")
@@ -559,7 +585,16 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.SchedulerExpiringCheckTime = reader.stringValue(cfg.SchedulerExpiringCheckTime, "Scheduler.expiring_check_time", "expiring_check_time")
 	cfg.SchedulerDailyStatsTime = reader.stringValue(cfg.SchedulerDailyStatsTime, "Scheduler.daily_stats_time", "daily_stats_time")
 	cfg.SchedulerSessionCleanupInterval = reader.intValue(cfg.SchedulerSessionCleanupInterval, "Scheduler.session_cleanup_interval", "session_cleanup_interval")
+	cfg.SchedulerEmbyReconcileInterval = reader.intValue(cfg.SchedulerEmbyReconcileInterval, "Scheduler.emby_reconcile_interval", "emby_reconcile_interval")
 	cfg.SchedulerCleanupNoEmbyTime = reader.stringValue(cfg.SchedulerCleanupNoEmbyTime, "Scheduler.cleanup_no_emby_time", "cleanup_no_emby_time")
+	cfg.SchedulerTimezone = reader.stringValue(cfg.SchedulerTimezone, "Scheduler.timezone", "scheduler_timezone")
+	cfg.SchedulerGroupMembershipCheckTime = reader.stringValue(cfg.SchedulerGroupMembershipCheckTime, "Scheduler.group_membership_check_time", "group_membership_check_time")
+	cfg.SchedulerTelegramBindingsCheckTime = reader.stringValue(cfg.SchedulerTelegramBindingsCheckTime, "Scheduler.telegram_bindings_check_time", "telegram_bindings_check_time")
+	cfg.SchedulerFailureNotify = reader.boolValue(cfg.SchedulerFailureNotify, "Scheduler.failure_notify", "scheduler_failure_notify")
+	cfg.SchedulerRetryFailedAfterMinutes = reader.intValue(cfg.SchedulerRetryFailedAfterMinutes, "Scheduler.retry_failed_after_minutes", "scheduler_retry_failed_after_minutes")
+	cfg.SchedulerAutoBackupEnabled = reader.boolValue(cfg.SchedulerAutoBackupEnabled, "Scheduler.auto_backup_enabled", "auto_backup_enabled")
+	cfg.SchedulerAutoBackupTime = reader.stringValue(cfg.SchedulerAutoBackupTime, "Scheduler.auto_backup_time", "auto_backup_time")
+	cfg.SchedulerAutoBackupKeep = reader.intValue(cfg.SchedulerAutoBackupKeep, "Scheduler.auto_backup_keep", "auto_backup_keep")
 	cfg.SchedulerCleanupPendingEmbyTime = reader.stringValue(cfg.SchedulerCleanupPendingEmbyTime, "Scheduler.cleanup_pending_emby_time", "cleanup_pending_emby_time")
 	cfg.SchedulerCleanupUnusedUploadsTime = reader.stringValue(cfg.SchedulerCleanupUnusedUploadsTime, "Scheduler.cleanup_unused_uploads_time", "cleanup_unused_uploads_time")
 	cfg.SchedulerCleanupAuditLogsTime = reader.stringValue(cfg.SchedulerCleanupAuditLogsTime, "Scheduler.cleanup_audit_logs_time", "cleanup_audit_logs_time")
@@ -649,13 +684,15 @@ func defaults() Config {
 		// CookieSecure 默认 true：HTTPS 是生产基线，HTTP 调试场景显式
 		// 改 toml 或 env 关掉。旧默认 false 在 HTTP 部署时也不告警，
 		// 一旦运维忘改 production toml 即等于 session 明文走线。
-		CookieSecure:                   true,
-		SessionTTL:                     7 * 24 * time.Hour,
-		CookieSameSite:                 "lax",
-		TelegramAPIURL:                 "https://api.telegram.org",
-		TelegramGroupCheckConcurrency:  24,
-		TelegramGroupActionConcurrency: 8,
-		TelegramGroupUserPanelTemplate: DefaultTelegramGroupUserPanelTemplate,
+		CookieSecure:                     true,
+		SessionTTL:                       7 * 24 * time.Hour,
+		CookieSameSite:                   "lax",
+		TelegramAPIURL:                   "https://api.telegram.org",
+		TelegramGroupCheckConcurrency:    24,
+		TelegramGroupActionConcurrency:   8,
+		TelegramMembershipBreakerPercent: 20,
+		TelegramMembershipBreakerMax:     50,
+		TelegramGroupUserPanelTemplate:   DefaultTelegramGroupUserPanelTemplate,
 		// RegisterEnabled / EmbyDirectRegisterEnabled / AllowPendingRegister 都
 		// 默认 false——secure-by-default。空配置首次启动（dev 镜像、配置被误删、
 		// docker volume 丢配置）不再"自动开放注册 + Emby 直登"。运营要让外部
@@ -697,7 +734,14 @@ func defaults() Config {
 		SchedulerExpiringCheckTime:           "09:00",
 		SchedulerDailyStatsTime:              "00:05",
 		SchedulerSessionCleanupInterval:      6,
+		SchedulerEmbyReconcileInterval:       6,
 		SchedulerCleanupNoEmbyTime:           "03:30",
+		SchedulerGroupMembershipCheckTime:    "03:10",
+		SchedulerTelegramBindingsCheckTime:   "03:20",
+		SchedulerFailureNotify:               true,
+		SchedulerRetryFailedAfterMinutes:     15,
+		SchedulerAutoBackupTime:              "04:15",
+		SchedulerAutoBackupKeep:              7,
 		SchedulerCleanupPendingEmbyTime:      "03:45",
 		SchedulerCleanupUnusedUploadsTime:    "02:20",
 		SchedulerCleanupAuditLogsTime:        "04:30",
@@ -712,6 +756,7 @@ func defaults() Config {
 		TMDBAPIURL:                           "https://api.themoviedb.org/3",
 		TMDBImageURL:                         "https://image.tmdb.org/t/p",
 		BangumiAPIURL:                        "https://api.bgm.tv/v0",
+		BangumiWebhookAllowLegacyToken:       true,
 		MediaRequestEnabled:                  true,
 		MaxConcurrentRequestsPerUser:         3,
 		MaxConcurrentRequestsGlobal:          -1,

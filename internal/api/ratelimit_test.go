@@ -7,21 +7,38 @@ import (
 	"time"
 )
 
-func TestRateLimiterRejectsNewKeysAtCapacity(t *testing.T) {
+// TestRateLimiterEvictsOldestBucketsAtCapacity 防回归：没有 Redis 时内存桶满了
+// 不能拒绝新 key（否则攻击者灌满 1 万个 IP 桶就能让全站新访客 429），而是淘汰
+// 最旧的桶；较新的桶继续计数。
+func TestRateLimiterEvictsOldestBucketsAtCapacity(t *testing.T) {
 	limiter := newRateLimiter(nil)
-	resetAt := time.Now().Add(time.Minute)
+	base := time.Now().Add(time.Minute)
 	for i := 0; i < rateLimiterMaxBuckets; i++ {
-		limiter.items[fmt.Sprintf("key-%d", i)] = rateBucket{Count: 1, ResetAt: resetAt}
+		// key-i 的 ResetAt 随 i 递增：key-0 最旧，key-(max-1) 最新。
+		limiter.items[fmt.Sprintf("key-%d", i)] = rateBucket{Count: 1, ResetAt: base.Add(time.Duration(i) * time.Millisecond)}
 	}
 
-	if limiter.Allow(context.Background(), "new-key", 10, time.Minute) {
-		t.Fatal("new key was allowed after the in-memory bucket cap was reached")
+	if !limiter.Allow(context.Background(), "new-key", 10, time.Minute) {
+		t.Fatal("new key must be admitted at capacity (oldest buckets evicted instead)")
 	}
-	if len(limiter.items) != rateLimiterMaxBuckets {
-		t.Fatalf("bucket count = %d, want %d", len(limiter.items), rateLimiterMaxBuckets)
+	if len(limiter.items) > rateLimiterMaxBuckets {
+		t.Fatalf("bucket count = %d, want <= %d", len(limiter.items), rateLimiterMaxBuckets)
 	}
-	if !limiter.Allow(context.Background(), "key-0", 10, time.Minute) {
-		t.Fatal("existing key should remain usable at capacity")
+	if _, ok := limiter.items["key-0"]; ok {
+		t.Fatal("oldest bucket should have been evicted")
+	}
+	newest := fmt.Sprintf("key-%d", rateLimiterMaxBuckets-1)
+	if b, ok := limiter.items[newest]; !ok || b.Count != 1 {
+		t.Fatalf("newest bucket must be kept with its count: ok=%v %+v", ok, b)
+	}
+	// 大量新 key 持续涌入也始终放行、桶数有界。
+	for i := 0; i < rateLimiterMaxBuckets; i++ {
+		if !limiter.Allow(context.Background(), fmt.Sprintf("flood-%d", i), 10, time.Minute) {
+			t.Fatalf("flood key %d rejected", i)
+		}
+	}
+	if len(limiter.items) > rateLimiterMaxBuckets {
+		t.Fatalf("bucket count = %d, want <= %d", len(limiter.items), rateLimiterMaxBuckets)
 	}
 }
 

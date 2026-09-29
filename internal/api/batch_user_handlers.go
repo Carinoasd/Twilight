@@ -111,7 +111,7 @@ func (a *App) handleBatchRenewUsers(w http.ResponseWriter, r *http.Request, _ Pa
 	}
 	result["days"] = days
 	a.audit(r, "batch_renew_users", "admin", 0, map[string]any{
-		"days": days, "success": result["success"], "failed": result["failed"],
+		"days": days, "success": result["success"], "failed": result["failed"], "uids": auditUIDSample(uids),
 	})
 	ok(w, "批量续期完成", result)
 }

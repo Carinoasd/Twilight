@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ const pgAuditLogTimeout = 10 * time.Second
 type AuditLogQuery struct {
 	Category       string
 	Action         string
+	Source         string // http / telegram / scheduler / system；空表示不筛选
 	UID            int64
 	TargetUID      int64
 	From           int64
@@ -104,6 +106,9 @@ func auditLogWhereSQL(query AuditLogQuery) (string, []any) {
 	if query.Action != "" {
 		add("LOWER(action) = $%d", query.Action)
 	}
+	if query.Source != "" {
+		add("LOWER(source) = $%d", query.Source)
+	}
 	if query.UID > 0 {
 		add("uid = $%d", query.UID)
 	}
@@ -174,6 +179,7 @@ func auditLogOrderSQL(sortBy, order string) string {
 func normalizeAuditLogQuery(query AuditLogQuery) AuditLogQuery {
 	query.Category = strings.ToLower(strings.TrimSpace(query.Category))
 	query.Action = strings.ToLower(strings.TrimSpace(query.Action))
+	query.Source = strings.ToLower(strings.TrimSpace(query.Source))
 	query.Search = strings.ToLower(strings.TrimSpace(query.Search))
 	query.SortBy = normalizeAuditLogSortField(query.SortBy)
 	if !strings.EqualFold(query.Order, "asc") {
@@ -202,6 +208,53 @@ func normalizeAuditLogSortField(value string) string {
 	}
 }
 
+// 审计日志自保：删除单条、清空、裁剪（含排程 cleanup_audit_logs）会各写一条
+// 以下 action 的系统记录。这些记录不能被单条删除、清空、按条数或按天数裁剪删掉，
+// 否则被盗的管理员账号可以先删日志再删「删日志」这条记录，事后无从追查。
+// action 名只由服务端代码写入（fallback 审计生成的 action 形如
+// delete_admin_audit_logs_log_id，不会与此撞名）。
+var protectedAuditActions = []string{"delete_audit_log", "clear_audit_logs", "prune_audit_logs", "cleanup_audit_logs"}
+
+// ErrAuditLogProtected 表示目标是不可删除的审计自保记录。
+var ErrAuditLogProtected = errors.New("audit log protected")
+
+// IsProtectedAuditAction 报告 action 是否属于不可删除的审计自保记录。
+func IsProtectedAuditAction(action string) bool {
+	action = strings.ToLower(strings.TrimSpace(action))
+	for _, candidate := range protectedAuditActions {
+		if action == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// auditLogDeletableSQL 是所有删除语句共用的「可删除」条件。
+func auditLogDeletableSQL() string {
+	quoted := make([]string, 0, len(protectedAuditActions))
+	for _, action := range protectedAuditActions {
+		quoted = append(quoted, "'"+action+"'")
+	}
+	return "LOWER(action) NOT IN (" + strings.Join(quoted, ", ") + ")"
+}
+
+// auditLogLimitDeleteSQL 按条数保留最新 $1 条。preserveAdmin=true 时只在非管理员
+// 记录里计数并删除：管理员操作不占名额，也不会被登录、fallback 等高频记录挤掉。
+func auditLogLimitDeleteSQL(preserveAdmin bool) string {
+	scope := auditLogDeletableSQL()
+	if preserveAdmin {
+		scope += " AND LOWER(category) <> 'admin'"
+	}
+	return `
+WITH cutoff AS (
+	SELECT MIN(id) AS min_id FROM (
+		SELECT id FROM twilight_audit_logs WHERE ` + scope + ` ORDER BY id DESC LIMIT $1
+	) latest
+)
+DELETE FROM twilight_audit_logs
+WHERE ` + scope + ` AND id < COALESCE((SELECT min_id FROM cutoff), 0)`
+}
+
 type AuditLogPruneOptions struct {
 	MaxEntries    int
 	CutoffUnix    int64
@@ -216,6 +269,7 @@ type AuditLogPruneResult struct {
 
 // PruneAuditLogsWithPolicy applies count and age retention in one mutation and
 // one persistence cycle. Count retention runs first to preserve legacy behavior.
+// PreserveAdmin 同时作用于按条数与按天数裁剪；审计自保记录永远不删。
 func (s *Store) PruneAuditLogsWithPolicy(options AuditLogPruneOptions) (AuditLogPruneResult, error) {
 	result := AuditLogPruneResult{}
 	if options.MaxEntries <= 0 && options.CutoffUnix <= 0 {
@@ -230,14 +284,7 @@ func (s *Store) PruneAuditLogsWithPolicy(options AuditLogPruneOptions) (AuditLog
 	}
 	defer tx.Rollback()
 	if options.MaxEntries > 0 {
-		res, execErr := tx.ExecContext(ctx, `
-WITH cutoff AS (
-	SELECT MIN(id) AS min_id FROM (
-		SELECT id FROM twilight_audit_logs ORDER BY id DESC LIMIT $1
-	) latest
-)
-DELETE FROM twilight_audit_logs
-WHERE id < COALESCE((SELECT min_id FROM cutoff), 0)`, options.MaxEntries)
+		res, execErr := tx.ExecContext(ctx, auditLogLimitDeleteSQL(options.PreserveAdmin), options.MaxEntries)
 		if execErr != nil {
 			return result, execErr
 		}
@@ -245,7 +292,7 @@ WHERE id < COALESCE((SELECT min_id FROM cutoff), 0)`, options.MaxEntries)
 		result.RemovedByLimit = int(removed)
 	}
 	if options.CutoffUnix > 0 {
-		query := `DELETE FROM twilight_audit_logs WHERE created_at < $1`
+		query := `DELETE FROM twilight_audit_logs WHERE created_at < $1 AND ` + auditLogDeletableSQL()
 		if options.PreserveAdmin {
 			query += ` AND LOWER(category) <> 'admin'`
 		}
@@ -268,6 +315,8 @@ WHERE id < COALESCE((SELECT min_id FROM cutoff), 0)`, options.MaxEntries)
 // AddAuditLog appends one security audit row without touching twilight_state.
 // Retention runs in the same transaction so a successful return means both the
 // new event and the configured bound are durable.
+// 写入时的条数上限只裁剪非管理员记录（见 auditLogLimitDeleteSQL），避免高频的
+// 登录 / fallback 记录把管理员操作挤掉。
 func (s *Store) AddAuditLog(entry AuditLog, limit int) error {
 	if s == nil || s.db == nil {
 		return ErrNotFound
@@ -295,18 +344,46 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
 		return err
 	}
 	if limit > 0 {
-		if _, err := tx.ExecContext(ctx, `
-WITH cutoff AS (
-	SELECT MIN(id) AS min_id FROM (
-		SELECT id FROM twilight_audit_logs ORDER BY id DESC LIMIT $1
-	) latest
-)
-DELETE FROM twilight_audit_logs
-WHERE id < COALESCE((SELECT min_id FROM cutoff), 0)`, limit); err != nil {
+		if _, err := tx.ExecContext(ctx, auditLogLimitDeleteSQL(true), limit); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// AuditActionCount 是审计表里出现过的一个 action 及其条数。
+type AuditActionCount struct {
+	Action string `json:"action"`
+	Count  int    `json:"count"`
+}
+
+// ListAuditActions 返回审计表里实际出现过的 action（按条数降序，最多 limit 个），
+// 供前端筛选下拉使用，替代前端写死的少量 action。
+func (s *Store) ListAuditActions(limit int) ([]AuditActionCount, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrNotFound
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), pgAuditLogTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT LOWER(action) AS action, count(*) FROM twilight_audit_logs
+GROUP BY LOWER(action) ORDER BY count(*) DESC, LOWER(action) ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AuditActionCount, 0)
+	for rows.Next() {
+		var item AuditActionCount
+		if err := rows.Scan(&item.Action, &item.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // ListAuditLogs returns all rows newest first. Runtime callers should prefer
@@ -335,44 +412,57 @@ FROM twilight_audit_logs ORDER BY id DESC`)
 	return out
 }
 
-func (s *Store) DeleteAuditLog(id int64) error {
+// DeleteAuditLog 删除单条并返回被删记录（供调用方写自保审计）。审计自保记录
+// 返回 ErrAuditLogProtected。
+func (s *Store) DeleteAuditLog(id int64) (AuditLog, error) {
 	if id <= 0 {
-		return ErrNotFound
+		return AuditLog{}, ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pgAuditLogTimeout)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, `DELETE FROM twilight_audit_logs WHERE id = $1`, id)
+	row := s.db.QueryRowContext(ctx, `
+DELETE FROM twilight_audit_logs WHERE id = $1 AND `+auditLogDeletableSQL()+`
+RETURNING id, uid, username, action, category, source, method, target_uid,
+       COALESCE(detail, '{}'::jsonb)::text, ip, created_at`, id)
+	entry, err := scanAuditLog(row.Scan)
+	if err == nil {
+		return entry, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return AuditLog{}, err
+	}
+	var exists bool
+	if existsErr := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM twilight_audit_logs WHERE id = $1)`, id).Scan(&exists); existsErr == nil && exists {
+		return AuditLog{}, ErrAuditLogProtected
+	}
+	return AuditLog{}, ErrNotFound
+}
+
+// ClearAuditLogs 清空全部可删除的审计记录并返回删除条数；审计自保记录保留。
+// 原实现用 TRUNCATE ... RESTART IDENTITY，会连同「谁清空了日志」一起抹掉。
+func (s *Store) ClearAuditLogs() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), pgAuditLogTimeout)
+	defer cancel()
+	result, err := s.db.ExecContext(ctx, `DELETE FROM twilight_audit_logs WHERE `+auditLogDeletableSQL())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	removed, _ := result.RowsAffected()
-	if removed == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return int(removed), nil
 }
 
-func (s *Store) ClearAuditLogs() error {
-	ctx, cancel := context.WithTimeout(context.Background(), pgAuditLogTimeout)
-	defer cancel()
-	_, err := s.db.ExecContext(ctx, `TRUNCATE TABLE twilight_audit_logs RESTART IDENTITY`)
-	return err
-}
-
-func (s *Store) PruneAuditLogs(keep int) error {
+// PruneAuditLogs 按条数裁剪，preserveAdmin=true 时管理员记录不计数也不删除。
+func (s *Store) PruneAuditLogs(keep int, preserveAdmin bool) (int, error) {
 	if keep <= 0 {
-		return nil
+		return 0, nil
 	}
-	_, err := s.PruneAuditLogsWithPolicy(AuditLogPruneOptions{MaxEntries: keep})
-	return err
+	result, err := s.PruneAuditLogsWithPolicy(AuditLogPruneOptions{MaxEntries: keep, PreserveAdmin: preserveAdmin})
+	return result.RemovedByLimit, err
 }
 
-func (s *Store) PruneAuditLogsByAge(cutoffUnix int64, preserveAdmin bool) int {
+func (s *Store) PruneAuditLogsByAge(cutoffUnix int64, preserveAdmin bool) (int, error) {
 	result, err := s.PruneAuditLogsWithPolicy(AuditLogPruneOptions{CutoffUnix: cutoffUnix, PreserveAdmin: preserveAdmin})
-	if err != nil {
-		return 0
-	}
-	return result.RemovedByAge
+	return result.RemovedByAge, err
 }
 
 func (s *Store) AuditLogCount() int {

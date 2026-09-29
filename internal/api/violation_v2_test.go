@@ -17,7 +17,7 @@ func TestV2ViolationResourcesAreAdminOnlyAndNoStore(t *testing.T) {
 		t.Fatalf("normal user violation access status=%d body=%s", denied.Code, denied.Body.String())
 	}
 
-	adminCookies := registerAndLogin(t, app, "admin", "Admin123456")
+	adminCookies := registerAdmin(t, app, "admin", "Admin123456")
 	if err := app.store().AddViolationLog(store.ViolationLog{UID: 2, Username: "target", Code: "hidden", CodeType: "regcode_decoy", Reason: "test"}); err != nil {
 		t.Fatal(err)
 	}

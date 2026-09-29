@@ -65,7 +65,7 @@ cp deploy/docker/.env.example .env
 vim .env
 ```
 
-`.env` 至少应修改 `POSTGRES_PASSWORD` 和 `BOT_INTERNAL_SECRET`。示例文件只使用占位符，不包含真实密钥。
+`.env` 至少应修改 `POSTGRES_PASSWORD` 和 `BOT_INTERNAL_SECRET`。示例文件只使用占位符，不包含真实密钥。`POSTGRES_PASSWORD` 没有默认值，未设置时 `docker compose` 会直接报错退出。
 
 ### 4. 启动服务
 
@@ -87,7 +87,7 @@ docker compose ps
 
 - **前端界面**: http://localhost:3000
 - **后端 API**: 默认不暴露到宿主机；容器内健康检查使用 `GET /api/v1/system/health`
-- **首次注册**: 打开注册页面注册第一个账号，用户名必须在 `ADMIN_USERNAMES` 中才会成为管理员
+- **首次注册**: `ADMIN_USERNAMES` 默认留空，请先在 `.env` 中填入管理员用户名，再**第一个**注册该用户名的账号才会成为管理员；系统已有用户后，名单内的用户名不能再被注册或改名占用（防抢注顶替）
 
 ## 架构说明
 

@@ -981,7 +981,15 @@
     "prunePreserveAdmin": "保留管理员操作日志（仅对天数清理生效）",
     "pruneConfirm": "确认清理",
     "pruneDone": "条件清理完成",
-    "pruneFailed": "条件清理失败"
+    "pruneFailed": "条件清理失败",
+    "deleteConfirmTitle": "删除这条审计日志？",
+    "deleteConfirmDescription": "将删除 #{id}（{action}）。删除操作本身会留下一条不可删除的记录。",
+    "filterSource": "来源",
+    "allSources": "全部来源",
+    "sourceHttp": "网页 / API",
+    "sourceTelegram": "Telegram",
+    "sourceScheduler": "定时任务",
+    "sourceSystem": "系统"
   },
   "adminLogs": {
     "unknown": "未知",
@@ -1974,10 +1982,10 @@
     "unitHours": "小时",
     "cleanupNoEmbyTitle": "Web 账号清理参数",
     "cleanupNoEmbyDescription": "注册超过该天数、没有 Emby 且没有 Emby 开通资格的 Web 账号会被清理。",
-    "cleanupPendingTitle": "Emby 开通资格清理参数",
-    "cleanupPendingDescription": "每次执行会收回所有尚未创建 Emby 的开通资格，不删除 Web 账号。",
+    "cleanupPendingTitle": "资格发放超过多少天才收回",
+    "cleanupPendingDescription": "只收回发放超过该天数仍未创建 Emby 的开通资格，不删除 Web 账号。",
     "enforceGroupTitle": "群成员校验参数",
-    "enforceGroupDescription": "检测到用户回到群里且账号未过期时，是否自动解禁并启用其 Emby 和系统账号。关闭时仅标记为待审核。注意：ban_on_leave 开启时自动解禁不会生效。",
+    "enforceGroupDescription": "检测到因退群被停用的用户回到群里且账号未过期时，是否自动启用其系统账号，并恢复当时随之停用的 Emby；管理员手动停权的账号不受影响。关闭时仅标记为待审核。注意：ban_on_leave 开启时自动解禁不会生效。",
     "cleanupAuditLogsTitle": "审计日志清理参数",
     "cleanupAuditLogsDescription": "按配置的保留天数和最大条数策略清理过期操作日志，可选择保留管理员操作。",
     "cleanupUnlinkedEmbyTitle": "孤立 Emby 账号清理参数",
@@ -2163,8 +2171,27 @@
       "max_workers": "并发数",
       "skipped_no_id": "无设备ID",
       "skipped_twilight": "跳过Twilight",
-      "skipped_protected": "跳过受保护"
-    }
+      "skipped_protected": "跳过受保护",
+      "would_disable": "拟停用",
+      "circuit_breaker_tripped": "触发熔断",
+      "aborted": "已中止",
+      "abort_reason": "中止原因",
+      "skipped_other_disabled": "跳过（非退群停用）",
+      "rejoined_emby_enabled": "回群恢复 Emby",
+      "rejoined_emby_enable_failed": "回群恢复 Emby 失败",
+      "emby_disable_failed": "Emby 停用失败",
+      "partial": "部分完成",
+      "planned": "计划改动",
+      "mirror_fixed": "修正本地镜像",
+      "skipped_manual_ban": "跳过（管理员封禁）",
+      "skipped_emby_admin": "跳过（Emby 管理员）",
+      "skipped_recent": "跳过（未满天数）",
+      "next_after_uid": "下一批起点 UID",
+      "truncated": "已分批"
+    },
+    "timezoneLabel": "调度时区：{tz}",
+    "timezoneHint": "时间按调度时区 {tz} 解释（配置项 Scheduler.timezone）。",
+    "previewHint": "只列出会受影响的用户，不做任何改动；确认结果后取消勾选再执行。"
   },
   "emailAdmin": {
     "title": "邮箱管理",
@@ -3308,5 +3335,43 @@
   },
   "deviceAuditPatch": {
     "refreshedAt": "更新于 {time}"
+  },
+  "passwordStrength": {
+    "defaultLabel": "新密码",
+    "required": "请提供{label}",
+    "tooLong": "{label}过长，最多 128 位",
+    "tooShort": "{label}强度不足：至少 8 位，且包含大小写字母和数字",
+    "needLower": "{label}强度不足：至少包含一个小写字母",
+    "needUpper": "{label}强度不足：至少包含一个大写字母",
+    "needDigit": "{label}强度不足：至少包含一个数字",
+    "ok": "强度合格",
+    "levelWeak": "弱",
+    "levelFair": "一般",
+    "levelGood": "良好",
+    "levelStrong": "强"
+  },
+  "asyncHandler": {
+    "status401": "登录态已失效，请重新登录",
+    "status403": "权限不足",
+    "status404": "请求的资源不存在",
+    "status409": "操作冲突，请刷新后重试",
+    "status413": "上传内容过大",
+    "status429": "请求过于频繁，请稍后再试",
+    "status5xx": "服务器开小差了，请稍后再试",
+    "defaultErrorTitle": "操作失败",
+    "requestFailed": "请求失败",
+    "networkError": "网络异常"
+  },
+  "errorPage": {
+    "title": "页面崩溃了",
+    "description": "抱歉，页面遇到未预期错误。可以先重试；如果反复失败，请刷新或回到首页。",
+    "errorId": "错误 ID：",
+    "retry": "重试",
+    "home": "回到首页"
+  },
+  "authStore": {
+    "sessionChanged": "登录状态已变化，请重新确认",
+    "userPayloadInvalid": "服务器返回的用户信息格式异常",
+    "defaultRoleName": "普通用户"
   }
 }

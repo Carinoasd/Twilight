@@ -73,19 +73,23 @@ type App struct {
 	//   - store / sessions / limiter / redis 接口/指针的 (type,data) 双 word
 	//     非原子赋值导致 vtable 与 data 撕裂触发 segfault；
 	//   - reload 中途读端拿到 cfg 是 next、store 仍是 prev 的混合视图。
-	runtime                   atomic.Pointer[runtimeState]
-	routes                    []Route
-	routeIndex                map[routeIndexKey][]int
-	routePathIndex            map[routePathIndexKey][]int
-	runtimeMu                 sync.Mutex
-	setupMu                   sync.Mutex
-	configSignature           string
-	configSignatureCheckedAt  atomic.Int64
-	telegramBotMu             sync.Mutex
-	telegramBotCacheKey       telegramBotConfigKey
-	telegramBotCacheUntil     time.Time
-	telegramBotCache          map[string]any
-	telegramEndpointCache     atomic.Pointer[telegramEndpointCacheEntry]
+	runtime                  atomic.Pointer[runtimeState]
+	routes                   []Route
+	routeIndex               map[routeIndexKey][]int
+	routePathIndex           map[routePathIndexKey][]int
+	runtimeMu                sync.Mutex
+	setupMu                  sync.Mutex
+	configSignature          string
+	configSignatureCheckedAt atomic.Int64
+	telegramBotMu            sync.Mutex
+	telegramBotCacheKey      telegramBotConfigKey
+	telegramBotCacheUntil    time.Time
+	telegramBotCache         map[string]any
+	telegramEndpointCache    atomic.Pointer[telegramEndpointCacheEntry]
+	schedulerTZCache         atomic.Pointer[schedulerTZEntry]
+	// 定时任务失败通知的节流状态（jobID → 上次通知时间）。
+	schedulerAlertMu          sync.Mutex
+	schedulerAlertAt          map[string]time.Time
 	telegramCommandIndex      atomic.Pointer[telegramCommandConfigIndex]
 	telegramStatusMu          sync.Mutex
 	telegramLastOKAt          int64
@@ -96,6 +100,7 @@ type App struct {
 	telegramEmbyHealth        telegramEmbyHealthCache
 	telegramPanelMu           sync.Mutex
 	telegramPanels            map[string]telegramPanelContext
+	telegramPanelThrottle     telegramCooldown
 	developerJSMu             sync.Mutex
 	developerJSCallbacks      map[string]developerJSCallbackContext
 	developerJSWaiters        map[string]developerJSMessageWaiter
@@ -258,12 +263,18 @@ type principal struct {
 
 type auditRequestState struct {
 	wrote atomic.Bool
+	// dryRun 记录本次请求是否为预览：0 未知，1 实际执行，2 预览。
+	// decodeMap 发现 payload 显式带 dry_run 时自动写入，handler 也可用
+	// markAuditDryRun 显式标记；fallback 审计据此在 detail 里加 dry_run。
+	dryRun atomic.Int32
 }
 
 type statusResponseWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+	// errorCode 由 writeJSONWithCode 回填，供失败请求的 fallback 审计记录 error_code。
+	errorCode string
 }
 
 func (w *statusResponseWriter) WriteHeader(status int) {
@@ -814,13 +825,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		lw.WriteHeader(http.StatusNoContent)
 		return
 	}
-	bodyLimit := a.cfg().MaxUploadSize
-	if strings.HasPrefix(r.URL.Path, "/api/v1/system/admin/migration/") {
-		// Migration archives are bounded by the archive parser rather than the
-		// ordinary image-upload limit. The route still authenticates as admin
-		// before reading the body in its handler.
-		bodyLimit = migration.MaxArchiveBytes + 8<<20
+	// 路由匹配用的是清理后的路径，但不少 handler（会话管理员视图、上传大小例外、
+	// 启用/停用方向判断等）直接看 r.URL.Path。带 “..” / “.” / 空段的请求会让两边
+	// 看到不同的路径，例如 /api/v1/users/admin/../me/sessions 能以普通用户身份拿到
+	// 管理员视图。正常客户端不会发出这种路径，入口处一律拒绝。
+	if !requestPathCanonical(r.URL.Path) {
+		failWithCode(lw, http.StatusBadRequest, ErrBadRequest, "请求路径不规范")
+		return
 	}
+	bodyLimit := requestBodyLimit(r.URL.Path, a.cfg().MaxUploadSize)
 	if bodyLimit > 0 {
 		r.Body = http.MaxBytesReader(lw, r.Body, bodyLimit)
 	}
@@ -874,7 +887,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	a.maybeAuditHTTPMutation(r, route, params, principal, status)
+	a.maybeAuditHTTPMutation(r, route, params, principal, status, lw.errorCode)
 }
 
 func (a *App) allowRate(ctx context.Context, key string, limit int, window time.Duration) bool {
@@ -1636,6 +1649,7 @@ func decodeMap(r *http.Request) map[string]any {
 	if jsonDepthExceeds(payload, maxJSONNestingDepth) {
 		return map[string]any{}
 	}
+	noteAuditDryRunFromPayload(r, payload)
 	return payload
 }
 
@@ -1991,6 +2005,10 @@ func statusFromError(w http.ResponseWriter, err error) bool {
 		failWithCode(w, http.StatusBadRequest, ErrTicketAlreadyClosed, "工单已关闭")
 		return true
 	}
+	if errors.Is(err, store.ErrDeviceBlocked) {
+		failWithCode(w, http.StatusForbidden, ErrDeviceBlocked, "该设备已被管理员封禁")
+		return true
+	}
 	// ErrLastAdmin 之前由各 handler 单独 errors.Is 分支判，漏一处就直接降级
 	// 到下面的 ErrInternal/500，前端拿到泛化错误码无法 routing 到"最后一个
 	// 管理员"提示。集中映射后所有调用 statusFromError 的路径自动获得正确的
@@ -2001,4 +2019,42 @@ func statusFromError(w http.ResponseWriter, err error) bool {
 	}
 	failWithCode(w, http.StatusInternalServerError, ErrInternal, "操作失败")
 	return true
+}
+
+// requestPathCanonical 报告路径是否已是规范形式：不含 “.”、“..” 段，也没有连续斜杠。
+// 末尾单个斜杠允许（部分客户端会带），其余一律视为不规范。
+func requestPathCanonical(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	trimmed := strings.TrimSuffix(p[1:], "/")
+	if trimmed == "" {
+		return true
+	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// migrationImportPaths 是允许上传迁移封包、因而放宽请求体上限的路由（精确匹配）。
+var migrationImportPaths = map[string]bool{
+	"/api/v1/system/admin/migration/import": true,
+	"/api/v2/admin/migration/import":        true,
+}
+
+// requestBodyLimit 返回某路径的请求体上限。
+//
+// 迁移封包受封包解析器自身的上限约束，不走普通图片上传上限；路由仍先按管理员鉴权
+// 再由 handler 读 body。旧实现按原始路径前缀 /api/v1/system/admin/migration/ 放宽，
+// 而路由匹配用的是清理后的路径——带 “..” 的请求能让任意路由拿到约 536MB 的上限。
+// 入口已拒绝非规范路径（requestPathCanonical），这里再改成只对导入路由精确放宽，
+// 同前缀下的 status / export 等不再沾光；V2 导入路由一并放宽，与 V1 口径一致。
+func requestBodyLimit(path string, defaultLimit int64) int64 {
+	if migrationImportPaths[strings.TrimSuffix(path, "/")] {
+		return migration.MaxArchiveBytes + 8<<20
+	}
+	return defaultLimit
 }

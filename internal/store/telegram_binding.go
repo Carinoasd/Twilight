@@ -28,6 +28,8 @@ func (s *Store) UnbindUserTelegram(uid, expectedTelegramID int64) (User, error) 
 	defer s.mu.Unlock()
 	var updated, previous User
 	err := s.mutateAndSaveWithTxLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, previous = User{}, User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -82,7 +84,8 @@ func (s *Store) CompleteUserTelegramRebind(uid, expectedTelegramID, expectedSinc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.mutateAndSaveLocked(func() error {
-		changed, embySuspended = false, false
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, changed, embySuspended = User{}, false, false
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -127,7 +130,7 @@ func (s *Store) MarkRebindEmbySuspended(uid, expectedSince int64) error {
 			return ErrConflict
 		}
 		if u.RebindEmbySuspended {
-			return nil
+			return errNoChange
 		}
 		u.RebindEmbySuspended = true
 		s.state.Users[uid] = u

@@ -134,6 +134,35 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		autoRenewalPointsSpent := 0
 		autoRenewalEmbyEnabled := 0
 		autoRenewalEmbyEnableFailed := 0
+		// Emby 停用失败必须计数并记录：本地已停用，下一轮 check_expired 会跳过这个人，
+		// 只能靠 emby_state_reconcile 收敛。uid 清单写进稽核与摘要，方便管理员追查。
+		embyDisableFailed := 0
+		disabledUIDs := []int64{}
+		embyDisableFailedUIDs := []int64{}
+		renewedUIDs := []int64{}
+		expiredLogs := []string{}
+		disableEmbyWithRetry := func(u store.User) {
+			sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
+			defer sideCancel()
+			disabledRemote := false
+			err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+				var err error
+				disabledRemote, err = a.disableRemoteEmbyForWebState(ctx, u)
+				return err
+			})
+			if err != nil {
+				embyDisableFailed++
+				embyDisableFailedUIDs = appendLimitedUID(embyDisableFailedUIDs, u.UID)
+				zap.L().Warn("failed to disable Emby for expired user", zap.Int64("uid", u.UID), zap.Error(err))
+				if len(expiredLogs) < 50 {
+					expiredLogs = append(expiredLogs, fmt.Sprintf("failed to disable Emby uid=%d: %s", u.UID, redactSensitiveText(err.Error())))
+				}
+				return
+			}
+			if disabledRemote {
+				embyDisabled++
+			}
+		}
 		cfg := *a.cfg()
 		autoRenewalActive := signinAutoRenewalEnabled(cfg)
 		users := a.store().ListUsers()
@@ -167,10 +196,13 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					renewed, _, renewErr := a.spendSigninRenewal(u.UID, cfg.SigninRenewalCost, cfg.SigninRenewalDays, time.Unix(now, 0), true)
 					if renewErr == nil {
 						autoRenewed++
+						renewedUIDs = appendLimitedUID(renewedUIDs, renewed.UID)
 						autoRenewalPointsSpent += cfg.SigninRenewalCost
 						if renewed.EmbyDisabled && a.embyConfigured() {
 							sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-							if err := a.embyApplyEnabledState(sideCtx, renewed.UID, renewed.EmbyID, true); err != nil {
+							if err := embyRetryOn5xx(sideCtx, func(ctx context.Context) error {
+								return a.embyApplyEnabledState(ctx, renewed.UID, renewed.EmbyID, true)
+							}); err != nil {
 								autoRenewalEmbyEnableFailed++
 								zap.L().Warn("failed to re-enable Emby after automatic sign-in renewal", zap.Int64("uid", renewed.UID), zap.Error(err))
 							} else {
@@ -202,12 +234,10 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				// but keep the account active so they can still log in and renew
 				isInvited := invitedUIDs[u.UID]
 				if isInvited {
-					sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
 					// Only disable Emby, keep account active so the user
 					// can re-login (or the inviter can renew on their behalf)
-					if disabledRemote, err := a.disableRemoteEmbyForWebState(sideCtx, u); err == nil && disabledRemote {
-						embyDisabled++
-					}
+					disableEmbyWithRetry(u)
+					sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
 					// 即便保留 Active=true 让用户能重新登录续期，已经过期的
 					// 时刻必须立刻让现有会话失效——否则 stale cookie 在
 					// SessionTTL 内仍能访问受保护接口（包括非续期接口），
@@ -216,18 +246,18 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					a.sessions().DeleteUser(sideCtx, u.UID)
 					sideCancel()
 					disabled++
+					disabledUIDs = appendLimitedUID(disabledUIDs, u.UID)
 				} else {
 					// Non-invited users: disable the whole account
 					updated, err := a.store().SetUserActiveAtomic(u.UID, false)
 					if err == nil {
+						disableEmbyWithRetry(updated)
 						sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-						if disabledRemote, err := a.disableRemoteEmbyForWebState(sideCtx, updated); err == nil && disabledRemote {
-							embyDisabled++
-						}
 						// 立即清除该用户的所有会话。否则 stale
 						// token 仍可访问受保护接口直到 SessionTTL 自然到期。
 						a.sessions().DeleteUser(sideCtx, updated.UID)
 						disabled++
+						disabledUIDs = appendLimitedUID(disabledUIDs, updated.UID)
 						sideCancel()
 					}
 				}
@@ -239,17 +269,29 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"auto_renewal_points_spent":       autoRenewalPointsSpent,
 				"auto_renewal_emby_enabled":       autoRenewalEmbyEnabled,
 				"auto_renewal_emby_enable_failed": autoRenewalEmbyEnableFailed,
+				"uids":                            renewedUIDs,
 			})
 		}
-		if disabled > 0 || embyDisabled > 0 {
+		if disabled > 0 || embyDisabled > 0 || embyDisableFailed > 0 {
 			a.auditSystem("scheduler", "disable_expired_users", 0, map[string]any{
-				"disabled":          disabled,
-				"emby_disabled":     embyDisabled,
-				"skipped_protected": skippedProtected,
+				"disabled":                 disabled,
+				"emby_disabled":            embyDisabled,
+				"emby_disable_failed":      embyDisableFailed,
+				"skipped_protected":        skippedProtected,
+				"uids":                     disabledUIDs,
+				"emby_disable_failed_uids": embyDisableFailedUIDs,
 			})
+		}
+		expiredLogs = append(expiredLogs, fmt.Sprintf("auto-renewed %d and disabled %d expired users", autoRenewed, disabled))
+		if embyDisableFailed > 0 {
+			// Emby 停用失败要让本轮显示为失败（并触发失败通知），漏掉的由 emby_state_reconcile 收敛。
+			expiredLogs = append(expiredLogs, fmt.Sprintf("%d Emby accounts could not be disabled; emby_state_reconcile will retry", embyDisableFailed))
 		}
 		return map[string]any{
-			"success":                         true,
+			"success":                         embyDisableFailed == 0,
+			"emby_disable_failed":             embyDisableFailed,
+			"emby_disable_failed_uids":        embyDisableFailedUIDs,
+			"disabled_uids":                   disabledUIDs,
 			"disabled":                        disabled,
 			"emby_disabled":                   embyDisabled,
 			"skipped_protected":               skippedProtected,
@@ -260,7 +302,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			"auto_renewal_points_spent":       autoRenewalPointsSpent,
 			"auto_renewal_emby_enabled":       autoRenewalEmbyEnabled,
 			"auto_renewal_emby_enable_failed": autoRenewalEmbyEnableFailed,
-		}, []string{fmt.Sprintf("auto-renewed %d and disabled %d expired users", autoRenewed, disabled)}, nil
+		}, expiredLogs, nil
 	case "check_expiring", "expiry_reminders":
 		defaultDays := a.cfg().NotificationExpiryRemindDays
 		if defaultDays <= 0 {
@@ -306,6 +348,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			expiredEmailCodes, _ = a.store().CleanupExpiredEmailVerifications(time.Now().Unix())
 		}
 		staleCleared := 0
+		staleClearedUIDs := []int64{}
 		if cfg.EmailAutoCleanupUnverified {
 			// 定期清理已绑定但长期未验证的邮箱，释放邮箱地址供其他用户使用。
 			// 使用基于 CreatedAt 的年龄门限而非 ClearUnverifiedEmails 的全量清理，
@@ -314,17 +357,35 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			if hours <= 0 {
 				hours = 24
 			}
+			staleClearedUIDs = a.unverifiedEmailUIDsBefore(time.Now().Add(-time.Duration(hours) * time.Hour).Unix())
 			_, staleCleared, _ = a.store().CleanupUnverifiedEmailsByAge(time.Now().Add(-time.Duration(hours) * time.Hour).Unix())
 		}
-		if !a.embyConfigured() {
-			return map[string]any{"success": true, "configured": false, "active": 0, "total": 0, "expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared}, []string{"Emby not configured", fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared)}, nil
+		// Telegram 绑定链接旧实现只在启动 / 配置重载时清理，这里并入例行清理。
+		now := time.Now().Unix()
+		expiredTelegramLinks := a.cleanupExpiredTelegramLinks(now)
+		orphanedTelegramLinks := a.cleanupOrphanedTelegramLinks()
+		summary := map[string]any{"success": true, "configured": a.embyConfigured(), "active": 0, "total": 0,
+			"expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared,
+			"expired_telegram_links": expiredTelegramLinks, "orphaned_telegram_links": orphanedTelegramLinks}
+		logs := []string{fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared), fmt.Sprintf("cleaned up %d expired and %d orphaned Telegram bind links", expiredTelegramLinks, orphanedTelegramLinks)}
+		if len(staleClearedUIDs) > 0 {
+			// 清掉用户邮箱属于改用户资料，写系统稽核并附 uid 清单。
+			a.auditSystem("scheduler", "clear_stale_unverified_emails", 0, map[string]any{"cleared": staleCleared, "uids": staleClearedUIDs})
 		}
+		if !a.embyConfigured() {
+			return summary, append([]string{"Emby not configured"}, logs...), nil
+		}
+		// 读 Emby 会话数只是巡检附带的观测项。前面的清理已经完成，读不到 Emby 时不能
+		// 把整轮标成失败——记为部分完成并附上原因。
 		sessions, err := a.embySessionsSnapshot(r.Context(), false)
 		if err != nil {
-			return map[string]any{"success": false}, nil, err
+			summary["partial"] = true
+			summary["emby_error"] = redactSensitiveText(err.Error())
+			return summary, append(logs, "failed to read Emby sessions: "+redactSensitiveText(err.Error())), nil
 		}
-		active := countEmbyPlayingSessions(sessions)
-		return map[string]any{"success": true, "active": active, "total": len(sessions), "expired_sessions": expiredSessions, "expired_email_codes": expiredEmailCodes, "cleared_unverified_emails": staleCleared}, []string{fmt.Sprintf("read %d Emby sessions", len(sessions)), fmt.Sprintf("cleaned up %d expired sessions", expiredSessions), fmt.Sprintf("cleaned up %d expired email codes", expiredEmailCodes), fmt.Sprintf("cleared %d stale unverified emails", staleCleared)}, nil
+		summary["active"] = countEmbyPlayingSessions(sessions)
+		summary["total"] = len(sessions)
+		return summary, append([]string{fmt.Sprintf("read %d Emby sessions", len(sessions))}, logs...), nil
 	case "emby_sync":
 		if !a.embyConfigured() {
 			return map[string]any{"success": true, "configured": false}, []string{"Emby not configured"}, nil
@@ -363,31 +424,68 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		for name := range duplicateRemoteNames {
 			delete(remoteByName, name)
 		}
-		users := a.store().ListUsers()
+		allUsers := a.store().ListUsers()
 		maxUsers := clamp(jobParamInt(params, "max_users", 1000), 1, 50000)
-		if len(users) > maxUsers {
-			users = users[:maxUsers]
-		}
+		// 占用关系必须看全部用户，不能只看本批，否则批外用户已占用的远端 ID 会被误判为空闲。
 		claimedRemoteIDs := map[string]int64{}
-		for _, u := range users {
+		for _, u := range allUsers {
 			if u.EmbyID != "" && !isSyntheticEmbyID(u.EmbyID, u.UID) {
 				claimedRemoteIDs[u.EmbyID] = u.UID
 			}
 		}
+		// max_users 截断改成游标分批：用户按 UID 升序，本批从 after_uid 之后开始；
+		// 未显式指定时接着上一轮留下的 next_after_uid 继续，跑完一圈后回到开头。
+		afterUID := int64(jobParamInt(params, "after_uid", -1))
+		if afterUID < 0 {
+			afterUID = a.embySyncLastCursor()
+		}
+		users := make([]store.User, 0, min(len(allUsers), maxUsers))
+		truncated := false
+		for _, u := range allUsers {
+			if u.UID <= afterUID {
+				continue
+			}
+			if len(users) >= maxUsers {
+				truncated = true
+				break
+			}
+			users = append(users, u)
+		}
+		nextAfterUID := int64(0)
+		if truncated && len(users) > 0 {
+			nextAfterUID = users[len(users)-1].UID
+		}
+		logs = append(logs, fmt.Sprintf("batch: after_uid=%d, %d users, next_after_uid=%d", afterUID, len(users), nextAfterUID))
 		updatedNames, syncedState, stateUnchanged, missing, filledIDs, repairedPlaceholders, conflicts := 0, 0, 0, 0, 0, 0, 0
+		filledUIDs, embyDisabledUIDs := []int64{}, []int64{}
+		nameCandidates := 0
 		for _, u := range users {
 			if err := syncCtx.Err(); err != nil {
-				return map[string]any{"success": false, "terminated": true, "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts}, []string{"job terminated"}, err
+				return map[string]any{"success": false, "terminated": true, "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, []string{"job terminated"}, err
 			}
 			placeholder := isSyntheticEmbyID(u.EmbyID, u.UID)
 			remoteUser, okRemote := remoteByID[u.EmbyID]
+			// 按名称认领远端账号只用于修复“面板自己开通、但 EmbyID 还是占位值”的账号。
+			// 没有占位 ID 的账号绝不按名称认领：注册码注册时 EmbyUsername 就是用户自己
+			// 填的 Web 用户名，注册一个与他人 Emby 同名的账号，等管理员跑一次同步就能
+			// 接管对方的 Emby（随后改密码、解绑、删号）。远端管理员账号同样不自动认领。
+			// 这些同名情况只记为候选，交给管理员手动绑定（手动绑定需要 Emby 密码）。
 			if !okRemote {
 				for _, name := range []string{u.EmbyUsername, u.Username} {
-					if candidate, okByName := remoteByName[normalizeEmbyName(name)]; okByName {
+					candidate, okByName := remoteByName[normalizeEmbyName(name)]
+					if strings.TrimSpace(name) == "" || !okByName {
+						continue
+					}
+					if placeholder && !embyRemoteIsAdministrator(candidate) {
 						remoteUser = candidate
 						okRemote = true
-						break
+					} else {
+						nameCandidates++
+						if len(logs) < 200 {
+							logs = append(logs, fmt.Sprintf("user #%d (%s): same-name Emby account found, not auto-linked (needs manual bind)", u.UID, u.Username))
+						}
 					}
+					break
 				}
 			}
 			if !okRemote {
@@ -433,6 +531,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				if err == nil {
 					if remoteID != u.EmbyID {
 						filledIDs++
+						filledUIDs = appendLimitedUID(filledUIDs, u.UID)
 						if placeholder {
 							repairedPlaceholders++
 						}
@@ -462,6 +561,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				return err
 			}) == nil {
 				syncedState++
+				embyDisabledUIDs = appendLimitedUID(embyDisabledUIDs, updatedUser.UID)
 				logs = append(logs, "user #"+fmt.Sprintf("%d", updatedUser.UID)+" ("+updatedUser.Username+"): emby disabled by policy")
 			}
 		}
@@ -476,9 +576,19 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"repaired_placeholders": repairedPlaceholders,
 				"missing":               missing,
 				"conflicts":             conflicts,
+				"filled_uids":           filledUIDs,
+				"emby_disabled_uids":    embyDisabledUIDs,
 			})
 		}
-		return map[string]any{"success": true, "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts}, logs, nil
+		return map[string]any{"success": true, "after_uid": afterUID, "next_after_uid": nextAfterUID, "truncated": truncated, "batch_users": len(users), "remote_users": len(remote), "updated_names": updatedNames, "synced_state": syncedState, "state_unchanged": stateUnchanged, "missing": missing, "filled_emby_ids": filledIDs, "repaired_placeholders": repairedPlaceholders, "conflicts": conflicts, "name_candidates": nameCandidates}, logs, nil
+	case "auto_backup_database":
+		// 未开启时自动排程空转；管理员手动「立即执行」总是会备份。
+		if !jobParamBool(params, "enabled", a.cfg().SchedulerAutoBackupEnabled) && !schedulerManualRun(r) {
+			return map[string]any{"success": true, "skipped": true, "enabled": false}, []string{"auto backup disabled"}, nil
+		}
+		return a.runAutoBackupDatabase(jobParamInt(params, "keep", autoBackupKeep(a.cfg().SchedulerAutoBackupKeep)))
+	case "emby_state_reconcile":
+		return a.runEmbyStateReconcile(r.Context(), jobParamBool(params, "dry_run", false), max(jobParamInt(params, "max_changes", embyReconcileDefaultMaxChanges), 0))
 	case "cleanup_no_emby":
 		ignoreEnabled := jobParamBool(params, "ignore_enabled_flag", false)
 		enabled := jobParamBool(params, "enabled", jobParamBool(params, "auto_enabled", a.cfg().AutoCleanupNoEmby))
@@ -499,6 +609,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		deleted := 0
 		failed := 0
 		skippedPending := 0
+		deletedUsers := []map[string]any{}
 		for _, u := range a.store().ListUsers() {
 			if err := r.Context().Err(); err != nil {
 				return map[string]any{"success": false, "terminated": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "skipped_pending_emby": skippedPending}, []string{"job terminated"}, err
@@ -517,6 +628,11 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			if registered == 0 {
 				registered = u.CreatedAt
 			}
+			// 「多久没有 Emby」要从最近一次解绑算起，不能只看注册时间：注册三年、昨天
+			// 刚解绑 Emby 的老用户不应该被当成「注册后长期未开通」直接删掉。
+			if u.EmbyUnboundAt > registered {
+				registered = u.EmbyUnboundAt
+			}
 			if threshold > 0 && registered > threshold {
 				continue
 			}
@@ -531,6 +647,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			} else {
 				cancel()
 				deleted++
+				if len(deletedUsers) < auditUIDListLimit {
+					deletedUsers = append(deletedUsers, map[string]any{"uid": u.UID, "username": u.Username})
+				}
 			}
 		}
 		if deleted > 0 {
@@ -538,6 +657,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"deleted":    deleted,
 				"candidates": candidates,
 				"failed":     failed,
+				"days":       days,
+				"users":      deletedUsers,
 			})
 		}
 		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "deleted": deleted, "failed": failed, "dry_run": dryRun, "days": days, "days_threshold": days, "preserve_tg_bound": preserveTG, "skipped_pending_emby": skippedPending}, []string{fmt.Sprintf("processed %d no-Emby web users", candidates)}, nil
@@ -548,14 +669,34 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "enabled": false, "cleared": 0}, []string{"auto cleanup pending-Emby entitlement disabled"}, nil
 		}
 		dryRun := jobParamBool(params, "dry_run", false)
+		// 旧实现没有年龄门槛，scope=all 会把刚发放的资格也一次收回。现在只收回发放
+		// 超过 days 天仍未开通的资格（SAR.auto_cleanup_pending_emby_days，默认 7）。
+		days := jobParamInt(params, "days", a.cfg().AutoCleanupPendingEmbyDays)
+		if days <= 0 {
+			days = 7
+		}
+		threshold := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 		candidates := 0
 		cleared := 0
 		failed := 0
+		skippedRecent := 0
+		clearedUIDs := []int64{}
 		for _, u := range a.store().ListUsers() {
 			if err := r.Context().Err(); err != nil {
 				return map[string]any{"success": false, "terminated": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun}, []string{"job terminated"}, err
 			}
 			if a.userIsProtected(u) || u.EmbyID != "" || !u.PendingEmby {
+				continue
+			}
+			grantedAt := u.PendingEmbyGrantedAt
+			if grantedAt == 0 {
+				grantedAt = u.RegisterTime
+				if u.CreatedAt > grantedAt {
+					grantedAt = u.CreatedAt
+				}
+			}
+			if grantedAt > threshold {
+				skippedRecent++
 				continue
 			}
 			candidates++
@@ -570,12 +711,21 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				failed++
 			} else {
 				cleared++
+				clearedUIDs = appendLimitedUID(clearedUIDs, u.UID)
 			}
 		}
-		return map[string]any{"success": true, "enabled": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun, "scope": "all"}, []string{fmt.Sprintf("cleared %d pending Emby entitlements", cleared)}, nil
+		if cleared > 0 {
+			a.auditSystem("scheduler", "clear_pending_emby_entitlements", 0, map[string]any{"cleared": cleared, "failed": failed, "days": days, "uids": clearedUIDs})
+		}
+		return map[string]any{"success": failed == 0, "enabled": true, "candidates": candidates, "cleared": cleared, "failed": failed, "dry_run": dryRun, "days": days, "skipped_recent": skippedRecent, "cleared_uids": clearedUIDs}, []string{fmt.Sprintf("cleared %d pending Emby entitlements older than %d days", cleared, days)}, nil
 	case "enforce_group_membership":
-		autoEnableRejoined := jobParamBool(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined)
-		result, logs, err := a.enforceTelegramMembership(r.Context(), autoEnableRejoined)
+		// dry_run 只列出会停用 / 会启用的名单；breaker_* 允许管理员临时调整熔断阈值。
+		result, logs, err := a.enforceTelegramMembershipWithOptions(r.Context(), telegramMembershipOptions{
+			AutoEnableRejoined: jobParamBool(params, "auto_enable_rejoined", a.cfg().TelegramAutoEnableRejoined),
+			DryRun:             jobParamBool(params, "dry_run", false),
+			BreakerPercent:     clamp(jobParamInt(params, "breaker_percent", a.cfg().TelegramMembershipBreakerPercent), 0, 100),
+			BreakerMax:         max(jobParamInt(params, "breaker_max", a.cfg().TelegramMembershipBreakerMax), 0),
+		})
 		result["success"] = err == nil
 		return result, logs, err
 	case "check_telegram_bindings":
@@ -646,6 +796,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		adminSet := a.telegramAdminSet(r.Context(), chats[0])
 		kicked, skipped, failedCount, notInGroup, scanned := 0, 0, 0, 0, 0
+		kickedTargets := []map[string]any{}
 		logs := []string{}
 		for _, target := range targets {
 			if err := r.Context().Err(); err != nil {
@@ -697,6 +848,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				continue
 			}
 			kicked++
+			if len(kickedTargets) < auditUIDListLimit {
+				kickedTargets = append(kickedTargets, map[string]any{"uid": target.UID, "telegram_id": target.TelegramID, "reason": target.Reason})
+			}
 		}
 		summary["kicked"] = kicked
 		summary["skipped"] = skipped
@@ -710,6 +864,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 				"skipped": skipped,
 				"failed":  failedCount,
 				"chat_id": chats[0],
+				"targets": kickedTargets,
 			})
 		}
 		return summary, logs, nil
@@ -729,6 +884,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "enabled": false}, []string{"system auto update disabled"}, nil
 		}
 		result := applyGitUpdate(r.Context(), a.cfg().SystemUpdateRepoURL, a.cfg().SystemUpdateBranch, a.cfg().SystemUpdateRestartServices, false, false)
+		a.auditSystem("scheduler", "system_update", 0, systemUpdateAuditDetail(result, a.cfg().SystemUpdateBranch))
 		if !boolish(result["success"]) {
 			return result, nil, fmt.Errorf("%s", asString(result["message"]))
 		}
@@ -739,18 +895,31 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			return map[string]any{"success": true, "skipped": true, "reason": "auto cleanup disabled"}, nil, nil
 		}
 		logs := []string{}
-		// 按条数裁剪（保留最新 N 条）
+		preserveAdmin := jobParamBool(params, "preserve_admin", true)
+		detail := map[string]any{"preserve_admin": preserveAdmin}
+		// 按条数裁剪（保留最新 N 条）；preserve_admin 同样作用于条数裁剪，错误不再吞掉。
 		if maxEntries := jobParamInt(params, "max_entries", 0); maxEntries > 0 {
-			_ = a.store().PruneAuditLogs(maxEntries)
-			logs = append(logs, fmt.Sprintf("enforced max %d entries (current: %d)", maxEntries, a.store().AuditLogCount()))
+			removed, err := a.store().PruneAuditLogs(maxEntries, preserveAdmin)
+			if err != nil {
+				return map[string]any{"success": false}, logs, fmt.Errorf("prune audit logs by count: %w", err)
+			}
+			detail["max_entries"] = maxEntries
+			detail["removed_by_limit"] = removed
+			logs = append(logs, fmt.Sprintf("enforced max %d entries, removed %d (preserve_admin=%v, current: %d)", maxEntries, removed, preserveAdmin, a.store().AuditLogCount()))
 		}
 		// 按天数裁剪
 		if retentionDays := jobParamInt(params, "retention_days", 0); retentionDays > 0 {
-			preserveAdmin := jobParamBool(params, "preserve_admin", true)
 			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
-			removed := a.store().PruneAuditLogsByAge(cutoff, preserveAdmin)
+			removed, err := a.store().PruneAuditLogsByAge(cutoff, preserveAdmin)
+			if err != nil {
+				return map[string]any{"success": false}, logs, fmt.Errorf("prune audit logs by age: %w", err)
+			}
+			detail["retention_days"] = retentionDays
+			detail["removed_by_age"] = removed
 			logs = append(logs, fmt.Sprintf("removed %d entries older than %d days (preserve_admin=%v)", removed, retentionDays, preserveAdmin))
 		}
+		// 排程裁剪同样写一条不可删除的自保记录。
+		a.auditSystem("scheduler", "cleanup_audit_logs", 0, detail)
 		return map[string]any{"success": true, "current": a.store().AuditLogCount()}, logs, nil
 	case "cleanup_unlinked_emby":
 		if !a.embyConfigured() {
@@ -779,7 +948,8 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		unlinked := []map[string]any{}
 		for _, user := range remote {
 			id := embyRemoteID(user)
-			if id == "" || localEmbyIDs[id] {
+			// Emby 服务器管理员（通常是站长自己的账号）从来不归面板管理，不能当孤儿删掉。
+			if id == "" || localEmbyIDs[id] || embyRemoteIsAdministrator(user) {
 				continue
 			}
 			name := embyRemoteName(user)
@@ -790,6 +960,7 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 			logs = append(logs, "unlinked Emby user: "+id+" ("+name+")")
 		}
 		deleted := 0
+		deletedIDs := []string{}
 		if !dryRun && delete {
 			for _, user := range unlinked {
 				id := embyRemoteID(user)
@@ -801,14 +972,18 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 					continue
 				}
 				deleted++
+				if len(deletedIDs) < auditUIDListLimit {
+					deletedIDs = append(deletedIDs, id)
+				}
 				logs = append(logs, "deleted Emby user: "+id)
 			}
 		}
 		if deleted > 0 {
 			a.auditSystem("scheduler", "delete_unlinked_emby", 0, map[string]any{
-				"unlinked": len(unlinked),
-				"deleted":  deleted,
-				"dry_run":  dryRun || !delete,
+				"unlinked":      len(unlinked),
+				"deleted":       deleted,
+				"dry_run":       dryRun || !delete,
+				"emby_user_ids": deletedIDs,
 			})
 		}
 		return map[string]any{"success": true, "unlinked": len(unlinked), "deleted": deleted, "dry_run": dryRun || !delete}, logs, nil
@@ -983,6 +1158,39 @@ func schedulerManualRun(r *http.Request) bool {
 
 func schedulerSideEffectContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+}
+
+// unverifiedEmailUIDsBefore 在清理前取出将被清掉邮箱的 uid（与 CleanupUnverifiedEmailsByAge
+// 同口径），只用于稽核名单，最多 auditUIDListLimit 个。
+func (a *App) unverifiedEmailUIDsBefore(cutoff int64) []int64 {
+	uids := []int64{}
+	for _, u := range a.store().ListUsers() {
+		if u.Email != "" && !u.EmailVerified && u.CreatedAt > 0 && u.CreatedAt < cutoff {
+			uids = appendLimitedUID(uids, u.UID)
+		}
+	}
+	return uids
+}
+
+// embySyncLastCursor 读取最近一轮完成的 emby_sync 留下的 next_after_uid；没有就从头开始。
+func (a *App) embySyncLastCursor() int64 {
+	for _, run := range a.store().SchedulerRuns("emby_sync", 10) {
+		if run.Status != "success" || run.Summary == nil {
+			continue
+		}
+		if value, ok := run.Summary["next_after_uid"]; ok {
+			return int64(numeric(value))
+		}
+	}
+	return 0
+}
+
+// appendLimitedUID 往稽核用的 uid 清单追加，最多 auditUIDListLimit 个。
+func appendLimitedUID(list []int64, uid int64) []int64 {
+	if len(list) >= auditUIDListLimit {
+		return list
+	}
+	return append(list, uid)
 }
 
 func jobParamInt(params map[string]any, key string, fallback int) int {

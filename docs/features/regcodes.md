@@ -141,6 +141,7 @@ WebUI 管理页使用 `/api/v2/admin/regcodes` 资源集合：列表统一返回
 - `consumeRegCodeLocked` 执行：`use_count++`，记录 `used_by` / 去重写入 `used_by_uids` / `used_by_telegram_ids`；若达到次数上限则把 `active` 置为 `false`。
 - 公开注册路径会在提交注册时通过 `bindStatusHub` 原子消费已确认的 Telegram 注册绑定码，并在同一个闭包中创建本地 Web 账号；随后 `CreateUserForRegistration` 把「用户名 / 邮箱 / Telegram 唯一性查重 + 建账号 + 消费注册码（仅限 type=1、非诱饵、目标匹配）+ 写入用户级 Emby 授权锁」合并在同一把 store 写锁内一次完成。绑定码不是注册码，不写入状态文档，服务重启后失效。
 - 登录后使用卡码的路径使用 `ConsumeRegCodeAndUpdateUser` / `ConsumeInviteCodeAndUpdateUser`，把「卡码消费 + 邀请关系创建 + 用户权益更新」合并为一次状态写入；保存失败会整体回滚，不会留下“码已消耗但用户没拿到权益”的半状态。
+- 已消费的次数不可退还：删除用户（含 Telegram `/delAccount` 自删）只从 `used_by` / `used_by_uids` 摘除该 UID，`use_count` 与 `active` 保持不变，防止单次码借删号重放。只有管理员显式的「清理使用记录」或「清理无 Emby 用户的注册资格」才会回退次数。
 
 ## 使用入口
 
@@ -184,7 +185,7 @@ V1 同义路径为 `/api/v1/users/register`。
 - 注册整体按 IP 限流（`rate_limit_register_per_10m`）；带注册码时再叠加一道 `register:regcode:<ip>` 限流，每分钟 10 次。
 - 注册码校验同样排除诱饵码、`type!=1`、指名目标不匹配与不可用状态。若注册卡码指定了 TG 用户名或 TG ID，注册请求必须携带已确认的 `telegram_bind_code`，后端用绑定码中的 Telegram 身份做匹配。
 - 注册提交会再次确认内存绑定码仍处于 `register` 场景、已确认且未过期，并在绑定码 hub 的消费流程内创建账号；创建成功后绑定码立即删除，创建失败则保留绑定码以便用户修正用户名、邮箱或注册码后重试。
-- 启动和配置热重载会自适应修复历史残留：已绑定 Emby 但仍带 `PendingEmby` 的用户会清掉待开通状态；已记录注册码/邀请码使用但用户侧缺失 `emby_grant_locked`、来源或待开通资格的账号，会从既有使用记录恢复这些字段，不会额外消费新卡码或重建邀请关系。
+- 启动和配置热重载会自适应修复历史残留：已绑定 Emby 但仍带 `PendingEmby` 的用户会清掉待开通状态；已记录注册码/邀请码使用但用户侧缺失 `emby_grant_locked`、来源或待开通资格的账号，会从既有使用记录恢复这些字段，不会额外消费新卡码或重建邀请关系。只有用户侧 `emby_grant_locked` 本身丢失时才会恢复待开通资格；授权锁完好但没有 Emby、也没有待开通资格的账号（例如管理员解绑 / 删除了 Emby、清空了注册队列，或排程收回了待开通资格）不会被重新发放。
 
 ## 管理接口（鉴权：AuthAdmin）
 

@@ -193,14 +193,7 @@ func (a *App) persistEmbyPlaybackRecordsFromActivity(ctx context.Context, since 
 	var matchedUsers []store.User
 	if len(activityUserKeys) > 0 {
 		matchedUsers = a.store().UsersMatching(len(activityUserKeys), func(user store.User) bool {
-			for _, key := range []string{user.EmbyID, user.EmbyUsername, user.Username} {
-				if normalized := normalizeEmbyActivityUserKey(key); normalized != "" {
-					if _, ok := activityUserKeys[normalized]; ok {
-						return true
-					}
-				}
-			}
-			return false
+			return embyActivityUserMatchesKeys(user, activityUserKeys)
 		})
 	}
 	usersByKey := embyActivityUsersByKey(matchedUsers)
@@ -213,13 +206,7 @@ func (a *App) persistEmbyPlaybackRecordsFromActivity(ctx context.Context, since 
 	metadata := a.embyItemMetadata(ctx, itemIDs)
 	pending := make([]store.PlaybackRecord, 0, len(events))
 	for _, event := range events {
-		user := usersByKey[normalizeEmbyActivityUserKey(event.UserID)]
-		if user.UID == 0 {
-			user = usersByKey[normalizeEmbyActivityUserKey(event.UserName)]
-		}
-		if user.UID == 0 {
-			user = usersByKey[normalizeEmbyActivityUserKey(event.UserKey)]
-		}
+		user := usersByKey.resolve(event.UserID, event.UserName, event.UserKey)
 		if user.UID == 0 {
 			continue
 		}
@@ -312,16 +299,63 @@ func clampActivityPlaybackDuration(seconds int64) int64 {
 	return seconds
 }
 
-func embyActivityUsersByKey(users []store.User) map[string]store.User {
-	out := make(map[string]store.User, len(users)*3)
+// embyActivityUserIndex 把 Emby 侧的身份映射到本地用户。只认 Emby 身份：
+//   - byID：本地绑定的 EmbyID（最可靠，优先）；
+//   - byName：本地记录的 EmbyUsername，且该用户确实绑定了 Emby。
+//
+// 旧实现把本地站点用户名（Username）也当成 Emby 用户名来匹配：站点用户 alice
+// 与另一个人的 Emby 账号 alice 同名时，播放记录会记到错误的人头上。同一个名字
+// 对应多个本地用户时视为歧义，直接丢弃，宁可少记也不记错人。
+type embyActivityUserIndex struct {
+	byID   map[string]store.User
+	byName map[string]store.User
+}
+
+func embyActivityUsersByKey(users []store.User) embyActivityUserIndex {
+	index := embyActivityUserIndex{byID: make(map[string]store.User, len(users)), byName: make(map[string]store.User, len(users))}
+	ambiguous := map[string]bool{}
 	for _, user := range users {
-		for _, key := range []string{user.EmbyID, user.EmbyUsername, user.Username} {
-			if normalized := normalizeEmbyActivityUserKey(key); normalized != "" {
-				out[normalized] = user
+		if id := normalizeEmbyActivityUserKey(user.EmbyID); id != "" {
+			index.byID[id] = user
+		}
+		name := normalizeEmbyActivityUserKey(user.EmbyUsername)
+		if name == "" || strings.TrimSpace(user.EmbyID) == "" {
+			continue
+		}
+		if existing, ok := index.byName[name]; ok && existing.UID != user.UID {
+			ambiguous[name] = true
+		}
+		index.byName[name] = user
+	}
+	for name := range ambiguous {
+		delete(index.byName, name)
+	}
+	return index
+}
+
+// resolve 先按 Emby UserId 找，再按 Emby 用户名找；都找不到返回零值。
+func (idx embyActivityUserIndex) resolve(userID string, names ...string) store.User {
+	if user, ok := idx.byID[normalizeEmbyActivityUserKey(userID)]; ok {
+		return user
+	}
+	for _, name := range names {
+		if user, ok := idx.byName[normalizeEmbyActivityUserKey(name)]; ok {
+			return user
+		}
+	}
+	return store.User{}
+}
+
+// embyActivityUserMatchesKeys 是预筛：只看 EmbyID 与 EmbyUsername，不看站点用户名。
+func embyActivityUserMatchesKeys(user store.User, keys map[string]struct{}) bool {
+	for _, key := range []string{user.EmbyID, user.EmbyUsername} {
+		if normalized := normalizeEmbyActivityUserKey(key); normalized != "" {
+			if _, ok := keys[normalized]; ok {
+				return true
 			}
 		}
 	}
-	return out
+	return false
 }
 
 func embyActivityUserKeys(events []embyActivityPlaybackEvent) map[string]struct{} {

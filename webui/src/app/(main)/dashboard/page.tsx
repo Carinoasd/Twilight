@@ -41,7 +41,7 @@ import { useVisiblePolling } from "@/hooks/use-visible-polling";
 import { PageError } from "@/components/layout/page-state";
 import { useAuthStore } from "@/store/auth";
 import { useSystemStore } from "@/store/system";
-import { api, type CodeUsePreview, type EmbyInfo, type MediaRequest, type TelegramStatus, type SigninSummary, type RegisterAvailability, type EmbyRegisterStatus } from "@/lib/api";
+import { api, type CodeUsePreview, type EmbyInfo, type MediaRequest, type TelegramStatus, type SigninSummary, type RegisterAvailability } from "@/lib/api";
 import { AnnouncementBoard } from "@/components/announcement-board";
 import { ForceReadAnnouncementModal } from "@/components/force-read-announcement-modal";
 import { useI18n } from "@/lib/i18n";
@@ -57,12 +57,6 @@ interface LineSlot {
   name: string;
   url: string;
   scope: "line" | "wl";
-}
-
-interface StoredEmbyRegisterRequest {
-  requestId: string;
-  statusToken: string;
-  savedAt: number;
 }
 
 type CodeCheckInfo = CodeUsePreview;
@@ -87,8 +81,6 @@ export default function DashboardPage() {
   const [directEmbyUsername, setDirectEmbyUsername] = useState("");
   const [directEmbyPassword, setDirectEmbyPassword] = useState("");
   const [showDirectEmbyPassword, setShowDirectEmbyPassword] = useState(false);
-  const [embyRegisterStatus, setEmbyRegisterStatus] = useState<EmbyRegisterStatus | null>(null);
-  const [embyRegisterStored, setEmbyRegisterStored] = useState<StoredEmbyRegisterRequest | null>(null);
   // 自由注册天数由管理员单值固定，前端不再让用户挑套餐或自定义
 
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus | null>(null);
@@ -110,20 +102,6 @@ export default function DashboardPage() {
   const [renewingWithPoints, setRenewingWithPoints] = useState(false);
   const [forceReadDone, setForceReadDone] = useState(false);
   const mediaRequestEnabled = systemInfo?.features?.media_request !== false;
-
-  const embyRegisterStorageKey = user?.uid ? `twilight:emby-register:${user.uid}` : null;
-
-  const saveEmbyRegisterRequest = useCallback((requestId: string, statusToken: string) => {
-    if (!embyRegisterStorageKey) return;
-    const item = { requestId, statusToken, savedAt: Date.now() };
-    localStorage.setItem(embyRegisterStorageKey, JSON.stringify(item));
-    setEmbyRegisterStored(item);
-  }, [embyRegisterStorageKey]);
-
-  const clearEmbyRegisterRequest = useCallback(() => {
-    if (embyRegisterStorageKey) localStorage.removeItem(embyRegisterStorageKey);
-    setEmbyRegisterStored(null);
-  }, [embyRegisterStorageKey]);
 
   useEffect(() => {
     void fetchSystemInfo();
@@ -159,47 +137,6 @@ export default function DashboardPage() {
       applyEmbyUrls(res.data);
     }
   }, [applyEmbyUrls]);
-
-  useEffect(() => {
-    if (!embyRegisterStorageKey) return;
-    try {
-      const raw = localStorage.getItem(embyRegisterStorageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as StoredEmbyRegisterRequest;
-      if (!parsed.requestId || !parsed.statusToken) return;
-      if (Date.now() - Number(parsed.savedAt || 0) > 15 * 60 * 1000) {
-        localStorage.removeItem(embyRegisterStorageKey);
-        return;
-      }
-      setEmbyRegisterStored(parsed);
-    } catch {
-      localStorage.removeItem(embyRegisterStorageKey);
-    }
-  }, [embyRegisterStorageKey]);
-
-  const refreshStoredEmbyRegisterStatus = useCallback(async () => {
-    if (!embyRegisterStored) return;
-    try {
-      const res = await api.getEmbyRegisterStatus(embyRegisterStored.requestId, embyRegisterStored.statusToken);
-      if (res.success && res.data) {
-        setEmbyRegisterStatus(res.data);
-        if (res.data.status === "success") {
-          await fetchUser();
-          await loadEmbyUrls();
-          clearEmbyRegisterRequest();
-        }
-      } else if (!res.success) {
-        clearEmbyRegisterRequest();
-      }
-    } catch {
-      // Keep the local request for 15 minutes; transient errors should not hide status.
-    }
-  }, [clearEmbyRegisterRequest, embyRegisterStored, fetchUser, loadEmbyUrls]);
-
-  useEffect(() => {
-    if (embyRegisterStored) void refreshStoredEmbyRegisterStatus();
-  }, [embyRegisterStored, refreshStoredEmbyRegisterStatus]);
-  useVisiblePolling(refreshStoredEmbyRegisterStatus, 5000, Boolean(embyRegisterStored));
 
   const loadDashboardData = useCallback(async (signal?: AbortSignal) => {
     // 之前每个子接口都包了 .catch(() => null) + Promise.all：任何失败都会被
@@ -559,41 +496,14 @@ export default function DashboardPage() {
           : undefined
       );
       if (res.success) {
-        if (res.data?.pending && res.data.request_id && res.data.status_token) {
-          toast({
-            title: res.data.reused ? t("dashboard.codeRequestExisting") : t("dashboard.codeRequestQueued"),
-            description: res.data.queue_position ? t("dashboard.queuePosition", { position: res.data.queue_position }) : t("dashboard.autoCompleteLater"),
-          });
-          setShowConfirm(false);
-
-          for (let i = 0; i < 90; i++) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-            const statusRes = await api.getUseCodeStatus(res.data.request_id, res.data.status_token);
-            if (!statusRes.success || !statusRes.data) continue;
-            if (statusRes.data.status === "success") {
-              toast({ title: t("dashboard.codeUseSuccess"), description: statusRes.data.message || regCodeInfo.type_name, variant: "success" });
-              setRegCode("");
-              setRegCodeInfo(null);
-              setEmbyUsername("");
-              await fetchUser();
-              await loadEmbyUrls();
-              return;
-            }
-            if (statusRes.data.status === "failed") {
-              toast({ title: t("dashboard.useFailed"), description: statusRes.data.message || t("dashboard.codeProcessFailed"), variant: "destructive" });
-              return;
-            }
-          }
-          toast({ title: t("dashboard.codeStillQueued"), description: t("dashboard.refreshLater") });
-        } else {
-          toast({ title: t("dashboard.codeUseSuccess"), description: res.message || regCodeInfo.type_name, variant: "success" });
-          setRegCode("");
-          setRegCodeInfo(null);
-          setShowConfirm(false);
-          setEmbyUsername("");
-          await fetchUser();
-          await loadEmbyUrls();
-        }
+        // 后端同步完成 use-code，不签发 status_token，也没有排队轮询接口可用。
+        toast({ title: t("dashboard.codeUseSuccess"), description: res.message || regCodeInfo.type_name, variant: "success" });
+        setRegCode("");
+        setRegCodeInfo(null);
+        setShowConfirm(false);
+        setEmbyUsername("");
+        await fetchUser();
+        await loadEmbyUrls();
       } else {
         toast({ title: t("dashboard.useFailed"), description: res.message, variant: "destructive" });
       }
@@ -666,79 +576,16 @@ export default function DashboardPage() {
       // 不再传 days：后端按 RegisterConfig.EMBY_DIRECT_REGISTER_DAYS 单值落库
       const res = await api.completeEmbyRegistration(username, password);
       if (res.success) {
-        // 注册队列高峰期可能 60s 内还没跑完，后端会返回 success+pending=true 让前端轮询。
-        // 这里只在终态时关掉弹窗 + 刷新；pending 状态保留窗口，再触发一次轮询。
-        const pending = Boolean((res.data as any)?.pending);
-        if (pending) {
-          const data = res.data as any;
-          if (data?.request_id && data?.status_token) {
-            saveEmbyRegisterRequest(data.request_id, data.status_token);
-            setEmbyRegisterStatus({
-              request_id: data.request_id,
-              status: data.status || "queued",
-              queue_position: data.queue_position,
-              message: res.message,
-              updated_at: Math.floor(Date.now() / 1000),
-            });
-          }
-          toast({
-            title: t("dashboard.embyRegisterQueued"),
-            description: data?.queue_position ? t("dashboard.queuePositionAutoComplete", { position: data.queue_position }) : t("dashboard.refreshToView"),
-            variant: "default",
-          });
-          // 异步轮询，最多 60s
-          void (async () => {
-            const reqId = data?.request_id;
-            const token = data?.status_token;
-            if (!reqId || !token) return;
-            for (let i = 0; i < 30; i++) {
-              await new Promise((r) => setTimeout(r, 2000));
-              try {
-                const s = await api.getEmbyRegisterStatus(reqId, token);
-                if (s.success && s.data) {
-                  const st = s.data.status;
-                  if (st === "success") {
-                    clearEmbyRegisterRequest();
-                    toast({
-                      title: t("dashboard.embyOpened"),
-                      description: directRegisterDays < 0 ? t("dashboard.permanent") : t("dashboard.openDuration", { days: directRegisterDays }),
-                      variant: "success",
-                    });
-                    await fetchUser();
-                    await loadEmbyUrls();
-                    return;
-                  }
-                  if (st === "failed") {
-                    toast({
-                      title: t("dashboard.embyRegisterFailed"),
-                      description: s.data.message || t("dashboard.retryLater"),
-                      variant: "destructive",
-                    });
-                    return;
-                  }
-                }
-              } catch (_) {
-                // 忽略瞬时网络抖动
-              }
-            }
-            toast({
-              title: t("dashboard.queueTimeout"),
-              description: t("dashboard.refreshLatest"),
-              variant: "default",
-            });
-          })();
-        } else {
-          clearEmbyRegisterRequest();
-          toast({
-            title: t("dashboard.embyOpened"),
-            description: directRegisterDays < 0 ? t("dashboard.permanent") : t("dashboard.openDuration", { days: directRegisterDays }),
-            variant: "success",
-          });
-          setShowDirectRegisterDialog(false);
-          setDirectEmbyPassword("");
-          await fetchUser();
-          await loadEmbyUrls();
-        }
+        // 后端同步创建 Emby 账号，不返回 pending / status_token，无需轮询。
+        toast({
+          title: t("dashboard.embyOpened"),
+          description: directRegisterDays < 0 ? t("dashboard.permanent") : t("dashboard.openDuration", { days: directRegisterDays }),
+          variant: "success",
+        });
+        setShowDirectRegisterDialog(false);
+        setDirectEmbyPassword("");
+        await fetchUser();
+        await loadEmbyUrls();
       } else {
         toast({ title: t("dashboard.openFailed"), description: res.message, variant: "destructive" });
       }
@@ -1327,39 +1174,6 @@ export default function DashboardPage() {
               <UserPlus className="mr-2 h-4 w-4" />
               {t("dashboard.openEmbyNow")}
             </Button>
-          </div>
-        </div>
-      )}
-
-      {embyRegisterStored && embyRegisterStatus && (
-        <div className="premium-card p-5 sm:p-6 border-emerald-500/20 bg-emerald-500/5">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <h3 className="text-base font-black tracking-tight">{t("dashboard.registerQueueStatus")}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {embyRegisterStatus.status === "queued"
-                  ? t("dashboard.queued", { position: embyRegisterStatus.queue_position ? t("dashboard.queuePositionSuffix", { position: embyRegisterStatus.queue_position }) : "" })
-                  : embyRegisterStatus.status === "processing"
-                    ? t("dashboard.processing")
-                    : embyRegisterStatus.status === "success"
-                      ? t("dashboard.registerComplete")
-                      : embyRegisterStatus.message || t("dashboard.registerFailed")}
-              </p>
-              {embyRegisterStatus.message && (
-                <p className="mt-1 text-xs text-muted-foreground">{embyRegisterStatus.message}</p>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => void refreshStoredEmbyRegisterStatus()}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                {t("common.refresh")}
-              </Button>
-              {(["success", "failed", "rejected"] as const).includes(embyRegisterStatus.status as any) && (
-                <Button variant="ghost" size="sm" onClick={clearEmbyRegisterRequest}>
-                  {t("common.close")}
-                </Button>
-              )}
-            </div>
           </div>
         </div>
       )}

@@ -56,7 +56,7 @@ Bot 由二进制子命令 `bot`（或 `all`）启动，轮询逻辑见 `internal
 | `/emby` | 查看账号本地状态、到期、Emby 绑定、服务器是否配置以及连通性（不展示服务器地址）。 |
 | `/resetpwd` | 提示前往 Web 端修改密码；Bot 不接收、不生成也不发送密码。 |
 | `/cancel` | 回复"已取消当前 Bot 操作"。 |
-| `/delAccount [原因]` | 删除自己的账号。验证优先级：已绑定邮箱→邮箱验证码；已绑定 Emby→Web密码+Emby密码两步验证；无绑定→直接确认。可附带可选删除原因（记录到审计日志）。删除成功后会释放 Telegram 绑定和临时绑定码，同一个 Telegram 可以重新注册新 Web 账号。禁用状态的 Web/Emby 账号默认不可自删；邀请关系中的已到期账号如果 Emby 已被到期任务禁用，可用 Web 密码完成退出清理，执行时会完全删除对应 Emby 账号。示例：`/delAccount 不再使用本服务` 或 `/delAccount emby`。 |
+| `/delAccount <子命令> [原因]` | 删除自己的账号。验证优先级：已绑定邮箱→`/delAccount email [原因]` 发码后 `/delAccount email <验证码>`；已绑定 Emby→`/delAccount emby [原因]` 走 Web 密码+Emby 密码两步验证；无绑定→`/delAccount confirm [原因]` 后再发送 Web 密码二次确认。子命令不分大小写；不认得的参数只回说明，不会执行任何删除。可附带可选删除原因（记录到审计日志）。删除成功后会释放 Telegram 绑定和临时绑定码，同一个 Telegram 可以重新注册新 Web 账号。禁用状态的 Web/Emby 账号默认不可自删；邀请关系中的已到期账号如果 Emby 已被到期任务禁用，可用 Web 密码完成退出清理，执行时会完全删除对应 Emby 账号。示例：`/delAccount emby 不再使用本服务` 或 `/delAccount email 不再使用`。 |
 
 `/emby` 的连通性检测仅在配置了 Emby 地址时进行，结果分为"正常 / 不可用 / 未检测"，不会展示服务器 URL。
 
@@ -75,8 +75,8 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 | `/userinfo <关键词>` | 私聊 | 查询单个用户摘要；匹配命中多个时提示缩小关键词。 |
 | `/twfind <关键词>` | 私聊 | 搜索用户并返回最多 10 条非敏感摘要列表。 |
 | `/twishelp` | 私聊 | 查看管理员帮助文案。 |
-| `/banweb <用户> [理由]` | 私聊 | 禁用指定用户的 Web 账号（可选理由，记入操作日志）。受保护账号不可操作。 |
-| `/banemby <用户> [理由]` | 私聊 | 单独禁用指定用户的 Emby 账号，不影响 Web 账号（可选理由，记入操作日志）。受保护账号及未绑定 Emby 的用户不可操作。 |
+| `/banweb <用户> [理由]` | 私聊 | 禁用指定用户的 Web 账号（可选理由，记入操作日志）。`<用户>` 必须精确等于 UID、完整 Web 用户名、Telegram ID 或 @Telegram 用户名，模糊结果只列出候选、不执行。受保护账号不可操作。 |
+| `/banemby <用户> [理由]` | 私聊 | 单独禁用指定用户的 Emby 账号，不影响 Web 账号（可选理由，记入操作日志）。目标匹配规则同 `/banweb`。受保护账号及未绑定 Emby 的用户不可操作。 |
 | `/twguser <关键词>` | 群聊 / 私聊 | 打开群组用户管理面板（带内联操作按钮）。 |
 | `/twguser`（回复目标消息） | 群聊 | 回复某成员消息后发送，按其 Telegram 绑定关系定位对应 Twilight 用户并打开面板。 |
 
@@ -85,6 +85,8 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 ### 群组用户管理面板（`/twguser` 内联操作）
 
 > 提示：旧文档曾描述群组 `/twguser` 为"只读查询、不提供 inline 写操作按钮"。实际代码（`internal/api/telegram_inline.go`）提供了一组带写操作的内联按钮，下表予以更正。
+
+> 开关：面板受 `[Telegram] enable_tg_panel` 控制，默认 `false`。关闭时 `/twguser` 在群聊中静默忽略、私聊回复“未启用”，已发出面板的按钮也一律拒绝执行。
 
 `/twguser` 命中目标用户后会发送一条带内联键盘的面板消息，可执行以下操作：
 
@@ -100,12 +102,12 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 
 - 受保护账号（`Role == admin`，或其 Telegram ID 命中管理员判定）禁止被禁用、删除、移出或封禁。
 - 群内匿名管理员（以群身份发言、`from.id` 为 0 或带 `sender_chat`）发送 `/twguser` 时，必须先点击"验证管理员身份"内联按钮完成真实身份校验，才会展示面板。
-- 每次按钮点击都会重新执行 `telegramAdminID` 校验；非管理员点击会被拒绝并清理消息。
+- 每次按钮点击都会重新执行 `telegramAdminID` 校验；非管理员点击只会收到弹窗提示（answerCallbackQuery），不会在群里发消息。
 - 面板有效期为 1 分钟，无操作自动删除；每次操作会刷新过期时间。
-- 非管理员或匿名身份发起的越权指令，连同提示消息会在 30 秒后自动删除。
+- 非管理员发起的越权指令，连同提示消息会在 30 秒后自动删除；同一成员在同一群 30 秒内只提示一次。匿名身份（sender_chat）发送 `/twguser` 时，同一身份 30 秒内只发一个验证面板。
 - 删除 Emby 账号类操作会尊重用户记录上的 `emby_grant_locked`。通过注册码、白名单码、邀请码、后台授予、Telegram 授予或自助创建获得过 Emby 注册资格的账号，不能通过面板删除 Emby 后再次自助注册。
 
-面板文本可通过 `[Telegram].group_user_panel_template` 自定义，也可在 Web 后台配置页的 Telegram 分组中编辑。留空使用内置模板；未知占位符会原样保留，便于发现拼写错误。模板不提供邮箱、Emby ID、密码、Token 或服务器线路占位符；如确需展示 Telegram ID，可显式使用 `{telegram_userid}`。
+面板文本可通过 `[Telegram].group_user_panel_template` 自定义，也可在 Web 后台配置页的 Telegram 分组中编辑。留空使用内置模板；未知占位符会原样保留，便于发现拼写错误。面板发在群里、所有群成员可见，因此模板不提供完整邮箱、Emby ID、密码、Token 或服务器线路占位符：`{email}` 只输出遮罩后的邮箱（如 `ab***@example.com`），`{registration_code}` 只输出卡码前 4 位（如 `ABCD***`）；如确需展示 Telegram ID，可显式使用 `{telegram_userid}`。
 
 模板渲染采用单次扫描，仅替换当前文本实际出现的已知占位符；重复占位符保持一致，未知或未闭合占位符原样保留。刷新面板不会为全部占位符重新编译一次性替换器。
 
@@ -125,7 +127,7 @@ Telegram 绑定码只是短期运行时票据，真正的账号绑定以用户�
 | `{emby_bound_status}` / `{emby_bound}` | 本地 Emby 绑定状态 / 是否已绑定。 |
 | `{emby_unbind_allowed}` | 是否允许用户自助解绑 Emby。 |
 | `{pending_emby}` / `{pending_emby_days}` | 是否待补建 Emby / 待补建授权天数。 |
-| `{registration_source}` / `{registration_code}` | Emby 注册资格来源 / 对应卡码。 |
+| `{registration_source}` / `{registration_code}` | Emby 注册资格来源 / 对应卡码（仅前 4 位）。 |
 | `{emby_remote_block}` | 完整 Emby 远端信息块，包含远端用户名、启用状态、权限、隐藏状态与最近活动。 |
 | `{emby_remote_status}` / `{emby_remote_username}` | 远端查询状态 / 远端用户名。 |
 | `{emby_remote_enabled}` / `{emby_remote_role}` / `{emby_remote_hidden}` | 远端启用状态 / 远端权限 / 是否隐藏。 |
@@ -594,6 +596,15 @@ reply(text.truncate(text.joinLines([
 Go Bot 使用纯文本发送消息，不依赖 Markdown 转义。
 
 ## 相关配置与扩展
+
+群成员巡检（调度任务 `enforce_group_membership`）的安全约束：
+
+- 只有明确的用户层级错误（`user not found`、`PARTICIPANT_ID_INVALID` 等）或成员状态为 `left` / `kicked` 才算不在群。`chat not found`、Bot 被踢出群、没有权限等群组层级错误会让整轮中止并标记为失败，不停用任何人。
+- 熔断：单轮拟停用人数超过扫描人数的 `Telegram.membership_breaker_percent`（默认 20%，且至少 3 人），或超过 `Telegram.membership_breaker_max`（默认 50 人）时整轮中止，不停用任何人；摘要里 `circuit_breaker_tripped=true` 并列出 `would_disable_uids`。两项都可设 0 关闭，也可在任务参数里用 `breaker_percent` / `breaker_max` 临时覆盖。
+- 支持 `dry_run`：只回报会停用的名单（`would_disable_uids`），不做任何写入。
+- 巡检停用会在用户上记 `disabled_reason = "telegram_membership"`；回群自动启用（`auto_enable_rejoined`）和人工复核名单都只处理带这个原因的账号，管理员手动停权的账号不会被放出来。任何其他路径改动启用状态都会清掉这个原因。升级前已被巡检停用的旧账号没有该标记，需要管理员手动启用。
+- 回群自动启用时，若 Emby 当初是随 Web 一起被系统停用（`emby_auto_disabled`），会一并重新启用 Emby；管理员单独封禁的 Emby 保持不动。启用失败由「Emby 状态对账」任务收敛。
+- 退群停用写系统稽核 `disable_telegram_users_on_leave`，回群自动启用写 `enable_telegram_users_on_rejoin`，都附 uid 清单。
 
 强制加群 / 订阅、退群封禁（`ban_on_leave`）、重新入群自动恢复（`auto_enable_rejoined`）、群成员校验并发度等行为属于 Bot 运行策略而非命令，配置字段集中在 `[Telegram]` 段，详见 [Go 后端架构与配置](../reference/backend.md)。其它功能文档参见 [文档导航](../README.md)。
 ### 开发者 JS 指令补充

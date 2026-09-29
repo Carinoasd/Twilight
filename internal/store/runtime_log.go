@@ -16,6 +16,9 @@ import (
 const pgRuntimeLogPruneEvery = 256
 const defaultRuntimeLogLimit = 1000
 
+// runtimeLogAppendLockKey 是 runtime log 追加时串行化取号与提交的 advisory lock 键。
+const runtimeLogAppendLockKey int64 = 7_410_001
+
 const (
 	pgRuntimeLogWriteTimeout = 5 * time.Second
 	pgRuntimeLogReadTimeout  = 5 * time.Second
@@ -55,13 +58,22 @@ func (s *Store) AddRuntimeLog(entry RuntimeLogEntry, limit int) (RuntimeLogEntry
 	ctx, cancel := context.WithTimeout(context.Background(), pgRuntimeLogWriteTimeout)
 	defer cancel()
 	var id int64
+	// 追加时先取交易级 advisory lock：bigserial 的取号顺序与提交顺序不保证一致，
+	// id 101 可能比 102 晚提交，而追尾读者用 `id > 游标` 前进，101 就永远读不到。
+	// 锁在同一条语句内取得、提交时释放，nextval 发生在拿到锁之后，于是 id 顺序
+	// 与提交顺序一致（跨进程同样成立）。代价是日志写入串行化，但每次只持有一条
+	// 单行 INSERT 到提交的时间。
 	err = s.db.QueryRowContext(
 		ctx,
-		`INSERT INTO twilight_runtime_logs (time, level, message, attrs) VALUES ($1, $2, $3, $4::jsonb) RETURNING id`,
+		`WITH append_lock AS (SELECT pg_advisory_xact_lock($5))
+INSERT INTO twilight_runtime_logs (time, level, message, attrs)
+SELECT $1, $2, $3, $4::jsonb FROM append_lock
+RETURNING id`,
 		entry.Time,
 		entry.Level,
 		entry.Message,
 		string(attrs),
+		runtimeLogAppendLockKey,
 	).Scan(&id)
 	if err != nil {
 		return entry, err
@@ -163,6 +175,14 @@ func (s *Store) postgresRuntimeLogs(limit int, after int64) ([]RuntimeLogEntry, 
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), pgRuntimeLogReadTimeout)
 	defer cancel()
+	if after > 0 {
+		// 游标比表内最大 id 还大，只可能是还原/匯入以 RESTART IDENTITY 重置了序列：
+		// 旧游标已失效，按「首次读取」返回最新一页，并以新序列的 id 作为游标，
+		// 否则要等新 id 追上旧值才看得到新日志。
+		if maxID := s.postgresRuntimeLogMaxID(); after > maxID {
+			after = 0
+		}
+	}
 	if after > 0 {
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, time, level, message, COALESCE(attrs, '{}'::jsonb)::text

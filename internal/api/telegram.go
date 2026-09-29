@@ -530,11 +530,15 @@ func (a *App) telegramMembershipMissingForChats(ctx context.Context, telegramID 
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return missing, ctxErr
 			}
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "not found") || strings.Contains(msg, "participant") || strings.Contains(msg, "user not found") {
+			// 只有明确的用户层级错误才算「不在群」；"chat not found"、Bot 被踢等群组
+			// 层级错误说明是配置或 Bot 权限问题，绝不能当成用户退群。
+			switch classifyTelegramMembershipError(err) {
+			case telegramMembershipErrUserMissing:
 				missing = append(missing, chatID)
 				_ = a.store().MarkTelegramRosterLeft(chatID, telegramID, "left")
 				continue
+			case telegramMembershipErrChatLevel:
+				return missing, &telegramChatLevelError{ChatID: chatID, Err: err}
 			}
 			if strict {
 				return missing, err
@@ -752,10 +756,10 @@ func telegramRateLimitPauseContext(ctx context.Context, err error) bool {
 		return true
 	}
 	d := time.Duration(0)
-	if d, ok := telegramRetryAfterFromError(err); ok {
-		if d > 60*time.Second {
-			d = 60 * time.Second
-		}
+	// 修复：原先 `if d, ok := ...` 在 if 作用域内重新声明了 d，外层 d 恒为 0，
+	// 带 retry_after 的 429 完全不退避。这里改用独立变量再赋值给外层 d。
+	if parsed, ok := telegramRetryAfterFromError(err); ok {
+		d = min(parsed, 60*time.Second)
 	} else if strings.Contains(strings.ToLower(err.Error()), "too many requests") {
 		d = 2 * time.Second
 	}
@@ -796,4 +800,55 @@ func telegramRetryAfterFromError(err error) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(secs) * time.Second, true
+}
+
+// telegramMembershipErrKind 把 getChatMember 的失败分成三类：用户层级「不在群」、
+// 群组层级（群 ID 错、Bot 被踢或没权限）和其他暂时性错误。
+type telegramMembershipErrKind int
+
+const (
+	telegramMembershipErrOther telegramMembershipErrKind = iota
+	telegramMembershipErrUserMissing
+	telegramMembershipErrChatLevel
+)
+
+// telegramChatLevelError 表示整个群组无法查询。调用方必须中止本轮，不能据此
+// 停用任何用户。
+type telegramChatLevelError struct {
+	ChatID string
+	Err    error
+}
+
+func (e *telegramChatLevelError) Error() string {
+	return fmt.Sprintf("Telegram 群组 %s 无法查询（群组层级错误，未停用任何用户）: %v", e.ChatID, e.Err)
+}
+
+func (e *telegramChatLevelError) Unwrap() error { return e.Err }
+
+// classifyTelegramMembershipError 先判群组层级（"chat not found" 也含 "not found"，
+// 必须先排除），再判明确的用户层级错误；其余一律视为暂时性错误，不代表不在群。
+func classifyTelegramMembershipError(err error) telegramMembershipErrKind {
+	if err == nil {
+		return telegramMembershipErrOther
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"chat not found", "bot was kicked", "bot is not a member", "not enough rights",
+		"chat_admin_required", "have no rights", "upgraded to a supergroup", "group chat was deactivated",
+		"channel_private", "chat_id_invalid", "peer_id_invalid", "unauthorized", "forbidden",
+		"bot token is not configured", "not enabled",
+	} {
+		if strings.Contains(msg, marker) {
+			return telegramMembershipErrChatLevel
+		}
+	}
+	for _, marker := range []string{
+		"user not found", "member not found", "participant_id_invalid", "user_not_participant",
+		"user_id_invalid", "invalid user_id",
+	} {
+		if strings.Contains(msg, marker) {
+			return telegramMembershipErrUserMissing
+		}
+	}
+	return telegramMembershipErrOther
 }

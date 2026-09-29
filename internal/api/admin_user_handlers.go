@@ -470,6 +470,8 @@ func (a *App) handleAdminUnbindEmby(w http.ResponseWriter, r *http.Request, para
 	if statusFromError(w, err) {
 		return
 	}
+	// 解绑 Emby 改了用户状态，旧实现只有 fallback 稽核（看不出旧 Emby ID 与远端是否停用）。
+	a.audit(r, "admin_unbind_emby", "admin", uid, map[string]any{"old_emby_id": embyID, "old_emby_username": target.EmbyUsername, "remote_emby_disabled": remoteDisabled})
 	data := publicUser(u)
 	data["remote_emby_disabled"] = remoteDisabled
 	data["old_emby_id"] = embyID
@@ -543,10 +545,20 @@ func (a *App) handleAdminForceUnbind(w http.ResponseWriter, r *http.Request, par
 func (a *App) handleRegistrationQueueClear(w http.ResponseWriter, r *http.Request, params Params) {
 	if params["uid"] != "" {
 		uid, _ := int64Param(params, "uid")
-		u, err := a.store().UpdateUser(uid, func(u *store.User) error { u.PendingEmby = false; u.PendingEmbyDays = nil; return nil })
+		var oldPending bool
+		var oldPendingDays *int
+		u, err := a.store().UpdateUser(uid, func(u *store.User) error {
+			oldPending, oldPendingDays = u.PendingEmby, u.PendingEmbyDays
+			u.PendingEmby = false
+			u.PendingEmbyDays = nil
+			return nil
+		})
 		if statusFromError(w, err) {
 			return
 		}
+		a.audit(r, "clear_registration_queue", "admin", uid, map[string]any{
+			"uids": []int64{uid}, "username": u.Username, "old_pending": oldPending, "old_pending_days": oldPendingDays,
+		})
 		ok(w, "注册队列状态已清理", map[string]any{"uid": uid, "user": publicUser(u)})
 		return
 	}
@@ -572,6 +584,10 @@ func (a *App) handleRegistrationQueueClear(w http.ResponseWriter, r *http.Reques
 		}
 		updated++
 	}
+	// 部分失败时已清理的部分同样要留痕，因此在返回前写审计。
+	a.audit(r, "clear_registration_queue", "admin", 0, map[string]any{
+		"dry_run": false, "candidates": len(candidates), "updated": updated, "failed": auditUIDSample(failed), "uids": auditUIDSample(candidates),
+	})
 	if len(failed) > 0 {
 		failWithCode(w, http.StatusInternalServerError, ErrAdminQueueClearPartial, "部分注册队列状态清理失败")
 		return
@@ -586,10 +602,13 @@ func (a *App) handleRegistrationEntitlement(w http.ResponseWriter, r *http.Reque
 		failWithCode(w, http.StatusBadRequest, ErrAdminDaysOutOfRange, "days 超出允许范围")
 		return
 	}
+	var oldPending bool
+	var oldPendingDays *int
 	u, err := a.store().UpdateUser(uid, func(u *store.User) error {
 		if u.EmbyID != "" {
 			return store.ErrConflict
 		}
+		oldPending, oldPendingDays = u.PendingEmby, u.PendingEmbyDays
 		u.PendingEmby = true
 		u.PendingEmbyDays = &days
 		markRegistrationGrant(u, registrationSourceAdminGrant, "")
@@ -601,6 +620,9 @@ func (a *App) handleRegistrationEntitlement(w http.ResponseWriter, r *http.Reque
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "grant_registration_entitlement", "admin", uid, map[string]any{
+		"days": days, "username": u.Username, "old_pending": oldPending, "old_pending_days": oldPendingDays,
+	})
 	ok(w, "Emby access granted", map[string]any{"uid": uid, "days": days, "user": publicUser(u)})
 }
 
@@ -640,6 +662,9 @@ func (a *App) handleRegistrationEntitlementBulk(w http.ResponseWriter, r *http.R
 		}
 		updated++
 	}
+	a.audit(r, "bulk_grant_registration_entitlement", "admin", 0, map[string]any{
+		"dry_run": false, "days": days, "candidates": len(candidates), "updated": updated, "failed": auditUIDSample(failed), "uids": auditUIDSample(candidates),
+	})
 	if len(failed) > 0 {
 		failWithCode(w, http.StatusInternalServerError, ErrAdminEntitlementPartial, "部分 Emby 注册资格发放失败")
 		return
@@ -687,6 +712,7 @@ func (a *App) handleKickUser(w http.ResponseWriter, r *http.Request, params Para
 		return
 	}
 	kicked := a.kickEmbySessions(r.Context(), u.EmbyID)
+	a.audit(r, "admin_kick_emby_sessions", "admin", u.UID, map[string]any{"emby_id": u.EmbyID, "kicked_count": kicked})
 	ok(w, "会话踢出完成", map[string]any{"kicked_count": kicked})
 }
 
@@ -705,7 +731,10 @@ func (a *App) handleAdminRenewUser(w http.ResponseWriter, r *http.Request, param
 		failWithCode(w, http.StatusBadRequest, ErrBadRequest, "days 不能超过 36500")
 		return
 	}
+	var expiredBefore int64
+	var activeBefore bool
 	u, err := a.store().UpdateUser(uid, func(u *store.User) error {
+		expiredBefore, activeBefore = u.ExpiredAt, u.Active
 		if days < 0 {
 			renewExpiryAndReactivate(u, permanentExpiryUnix)
 			return nil
@@ -723,7 +752,11 @@ func (a *App) handleAdminRenewUser(w http.ResponseWriter, r *http.Request, param
 	if statusFromError(w, err) {
 		return
 	}
-	a.audit(r, "admin_renew_user", "admin", uid, map[string]any{"days": days})
+	a.audit(r, "admin_renew_user", "admin", uid, map[string]any{
+		"days": days, "username": u.Username,
+		"before": map[string]any{"expired_at": publicExpiryUnix(expiredBefore), "active": activeBefore},
+		"after":  map[string]any{"expired_at": publicExpiryUnix(u.ExpiredAt), "active": u.Active},
+	})
 	ok(w, "续期成功", publicUser(u))
 }
 
@@ -764,7 +797,10 @@ func (a *App) setUserExpiry(w http.ResponseWriter, r *http.Request, params Param
 			return
 		}
 	}
+	var expiredBefore int64
+	var activeBefore bool
 	u, err := a.store().UpdateUser(uid, func(u *store.User) error {
+		expiredBefore, activeBefore = u.ExpiredAt, u.Active
 		if permanent {
 			renewExpiryAndReactivate(u, permanentExpiryUnix)
 			return nil
@@ -776,7 +812,11 @@ func (a *App) setUserExpiry(w http.ResponseWriter, r *http.Request, params Param
 	if statusFromError(w, err) {
 		return
 	}
-	a.audit(r, "admin_set_expiry", "admin", uid, map[string]any{"days": rawDays, "permanent": permanent, "cancel_permanent": forceNonPermanent})
+	a.audit(r, "admin_set_expiry", "admin", uid, map[string]any{
+		"days": rawDays, "permanent": permanent, "cancel_permanent": forceNonPermanent, "username": u.Username,
+		"before": map[string]any{"expired_at": publicExpiryUnix(expiredBefore), "active": activeBefore},
+		"after":  map[string]any{"expired_at": publicExpiryUnix(u.ExpiredAt), "active": u.Active},
+	})
 	ok(w, "到期时间已更新", publicUser(u))
 }
 
@@ -1035,6 +1075,7 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 		return
 	}
 	targetUID, _ := int64Param(params, "uid")
+	previous, _ := a.store().User(targetUID)
 	body := decodeMap(r)
 	embyIDInput := stringValue(body, "emby_id")
 	embyNameInput := stringValue(body, "emby_username")
@@ -1057,8 +1098,12 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 	}
 	embyID := asString(remoteUser["Id"])
 	embyName := firstNonEmpty(asString(remoteUser["Name"]), embyNameInput, embyID)
+	inviteCap := int64(0)
+	if targetUser, okTarget := a.store().User(targetUID); okTarget {
+		inviteCap = a.inviteActivationExpiryCap(targetUser)
+	}
 	updatedUser, displacedUID, updateErr := a.store().BindUserEmbyAtomicWithUpdate(targetUID, embyID, embyName, force, func(u *store.User, before store.User) error {
-		a.consumePendingEmbyEntitlementOnBind(u, before)
+		a.consumePendingEmbyEntitlementOnBind(u, before, inviteCap)
 		return nil
 	})
 	if errors.Is(updateErr, store.ErrConflict) {
@@ -1083,6 +1128,12 @@ func (a *App) handleAdminBindEmby(w http.ResponseWriter, r *http.Request, params
 	previousUID := any(nil)
 	if displacedUID != 0 {
 		previousUID = displacedUID
+	}
+	// 管理员绑定（含 force 夺取）必须留下明确稽核；被夺走绑定的一方另记一笔，
+	// 否则按 target_uid 查被夺者时什么都查不到。
+	a.audit(r, "admin_bind_emby", "admin", updatedUser.UID, map[string]any{"emby_id": embyID, "emby_username": embyName, "force": force, "displaced_uid": displacedUID, "old_emby_id": previous.EmbyID})
+	if displacedUID != 0 {
+		a.audit(r, "emby_binding_displaced", "admin", displacedUID, map[string]any{"emby_id": embyID, "new_owner_uid": updatedUser.UID})
 	}
 	ok(w, "Emby account linked", map[string]any{"uid": updatedUser.UID, "emby_id": updatedUser.EmbyID, "emby_username": updatedUser.EmbyUsername, "force_taken": displacedUID != 0, "previous_uid": previousUID, "user": publicUser(updatedUser)})
 }

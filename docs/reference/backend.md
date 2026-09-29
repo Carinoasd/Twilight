@@ -118,7 +118,7 @@ API、Scheduler 与 Bot 都会检测配置文件签名并支持热重载；签�
 | 会话 Cookie | 名 `twilight_session`、`Secure=true`、`SameSite=lax`、TTL 7 天 |
 | 注册 | `register_mode`、`emby_direct_register_enabled`、`allow_pending_register` 均默认 `false`（secure-by-default） |
 | 限流 | 默认开启，全局 1200/分钟、登录 60/分钟等 |
-| 调度 | 默认开启，过期检查 `03:00`、到期提醒 `09:00`、每日统计 `00:05` |
+| 调度 | 默认开启；时区 `Scheduler.timezone`（空 = 进程本地时区）；过期检查 `03:00`、群成员巡检 `03:10`、绑定检查 `03:20`、到期提醒 `09:00`、每日统计 `00:05`、Emby 状态对账每 6 小时；失败通知开、失败 15 分钟后重试一次；定期备份默认关闭（`04:15`、保留 7 份）。完整任务表见 [API 参考 9.9](backend-api.md#99-定时任务管理) |
 
 > 运行期后端已收敛为单一 PostgreSQL：`Database.driver` 只接受 `postgres` / `postgresql`（或留空按 `postgres` 处理）。设为其它值（含历史的 `json` / `file`）会在启动时直接报错，不再回退到 JSON 文件存储。历史 JSON 部署用 `twilight migrate-json` 一次性导入（详见下文）。
 

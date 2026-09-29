@@ -211,7 +211,7 @@ func TestAdminHealthEndpointsRequireAdminAndKeepChecksIndependent(t *testing.T) 
 		t.Fatalf("normal user health access status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	adminCookies := registerAndLogin(t, app, "admin", "HealthAdmin123456")
+	adminCookies := registerAdmin(t, app, "admin", "HealthAdmin123456")
 	apiResponse := doJSON(app, http.MethodGet, "/api/v1/system/health/api", "", adminCookies)
 	if apiResponse.Code != http.StatusOK || !strings.Contains(apiResponse.Body.String(), `"ok":true`) {
 		t.Fatalf("api health status=%d body=%s", apiResponse.Code, apiResponse.Body.String())
@@ -230,7 +230,7 @@ func TestAdminHealthEndpointsRequireAdminAndKeepChecksIndependent(t *testing.T) 
 
 func TestEmbyHealthDoesNotExposeEndpointOrTransportDetails(t *testing.T) {
 	app := newTestApp(t)
-	adminCookies := registerAndLogin(t, app, "admin", "HealthAdmin123456")
+	adminCookies := registerAdmin(t, app, "admin", "HealthAdmin123456")
 	const token = "health-transport-secret"
 	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

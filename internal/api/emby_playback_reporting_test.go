@@ -2,6 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,5 +101,47 @@ func TestPlaybackReportingStringNormalizesCellValues(t *testing.T) {
 	}
 	if got := playbackReportingString(float64(42)); got != "42" {
 		t.Fatalf("numbers must render as integers, got %q", got)
+	}
+}
+
+// TestFetchPlaybackReportingRowsOrdersAndPages 回归审查 L12：旧查询是无 ORDER BY 的
+// LIMIT 5000，超出的行会被随机截掉；现在要稳定排序并翻页取完。
+func TestFetchPlaybackReportingRowsOrdersAndPages(t *testing.T) {
+	queries := []string{}
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		query, _ := body["CustomQueryString"].(string)
+		queries = append(queries, query)
+		n := playbackReportingMaxRows
+		if len(queries) > 1 {
+			n = 1
+		}
+		results := make([][]any, 0, n)
+		for i := 0; i < n; i++ {
+			results = append(results, []any{"u", fmt.Sprintf("item-%d-%d", len(queries), i), "Movie", "x", 60, 0, "2026-09-18 14:03:22"})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"colums": []string{}, "results": results})
+	}))
+	defer emby.Close()
+	app := newTestApp(t)
+	app.cfg().EmbyURL = emby.URL
+	app.cfg().EmbyToken = "token"
+
+	rows, err := app.fetchPlaybackReportingRows(context.Background(), time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != playbackReportingMaxRows+1 || len(queries) != 2 {
+		t.Fatalf("expected two pages (%d rows), got %d rows in %d queries", playbackReportingMaxRows+1, len(rows), len(queries))
+	}
+	for _, q := range queries {
+		if !strings.Contains(q, "ORDER BY DateCreated") {
+			t.Fatalf("query must be ordered: %s", q)
+		}
+	}
+	if !strings.Contains(queries[1], fmt.Sprintf("OFFSET %d", playbackReportingMaxRows)) {
+		t.Fatalf("second page must use an offset: %s", queries[1])
 	}
 }

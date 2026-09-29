@@ -1,10 +1,16 @@
 package api
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prejudice-studio/twilight/internal/store"
@@ -15,72 +21,148 @@ import (
 // 口。攻击者抓到一份合法请求后，在窗口外重放会被直接拒绝；窗口内的重放仍然
 // 由 store 层的 (UID, ItemID, PlayedAt) 幂等键挡住的双层防御。
 //
-// 客户端时钟漂移最常见在 ±60s，留 5 分钟避免合法请求被误杀。Header 缺失时
-// 走旧的兼容路径（仅校验 secret），日志会打 Warn 提示运维补上。
+// 客户端时钟漂移最常见在 ±60s，留 5 分钟避免合法请求被误杀。
 const bangumiWebhookReplayWindowSeconds = 300
+
+// Bangumi webhook 有两种鉴权方式：
+//
+//  1. 签名模式（推荐）：X-Twilight-Bangumi-Timestamp 必填，
+//     X-Twilight-Bangumi-Signature = "sha256=" + hex(HMAC-SHA256(secret, timestamp + "." + body))。
+//     时间戳在窗口内、签名覆盖 body，且同一签名在窗口内只接受一次，截获的请求无法改写或重放。
+//  2. 旧的共享 token 模式（X-Twilight-Bangumi-Token / X-Webhook-Token 头，或已淘汰的 ?token=）：
+//     token 只是 bearer 口令，时间戳可自填，防重放只是装饰。仅在
+//     BangumiSync.webhook_allow_legacy_token=true（默认，兼容期）时接受，每次命中都记 Warn；
+//     改为 false 后只接受签名模式。
+const (
+	bangumiWebhookSignatureHeader = "X-Twilight-Bangumi-Signature"
+	bangumiWebhookTimestampHeader = "X-Twilight-Bangumi-Timestamp"
+	bangumiWebhookSignaturePrefix = "sha256="
+)
+
+// bangumiWebhookSignature 计算签名，供文档示例与测试使用。
+func bangumiWebhookSignature(secret string, timestamp int64, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return bangumiWebhookSignaturePrefix + hex.EncodeToString(mac.Sum(nil))
+}
+
+// bangumiWebhookReplayCache 记住窗口内已接受的签名，拒绝逐字节重放。
+// 进程内存即可：跨实例的重放仍会被 store 的 (uid,item_id,played_at) 幂等键去重。
+type bangumiWebhookReplayCache struct {
+	mu   sync.Mutex
+	seen map[string]int64
+}
+
+var bangumiWebhookReplays = &bangumiWebhookReplayCache{seen: map[string]int64{}}
+
+// remember 返回 false 表示该签名在有效期内已出现过。
+func (c *bangumiWebhookReplayCache) remember(signature string, now int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, expiresAt := range c.seen {
+		if expiresAt <= now {
+			delete(c.seen, key)
+		}
+	}
+	if expiresAt, exists := c.seen[signature]; exists && expiresAt > now {
+		return false
+	}
+	c.seen[signature] = now + 2*bangumiWebhookReplayWindowSeconds
+	return true
+}
+
+func parseBangumiWebhookTimestamp(raw string) (int64, bool, bool) {
+	ts, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false, false
+	}
+	drift := time.Now().Unix() - ts
+	if drift < 0 {
+		drift = -drift
+	}
+	return ts, true, drift <= bangumiWebhookReplayWindowSeconds
+}
 
 func (a *App) handleBangumiWebhook(w http.ResponseWriter, r *http.Request, _ Params) {
 	if a.requireBangumiSyncEnabled(w) {
 		return
 	}
-	// 优先 header，避免 secret 被上游代理 / CDN access log 记录到 query string。
-	// query token 仍被读取以兼容旧回调，但每次命中都会打 Warn 提示运维迁移到
-	// X-Twilight-Bangumi-Token 头。
-	secret := firstNonEmpty(r.Header.Get("X-Twilight-Bangumi-Token"), r.Header.Get("X-Webhook-Token"))
-	usingQuerySecret := false
-	if secret == "" {
-		if q := r.URL.Query().Get("token"); q != "" {
-			secret = q
-			usingQuerySecret = true
-		}
-	}
-	// 鉴权必须在 decodeMap 之前完成：旧实现先 `decodeMap(r)` 再 `ConstantTimeCompare`，
-	// 任何未鉴权的请求都能让 server 把 body（受 MaxUploadSize 上限约束）读完并构建
-	// 完整 map[string]any，攻击者可以无凭据投递大体积 JSON 触发 GC 放大。改为只允许
-	// header / query token；body-token 废弃后整个 hot path 不再读 body。
-	if a.cfg().BangumiWebhookSecret == "" || !constantTimeStringEqual(secret, a.cfg().BangumiWebhookSecret) {
+	secretConfigured := a.cfg().BangumiWebhookSecret
+	if secretConfigured == "" {
 		failWithCode(w, http.StatusForbidden, ErrUnauthorized, "Webhook 密钥无效")
 		return
 	}
-	if usingQuerySecret {
-		zap.L().Warn(
-			"bangumi webhook 仍在使用 ?token= 查询参数；查询字符串可能被代理 / CDN access log 收集，请尽快改用 X-Twilight-Bangumi-Token 头",
-			zap.String("remote", r.RemoteAddr),
-		)
-	}
-	// 时间戳 replay window：header 缺失时仅打 Warn（兼容旧回调），存在则严格
-	// 校验。窗口外的请求直接 410 拒绝，告诉客户端"这次请求已经过期不必重发"。
-	// 同一份 header 时间戳还会被透传给 store 作为 PlayedAt 幂等键的一部分，
-	// 让"同字节重放"在 store 层落到同一行而被静默丢弃——time.Now() 在跨秒
-	// 边界会让相隔 1s 的两次重放绕过 (uid,item_id,played_at) 唯一性。
 	var headerPlayedAt int64
-	if tsHeader := strings.TrimSpace(r.Header.Get("X-Twilight-Bangumi-Timestamp")); tsHeader != "" {
-		ts, parseErr := strconv.ParseInt(tsHeader, 10, 64)
-		if parseErr != nil {
+	if signature := strings.TrimSpace(r.Header.Get(bangumiWebhookSignatureHeader)); signature != "" {
+		// 签名模式：时间戳必填；先限量读 body 再验签，验签失败不解析 JSON。
+		tsHeader := strings.TrimSpace(r.Header.Get(bangumiWebhookTimestampHeader))
+		if tsHeader == "" {
+			failWithCode(w, http.StatusUnauthorized, ErrUnauthorized, "签名请求必须携带 "+bangumiWebhookTimestampHeader)
+			return
+		}
+		ts, valid, fresh := parseBangumiWebhookTimestamp(tsHeader)
+		if !valid {
 			failWithCode(w, http.StatusBadRequest, ErrUnauthorized, "Webhook timestamp 非法")
 			return
 		}
-		now := time.Now().Unix()
-		drift := now - ts
-		if drift < 0 {
-			drift = -drift
-		}
-		if drift > bangumiWebhookReplayWindowSeconds {
-			zap.L().Warn(
-				"bangumi webhook timestamp outside replay window",
-				zap.String("remote", r.RemoteAddr),
-				zap.Int64("drift_seconds", drift),
-				zap.Int("window_seconds", bangumiWebhookReplayWindowSeconds),
-			)
+		if !fresh {
 			failWithCode(w, http.StatusGone, ErrUnauthorized, "Webhook 请求已过期")
 			return
 		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONBodyBytes))
+		if err != nil {
+			failWithCode(w, http.StatusRequestEntityTooLarge, ErrBadRequest, "Webhook 请求体过大")
+			return
+		}
+		expected := bangumiWebhookSignature(secretConfigured, ts, body)
+		if !hmac.Equal([]byte(strings.ToLower(signature)), []byte(expected)) {
+			failWithCode(w, http.StatusForbidden, ErrUnauthorized, "Webhook 签名无效")
+			return
+		}
+		if !bangumiWebhookReplays.remember(expected, time.Now().Unix()) {
+			failWithCode(w, http.StatusConflict, ErrUnauthorized, "Webhook 请求重复")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		headerPlayedAt = ts
 	} else {
+		// 旧 token 模式：只在兼容期接受。优先 header，?token= 已淘汰（会进代理 / CDN access log）。
+		secret := firstNonEmpty(r.Header.Get("X-Twilight-Bangumi-Token"), r.Header.Get("X-Webhook-Token"))
+		usingQuerySecret := false
+		if secret == "" {
+			if q := r.URL.Query().Get("token"); q != "" {
+				secret = q
+				usingQuerySecret = true
+			}
+		}
+		// 鉴权必须在 decodeMap 之前完成，未鉴权请求不读 body。
+		if !constantTimeStringEqual(secret, secretConfigured) {
+			failWithCode(w, http.StatusForbidden, ErrUnauthorized, "Webhook 密钥无效")
+			return
+		}
+		if !a.cfg().BangumiWebhookAllowLegacyToken {
+			failWithCode(w, http.StatusUnauthorized, ErrUnauthorized, "Webhook 需要签名（"+bangumiWebhookSignatureHeader+"），共享 token 模式已关闭")
+			return
+		}
 		zap.L().Warn(
-			"bangumi webhook 未携带 X-Twilight-Bangumi-Timestamp header，无法做 replay-window 校验，建议客户端补齐",
+			"bangumi webhook 仍在使用共享 token 鉴权（兼容期）；请改用 X-Twilight-Bangumi-Timestamp + X-Twilight-Bangumi-Signature 签名，并将 BangumiSync.webhook_allow_legacy_token 设为 false",
 			zap.String("remote", r.RemoteAddr),
+			zap.Bool("query_token", usingQuerySecret),
 		)
+		if tsHeader := strings.TrimSpace(r.Header.Get(bangumiWebhookTimestampHeader)); tsHeader != "" {
+			ts, valid, fresh := parseBangumiWebhookTimestamp(tsHeader)
+			if !valid {
+				failWithCode(w, http.StatusBadRequest, ErrUnauthorized, "Webhook timestamp 非法")
+				return
+			}
+			if !fresh {
+				failWithCode(w, http.StatusGone, ErrUnauthorized, "Webhook 请求已过期")
+				return
+			}
+			headerPlayedAt = ts
+		}
 	}
 	payload := decodeMap(r)
 	item, _ := payload["Item"].(map[string]any)

@@ -47,13 +47,10 @@ func (a *App) systemUserLimitReachedExcluding(excludeRegCode, excludeInviteCode 
 		}
 		current += slots
 	}
-	for _, code := range a.store().ListAllInviteCodes() {
-		slots := remainingInviteUserSlots(code, now)
-		if excludeInviteCode != "" && strings.EqualFold(code.Code, excludeInviteCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
+	// 邀请码不计入系统用户上限：邀请码只能由已注册用户使用，不会新增用户。
+	// 旧实现把每张未用邀请码都算作 1 个待注册名额，普通用户各生成几张不用的
+	// 邀请码即可把新注册挡在"已达上限"之外。excludeInviteCode 参数保留兼容。
+	_ = excludeInviteCode
 	return current >= limit, current, limit
 }
 
@@ -68,65 +65,49 @@ func remainingRegCodeUserSlots(code store.RegCode, now int64) int {
 	return remainingUseSlots(code.UseCount, code.UseCountLimit)
 }
 
-// remainingInviteUserSlots 邀请码剩余可注册用户数（计入系统用户上限）。
-func remainingInviteUserSlots(code store.InviteCode, now int64) int {
-	if !code.Active || (code.ExpiredAt > 0 && code.ExpiredAt <= now) {
-		return 0
-	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
-}
-
 func (a *App) embyCapacityReached(excludeUID int64) (bool, int, int) {
 	return a.embyCapacityReachedExcluding(excludeUID, "", "")
 }
 
 func (a *App) embyCapacityReachedExcluding(excludeUID int64, excludeRegCode, excludeInviteCode string) (bool, int, int) {
 	limit := a.cfg().EmbyUserLimit
-	current := 0
-	now := time.Now().Unix()
-	users := a.store().ListUsers()
-	for _, u := range users {
-		if u.UID == excludeUID {
-			continue
-		}
-		if u.EmbyID != "" || u.PendingEmby || (a.cfg().EmbyDirectRegisterEnabled && u.Active) {
-			current++
-		}
-	}
-	for _, code := range a.store().ListAllInviteCodes() {
-		slots := remainingInviteSlots(code, now)
-		// 本次消费只占用该码 1 个名额：仅扣减 1，而非把整码剩余名额全部排除。
-		// 否则多名额码的 N 个并发消费者会集体躲在同一份缓冲后越过上限（TOCTOU 过度承诺）。
-		if excludeInviteCode != "" && strings.EqualFold(code.Code, excludeInviteCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
-	for _, code := range a.store().ListRegCodes() {
-		slots := remainingRegCodeEmbySlots(code, now)
-		if excludeRegCode != "" && strings.EqualFold(code.Code, excludeRegCode) && slots > 0 {
-			slots--
-		}
-		current += slots
-	}
+	// 口径统一在 store.EmbyOccupancy（锁内复核 embyCapacityExceededHeldLock 共用）：
+	// 已绑定 / 待开通用户（自由开通开启时再加活跃用户）+ 管理员签发的有效
+	// type1/3 注册码剩余次数。
+	// 未使用的邀请码不预占 Emby 名额：普通用户可自行生成邀请码（默认每人 10 张、
+	// 不过期），旧实现每张都占 1 个名额，少数账号囤码即可让持码用户开通 Emby 时
+	// 报"已达上限"。邀请码被使用后受邀者进入 PendingEmby 才计入；使用时
+	// （handleInviteUse / handleUseCode）也会先做容量检查。
+	_ = excludeInviteCode
+	current := a.store().EmbyOccupancy(store.EmbyOccupancyOptions{
+		ExcludeUID:       excludeUID,
+		ExcludeRegCode:   excludeRegCode,
+		CountActiveUsers: a.cfg().EmbyDirectRegisterEnabled,
+	})
 	return limit > 0 && current >= limit, current, limit
 }
 
-func remainingInviteSlots(code store.InviteCode, now int64) int {
-	if !code.Active || (code.ExpiredAt > 0 && code.ExpiredAt <= now) {
-		return 0
+// embyCapacityExceededHeldLock 在 store 写锁回调内（卡码已消费、本用户尚未写回）
+// 复核 Emby 名额，超限返回 store.ErrEmbyCapacityReached 让整笔消费回滚。
+// 锁外的 embyCapacityReachedExcluding 与消费之间有 TOCTOU：多名用户同时兑换同一张
+// 无限次码（剩余名额只算 1）时，各自扣掉自己那 1 个后看到的占用相同，会全部通过。
+// 锁内时其他并发者已写入的 PendingEmby 都可见，码的 UseCount 也已包含本次消费，
+// 因此有限次码不再额外扣减（consumedRegCode 仅用于无限次码扣掉本次 1 个）。
+// 只能在 store 回调中调用。
+func (a *App) embyCapacityExceededHeldLock(excludeUID int64, consumedRegCode string) error {
+	limit := a.cfg().EmbyUserLimit
+	if limit <= 0 {
+		return nil
 	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
-}
-
-func remainingRegCodeEmbySlots(code store.RegCode, now int64) int {
-	if !code.Active || code.IsDecoy || store.RegCodeExpired(code, now) {
-		return 0
+	current := a.store().EmbyOccupancyHeldLock(store.EmbyOccupancyOptions{
+		ExcludeUID:       excludeUID,
+		ConsumedRegCode:  consumedRegCode,
+		CountActiveUsers: a.cfg().EmbyDirectRegisterEnabled,
+	})
+	if current >= limit {
+		return store.ErrEmbyCapacityReached
 	}
-	if code.Type != 1 && code.Type != 3 {
-		return 0
-	}
-	return remainingUseSlots(code.UseCount, code.UseCountLimit)
+	return nil
 }
 
 func remainingUseSlots(used, limit int) int {
@@ -1179,6 +1160,27 @@ func (a *App) maxCodeDays(user store.User) (int, string) {
 	if permanentMaxDays <= 0 {
 		permanentMaxDays = 365
 	}
+	// ExpiredAt=-1 有双重语义：注册后尚未开通 Emby 的普通用户也是 -1（表示"未设置"），
+	// 并非永久号。旧实现一律按永久处理，30 天注册码注册、先不开通的用户即可发
+	// permanent_invite_max_days（默认 365）天邀请码放大权益。这里对"无 Emby 的普通
+	// 用户"改用待开通资格天数封顶；既无 Emby 又无待开通资格则不允许发码。
+	// 管理员 / 白名单账号不受影响，有限期的 ExpiredAt 仍走下方常规计算。
+	if strings.TrimSpace(user.EmbyID) == "" && user.Role != store.RoleAdmin && user.Role != store.RoleWhitelist && expiryIsPermanent(user.ExpiredAt) {
+		if !user.PendingEmby {
+			return 0, "尚未开通 Emby，不能生成邀请码"
+		}
+		pendingDays := a.cfg().EmbyDirectRegisterDays
+		if user.PendingEmbyDays != nil {
+			pendingDays = *user.PendingEmbyDays
+		}
+		if pendingDays == 0 {
+			pendingDays = 30
+		}
+		if pendingDays < 0 || pendingDays > permanentMaxDays {
+			return permanentMaxDays, ""
+		}
+		return pendingDays, ""
+	}
 	if expiryIsPermanent(user.ExpiredAt) {
 		return permanentMaxDays, ""
 	}
@@ -1190,6 +1192,26 @@ func (a *App) maxCodeDays(user store.User) (int, string) {
 		days = permanentMaxDays
 	}
 	return days, ""
+}
+
+// inviteActivationExpiryCap 返回邀请来源用户开通 Emby 时不得超过的到期时间（邀请人
+// 当前 ExpiredAt）；非邀请来源、已断开关系或邀请人为永久号时返回 0（不封顶）。
+// 使用邀请码时 boundedInviteExpiry 只约束当时的 ExpiredAt，真正开通时会按
+// PendingEmbyDays 从开通当下重新起算，延后开通即可超出邀请人期限，故开通时再封顶一次。
+// 必须在 store 写锁外调用（内部读 store）。
+func (a *App) inviteActivationExpiryCap(u store.User) int64 {
+	if strings.TrimSpace(u.RegistrationSource) != registrationSourceInvite {
+		return 0
+	}
+	rel, ok := a.store().ParentOf(u.UID)
+	if !ok {
+		return 0
+	}
+	inviter, ok := a.store().User(rel.ParentUID)
+	if !ok || inviter.ExpiredAt <= 0 || inviter.ExpiredAt >= permanentExpiryUnix {
+		return 0
+	}
+	return inviter.ExpiredAt
 }
 
 func (a *App) inviteRootUID(uid int64) int64 {

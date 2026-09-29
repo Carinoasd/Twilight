@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
@@ -47,46 +48,68 @@ func (s *Store) AddSignin(uid int64, points int) (Signin, bool, error) {
 func (s *Store) AddSigninWithOptions(uid int64, dailyPoints int, bonusForStreak func(int) int, resetAfterMiss bool) (Signin, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
+	// 走 mutateAndSaveLocked：旧实现 refreshLocked + saveLocked，多进程写入撞版本
+	// 冲突时直接报错而不重放；非冲突类错误（超时等）时内存仍保留"今日已签到"，
+	// 可能随下一笔写入落盘或在下次刷新时消失。闭包内的结果变量每次重放都重新计算。
+	var result Signin
+	var awarded bool
+	err := s.mutateAndSaveLocked(func() error {
+		result, awarded = Signin{}, false
+		now := time.Now()
+		today := now.Format(signinDateLayout)
+		yesterday := now.AddDate(0, 0, -1).Format(signinDateLayout)
+		si := s.state.Signin[uid]
+		if si.UID == 0 {
+			si.UID = uid
+		}
+		if si.LongestStreak < si.Streak {
+			si.LongestStreak = si.Streak
+		}
+		if si.LastSignin == today {
+			result = si
+			return errSigninAlreadyToday
+		}
+		if si.LastSignin == yesterday {
+			si.Streak++
+		} else if si.LastSignin != "" && !resetAfterMiss {
+			si.Streak++
+		} else {
+			si.Streak = 1
+		}
+		if si.Streak > si.LongestStreak {
+			si.LongestStreak = si.Streak
+		}
+		bonusPoints := 0
+		if bonusForStreak != nil {
+			bonusPoints = bonusForStreak(si.Streak)
+		}
+		totalPoints := dailyPoints + bonusPoints
+		si.LastSignin = today
+		si.Points += totalPoints
+		// 新建切片再追加，避免写入与锁外持有的 Signin 副本共享底层数组。
+		records := make([]SigninRecord, 0, len(si.Records)+1)
+		records = append(records, si.Records...)
+		records = append(records, SigninRecord{Date: today, Points: dailyPoints, BonusPoints: bonusPoints, Total: totalPoints, Streak: si.Streak, CreatedAt: now.Unix()})
+		if len(records) > maxSigninRecords {
+			records = compactTail(records, maxSigninRecords)
+		}
+		si.Records = records
+		s.state.Signin[uid] = si
+		result, awarded = si, true
+		return nil
+	})
+	if errors.Is(err, errSigninAlreadyToday) {
+		// 今日已签到：不写入（mutateAndSaveLocked 已回滚到快照，本来也未改动）。
+		return result, false, nil
+	}
+	if err != nil {
 		return Signin{}, false, err
 	}
-	now := time.Now()
-	today := now.Format(signinDateLayout)
-	yesterday := now.AddDate(0, 0, -1).Format(signinDateLayout)
-	si := s.state.Signin[uid]
-	if si.UID == 0 {
-		si.UID = uid
-	}
-	if si.LongestStreak < si.Streak {
-		si.LongestStreak = si.Streak
-	}
-	if si.LastSignin == today {
-		return si, false, nil
-	}
-	if si.LastSignin == yesterday {
-		si.Streak++
-	} else if si.LastSignin != "" && !resetAfterMiss {
-		si.Streak++
-	} else {
-		si.Streak = 1
-	}
-	if si.Streak > si.LongestStreak {
-		si.LongestStreak = si.Streak
-	}
-	bonusPoints := 0
-	if bonusForStreak != nil {
-		bonusPoints = bonusForStreak(si.Streak)
-	}
-	totalPoints := dailyPoints + bonusPoints
-	si.LastSignin = today
-	si.Points += totalPoints
-	si.Records = append(si.Records, SigninRecord{Date: today, Points: dailyPoints, BonusPoints: bonusPoints, Total: totalPoints, Streak: si.Streak, CreatedAt: now.Unix()})
-	if len(si.Records) > maxSigninRecords {
-		si.Records = compactTail(si.Records, maxSigninRecords)
-	}
-	s.state.Signin[uid] = si
-	return si, true, s.saveLocked()
+	return result, awarded, nil
 }
+
+// errSigninAlreadyToday 仅用于让 mutateAndSaveLocked 跳过落盘的内部哨兵。
+var errSigninAlreadyToday = errors.New("signin already today")
 
 func (s *Store) SpendSigninPointsAndUpdateUser(uid int64, cost int, fn func(*User) error) (User, Signin, error) {
 	s.mu.Lock()
@@ -117,6 +140,7 @@ func (s *Store) SpendSigninPointsAndUpdateUser(uid int64, cost int, fn func(*Use
 			if err := fn(&u); err != nil {
 				return err
 			}
+			normalizeUserStateMarkers(old, &u)
 		}
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict

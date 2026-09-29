@@ -105,16 +105,43 @@ func registerAndLogin(t *testing.T, app *App, username, password string) []*http
 // 自动成为管理员"通道已移除）。newTestApp 只白名单了 "admin"，所以任何用其它
 // 用户名注册并期望拿到管理员权限的用例，都必须先把该用户名登记进
 // AdminUsernames——否则注册出来的是普通用户，管理端接口一律 403。
+//
+// 配置的管理员用户名只在空库首位注册时可直接注册并提权；系统已有用户后，注册
+// 这些名字会被拒绝（防止抢注顶替）。因此非首位时先按普通用户注册，再模拟运维
+// “把名字写进配置并重载”——追加到 AdminUsernames 后调用 applyConfiguredAdmins。
 func registerAdmin(t *testing.T, app *App, username, password string) []*http.Cookie {
 	t.Helper()
 	cfg := app.cfg()
+	configured := false
 	for _, existing := range cfg.AdminUsernames {
 		if existing == username {
-			return registerAndLogin(t, app, username, password)
+			configured = true
+			break
 		}
 	}
+	if app.store().UserCount() == 0 {
+		if !configured {
+			cfg.AdminUsernames = append(cfg.AdminUsernames, username)
+		}
+		return registerAndLogin(t, app, username, password)
+	}
+	if configured {
+		// 暂时移出名单以便注册，注册后再放回并重载。
+		kept := make([]string, 0, len(cfg.AdminUsernames))
+		for _, existing := range cfg.AdminUsernames {
+			if existing != username {
+				kept = append(kept, existing)
+			}
+		}
+		cfg.AdminUsernames = kept
+	}
+	register := doJSON(app, http.MethodPost, "/api/v1/users/register", fmt.Sprintf(`{"username":%q,"password":%q}`, username, password), nil)
+	if register.Code != http.StatusCreated {
+		t.Fatalf("register %s status = %d body=%s", username, register.Code, register.Body.String())
+	}
 	cfg.AdminUsernames = append(cfg.AdminUsernames, username)
-	return registerAndLogin(t, app, username, password)
+	app.applyConfiguredAdmins()
+	return loginCookies(t, app, username, password)
 }
 
 // loginCookies 从已存在的账户登录，返回 session cookie 切片。
@@ -655,11 +682,11 @@ func TestCheckExpiredKillsInvitedUserSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	invitedToken, _, err := app.sessions().Create(ctx, invited.UID)
+	invitedToken, _, err := app.sessions().Create(ctx, invited.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID)
+	standaloneToken, _, err := app.sessions().Create(ctx, standalone.UID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +1020,8 @@ func TestUploadAssetPathAndFilenameSafety(t *testing.T) {
 	}
 	for _, path := range invalids {
 		resp := doJSON(app, http.MethodGet, path, ``, []*http.Cookie{cookie})
-		if resp.Code != http.StatusNotFound {
+		// “%2e%2e” 解码后是 “..” 段，入口的非规范路径检查会先以 400 拒绝；其余在资源层回 404。
+		if resp.Code != http.StatusNotFound && !(strings.Contains(path, "%2e%2e") && resp.Code == http.StatusBadRequest) {
 			t.Fatalf("invalid asset %s status=%d body=%s", path, resp.Code, resp.Body.String())
 		}
 	}
@@ -1035,8 +1063,10 @@ func TestProtectedAdminConfigHiddenPreservedAndApplied(t *testing.T) {
 		t.Fatalf("existing protected admin config was not preserved: %s", content)
 	}
 
-	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"owner","password":"Owner123456"}`, nil)
+	// 配置的管理员用户名只在空库首位注册时生效（非首位注册同名会被拒绝，防抢注），
+	// 因此 alice 先注册。
 	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"alice","password":"Alice123456"}`, nil)
+	_ = doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"owner","password":"Owner123456"}`, nil)
 	alice, ok := app.store().FindUserByUsername("alice")
 	if !ok || alice.Role != store.RoleAdmin || !alice.Active {
 		t.Fatalf("configured admin username was not applied on registration: %#v", alice)
@@ -1360,7 +1390,7 @@ func TestSigninAutoRenewalPreferenceEnforcesBackendGates(t *testing.T) {
 	}
 	foundAudit := false
 	for _, entry := range app.store().ListAuditLogs() {
-		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == 0 {
+		if entry.Action == "update_signin_auto_renewal" && entry.TargetUID == user.UID { // target_uid 已改为本人
 			foundAudit = true
 			break
 		}
@@ -1950,7 +1980,8 @@ func TestBangumiSearchErrorIsVisibleForBangumiSource(t *testing.T) {
 	login := doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"Admin123456"}`, nil)
 	cookie := findCookie(login.Result().Cookies(), "twilight_session")
 	resp := doJSON(app, http.MethodGet, "/api/v1/media/search?q=test&source=bangumi", ``, []*http.Cookie{cookie})
-	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "Bangumi 搜索失败") {
+	// 上游错误细节只写日志，回给前端的是固定文案（避免泄露上游 URL / 密钥）。
+	if resp.Code != http.StatusBadGateway || !strings.Contains(resp.Body.String(), "Bangumi 搜索暂时不可用") || strings.Contains(resp.Body.String(), "bad bangumi request") {
 		t.Fatalf("bangumi failure status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
@@ -2724,7 +2755,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(numeric(summary["cleared"])) != 2 || int(numeric(summary["deleted"])) != 0 || asString(summary["scope"]) != "all" {
+	// 只收回发放超过 AutoCleanupPendingEmbyDays 天的资格；刚发放的保留。
+	if int(numeric(summary["cleared"])) != 1 || int(numeric(summary["deleted"])) != 0 || int(numeric(summary["skipped_recent"])) != 1 {
 		t.Fatalf("unexpected entitlement cleanup summary: %#v", summary)
 	}
 	updated, ok := app.store().User(user.UID)
@@ -2735,8 +2767,8 @@ func TestSchedulerCleanupPendingEmbyEntitlementsKeepsWebAccount(t *testing.T) {
 		t.Fatalf("pending entitlement was not cleared cleanly: %#v", updated)
 	}
 	updatedRecent, ok := app.store().User(recentUser.UID)
-	if !ok || updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays != nil || !updatedRecent.Active {
-		t.Fatalf("recent pending entitlement was not cleared cleanly: ok=%v user=%#v", ok, updatedRecent)
+	if !ok || !updatedRecent.PendingEmby || updatedRecent.PendingEmbyDays == nil || !updatedRecent.Active {
+		t.Fatalf("recent pending entitlement must be kept: ok=%v user=%#v", ok, updatedRecent)
 	}
 }
 
@@ -2792,7 +2824,9 @@ func TestSchedulerEmbySyncRepairsPlaceholderAndMissingIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(numeric(summary["filled_emby_ids"])) != 2 || int(numeric(summary["repaired_placeholders"])) != 1 {
+	// 只有占位 ID 的账号会按名称修复；没有 EmbyID、只有同名 EmbyUsername 的账号
+	// 只列为候选，不能自动认领（否则注册同名账号即可接管他人 Emby）。
+	if int(numeric(summary["filled_emby_ids"])) != 1 || int(numeric(summary["repaired_placeholders"])) != 1 || int(numeric(summary["name_candidates"])) != 1 {
 		t.Fatalf("unexpected emby sync summary: %#v", summary)
 	}
 	updatedAlpha, _ := app.store().User(alpha.UID)
@@ -2800,8 +2834,8 @@ func TestSchedulerEmbySyncRepairsPlaceholderAndMissingIDs(t *testing.T) {
 		t.Fatalf("placeholder Emby ID was not repaired: %#v", updatedAlpha)
 	}
 	updatedBeta, _ := app.store().User(beta.UID)
-	if updatedBeta.EmbyID != "real-beta" || updatedBeta.EmbyUsername != "beta" {
-		t.Fatalf("missing Emby ID was not filled by username: %#v", updatedBeta)
+	if updatedBeta.EmbyID != "" {
+		t.Fatalf("same-name Emby account must not be auto-linked: %#v", updatedBeta)
 	}
 }
 
@@ -2946,7 +2980,12 @@ func TestTelegramMembershipRejoinManualReviewAndAutoEnable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error { u.Active = false; return nil }); err != nil {
+	// 只有因退群被巡检停用（DisabledReason=telegram_membership）的账号才会进入回群流程。
+	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error {
+		u.Active = false
+		u.DisabledReason = store.DisabledReasonTelegramMembership
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3153,8 +3192,10 @@ func TestClearAuditLogsDoesNotRecreateAuditEntry(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("clear audit status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if count := app.store().AuditLogCount(); count != 0 {
-		t.Fatalf("clear audit recreated an audit entry, count=%d logs=%#v", count, app.store().ListAuditLogs())
+	// 清空后只留下一条不可删除的 clear_audit_logs 自保记录。
+	logs := app.store().ListAuditLogs()
+	if len(logs) != 1 || logs[0].Action != "clear_audit_logs" || logs[0].UID != admin.UID {
+		t.Fatalf("clear audit should leave exactly one protected record, logs=%#v", logs)
 	}
 }
 
@@ -3162,19 +3203,21 @@ func TestFallbackAuditCoversSuccessfulMutationsWithoutExplicitAudit(t *testing.T
 	app := newTestApp(t)
 	app.cfg().AuditLogEnabled = true
 	cookies := registerAndLogin(t, app, "fallback-audit", "User123456")
-	if err := app.store().ClearAuditLogs(); err != nil {
+	if _, err := app.store().ClearAuditLogs(); err != nil {
 		t.Fatal(err)
 	}
 
-	rr := doJSON(app, http.MethodPost, "/api/v1/auth/logout", ``, cookies)
+	// 登出已改为明确审计（logout），这里换一个仍只有 fallback 的用户写入路由。
+	app.cfg().BangumiEnabled = true
+	rr := doJSON(app, http.MethodDelete, "/api/v1/bangumi/sync/history", ``, cookies)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("logout status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("clear bangumi history status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	logs := app.store().ListAuditLogs()
 	if len(logs) != 1 {
 		t.Fatalf("expected one fallback audit log, got %#v", logs)
 	}
-	if logs[0].Action != "post_auth_logout" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
+	if logs[0].Action != "delete_bangumi_sync_history" || logs[0].Category != "user" || logs[0].UID == 0 || logs[0].Detail["fallback"] != true {
 		t.Fatalf("unexpected fallback audit log: %#v", logs[0])
 	}
 }
@@ -3192,8 +3235,10 @@ func TestAuditMaintenanceRoutesSkipFallbackAudit(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("clear audit status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if count := app.store().AuditLogCount(); count != 0 {
-		t.Fatalf("audit maintenance route should not create fallback log, count=%d logs=%#v", count, app.store().ListAuditLogs())
+	// 不写 fallback，只写一条明确的 clear_audit_logs 自保记录。
+	logs := app.store().ListAuditLogs()
+	if len(logs) != 1 || logs[0].Action != "clear_audit_logs" || logs[0].Detail["fallback"] != nil {
+		t.Fatalf("audit maintenance route should only write the protected record, logs=%#v", logs)
 	}
 }
 
@@ -4125,6 +4170,7 @@ func TestTelegramTouchPanelReusesSingleTimer(t *testing.T) {
 func TestTelegramAnonymousGroupUserRequiresInlineAuth(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
 	if _, err := app.store().CreateUser(user); err != nil {
@@ -4250,6 +4296,7 @@ func TestTelegramDisabledBuiltinDoesNotFallThroughToCustomCommand(t *testing.T) 
 func TestTelegramGroupUserPanelDeletesCommandMessageAfterSend(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
@@ -4297,6 +4344,7 @@ func TestTelegramGroupUserPanelDeletesCommandMessageAfterSend(t *testing.T) {
 func TestTelegramAnonymousGroupUserAuthDeletesCommandMessageAfterPanel(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	user := store.User{UID: 1001, Username: "target", Role: store.RoleNormal, Active: true, TelegramID: 888, CreatedAt: time.Now().Unix(), RegisterTime: time.Now().Unix()}
@@ -4449,6 +4497,7 @@ func TestTelegramGroupUserPanelCustomTemplatePlaceholders(t *testing.T) {
 func TestTelegramPanelCloseRequiresAdminAndDeletesPanel(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().TelegramMode = true
+	app.cfg().TelegramEnablePanel = true
 	app.cfg().TelegramBotToken = "123:ABC"
 	app.cfg().TelegramAdminIDs = []int64{9001}
 	tgRequests := make(chan map[string]any, 12)
@@ -4922,7 +4971,7 @@ func TestSchedulerRuntimeParamsPersistInStoreAndDriveRunner(t *testing.T) {
 		}
 		found = true
 		params, _ := job["runtime_params"].(map[string]any)
-		if boolish(params["enabled"]) || asString(params["scope"]) != "all" {
+		if boolish(params["enabled"]) || int(numeric(params["days"])) <= 0 {
 			t.Fatalf("runtime params did not come from backend store: %#v", params)
 		}
 	}
@@ -4950,6 +4999,7 @@ func TestBangumiWebhookRequiresSecretWhenEnabled(t *testing.T) {
 		t.Fatalf("webhook without configured secret = %d body=%s", blocked.Code, blocked.Body.String())
 	}
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 	allowed := doJSON(app, http.MethodPost, "/api/v1/emby/bangumi/webhook?token=webhook-secret", `{"Event":"PlaybackStopped"}`, nil)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("webhook with secret = %d body=%s", allowed.Code, allowed.Body.String())
@@ -4963,6 +5013,7 @@ func TestBangumiWebhookRejectsStaleTimestamp(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().BangumiEnabled = true
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 
 	// 落在 1 小时之前——窗口 5 分钟,必拒。
 	stale := strconv.FormatInt(time.Now().Unix()-3600, 10)
@@ -5001,6 +5052,7 @@ func TestBangumiWebhookIdempotentReplay(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().BangumiEnabled = true
 	app.cfg().BangumiWebhookSecret = "webhook-secret"
+	app.cfg().BangumiWebhookAllowLegacyToken = true // 兼容期的旧 token 模式
 	created, err := app.store().CreateUser(store.User{Username: "viewer", PasswordHash: "x"})
 	if err != nil {
 		t.Fatal(err)
@@ -5133,6 +5185,12 @@ func TestDatabaseAdminBackupRestoreAndAuth(t *testing.T) {
 	if _, ok := app.store().FindUserByUsername("extra"); ok {
 		t.Fatal("restore did not replace state")
 	}
+	// 恢复会吊销全部会话（UID 可能被重新分配），管理员自己也要重新登录。
+	if stale := doJSONWithHeaders(app, http.MethodGet, "/api/v1/system/admin/database/backups", ``, []*http.Cookie{adminCookie}, nil); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("session survived restore status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	adminLogin = doJSON(app, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"Admin123456"}`, nil)
+	adminCookie = findCookie(adminLogin.Result().Cookies(), "twilight_session")
 	traversal := doJSONWithHeaders(app, http.MethodPost, "/api/v1/system/admin/database/restore", `{"name":"../state.json"}`, []*http.Cookie{adminCookie}, map[string]string{"X-Twilight-Client": "webui"})
 	if traversal.Code != http.StatusBadRequest {
 		t.Fatalf("restore traversal status=%d body=%s", traversal.Code, traversal.Body.String())
@@ -5404,13 +5462,14 @@ func TestEmbyCapacityCountsPendingEntitlementsSeparatelyFromSystemLimit(t *testi
 		t.Fatal(err)
 	}
 
-	// 系统用户上限现在也会计入有效注册码/邀请码的剩余名额。REG-A（type=1）和 INV-A
-	// 各占 1 个名额，REG-RENEW（type=2）不算，加上已有 1 个用户 = 3。
-	if reached, current, limit := app.systemUserLimitReached(); reached || current != 3 || limit != 100 {
-		t.Fatalf("system limit should count local users + pending codes, got reached=%v current=%d limit=%d", reached, current, limit)
+	// 系统用户上限计入有效注册码（type=1/3）的剩余名额：REG-A 占 1 个，REG-RENEW
+	// （type=2）不算；邀请码只能给已注册用户使用，不计入。加上已有 1 个用户 = 2。
+	if reached, current, limit := app.systemUserLimitReached(); reached || current != 2 || limit != 100 {
+		t.Fatalf("system limit should count local users + pending regcodes only, got reached=%v current=%d limit=%d", reached, current, limit)
 	}
-	if reached, current, limit := app.embyCapacityReached(0); !reached || current != 3 || limit != 3 {
-		t.Fatalf("emby capacity should count existing users and pending code slots, got reached=%v current=%d limit=%d", reached, current, limit)
+	// Emby 名额：已绑定用户 1 + REG-A 1；未使用的邀请码不预占名额。
+	if reached, current, limit := app.embyCapacityReached(0); reached || current != 2 || limit != 3 {
+		t.Fatalf("emby capacity should not reserve slots for unused invite codes, got reached=%v current=%d limit=%d", reached, current, limit)
 	}
 }
 
@@ -6044,6 +6103,11 @@ func TestRegisterEmbyDoesNotOverwriteConcurrentBinding(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/New":
 			created = true
 			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created"}`))
+		// 新建账号后必须能收紧策略（GET 用户 + POST Policy），否则创建会整体失败。
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/race-created":
+			_, _ = w.Write([]byte(`{"Id":"race-created","Name":"race-created","Policy":{}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Policy":
+			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/race-created/Password":
 			_, _ = w.Write([]byte(`{}`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/Users/race-created":
@@ -6587,7 +6651,7 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := app.store().CreateUser(store.User{Username: "child", Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
+	child, err := app.store().CreateUser(store.User{Username: "child", Email: "child-private@example.com", TelegramID: 987654321, Role: store.RoleNormal, Active: true, ExpiredAt: time.Now().AddDate(0, 0, -1).Unix(), EmbyID: "emby-child", EmbyUsername: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6603,6 +6667,10 @@ func TestInviteParentCanDetachExpiredChildAndKeepWebAccountActive(t *testing.T) 
 	app.handleDetachExpiredInviteChild(rr, req, Params{"uid": strconv.FormatInt(child.UID, 10)})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("detach status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	// 上级断开下级时，回应不得带出下级的个人信息。
+	if body := rr.Body.String(); strings.Contains(body, "child-private@example.com") || strings.Contains(body, "987654321") || strings.Contains(body, "registration_code") {
+		t.Fatalf("detach response leaks child's private fields: %s", body)
 	}
 	if _, ok := app.store().ParentOf(child.UID); ok {
 		t.Fatal("child still has invite parent")
@@ -6664,8 +6732,9 @@ func TestInviteChildCanDetachSelfAfterExpiryAndDeleteOwnEmby(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain after self detach")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("self detach should clear invite code usage so relation cannot be rebuilt: %#v", invite)
+	// 断开只清使用者引用：码保持已用，不退次数、不重新启用（防小号重复使用）。
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("self detach should drop the usage reference and keep the code consumed: %#v", invite)
 	}
 	updated, ok := app.store().User(child.UID)
 	if !ok || !updated.Active || updated.EmbyID != "" || updated.EmbyUsername != "" || updated.EmbyDisabled || updated.PendingEmby {
@@ -7090,8 +7159,8 @@ func TestAdminBatchDetachInviteRelation(t *testing.T) {
 	if !ok {
 		t.Fatal("invite code should remain")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("invite usage should be rolled back after batch detach: %#v", invite)
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("batch detach should drop the usage reference and keep the code consumed: %#v", invite)
 	}
 }
 

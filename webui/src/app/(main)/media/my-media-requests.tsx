@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, IconButton } from "@/components/ui/button";
 import type { MediaRequest } from "@/lib/api";
 import { mediaRequestExternalUrl } from "@/lib/media-external-url";
-import { sanitizeImageUrl } from "@/lib/safe-url";
+import { sanitizeMediaPosterUrl } from "@/lib/media-poster-url";
 import { formatRelativeTime } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 import { MediaPoster } from "./media-poster";
@@ -48,7 +48,7 @@ export function MyMediaRequests(props: MyMediaRequestsProps) {
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
           {props.requests.map((request) => {
-            const poster = sanitizeImageUrl(request.media_info?.poster_url || request.media_info?.poster);
+            const poster = sanitizeMediaPosterUrl(request.media_info?.poster_url || request.media_info?.poster);
             const title = request.media_info?.title || request.title || t("media.unknownMedia");
             const url = mediaRequestExternalUrl(request);
             return (

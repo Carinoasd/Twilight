@@ -304,7 +304,7 @@ func TestTicketImageTooLarge(t *testing.T) {
 func TestDeleteTicketRemovesAttachments(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	id := createTicket(t, app, "deleteme", "with attachments", admin)
 
 	rr := uploadTicketImage(t, app, id, "a.png", pngBytes(), admin)
@@ -336,7 +336,7 @@ func TestClosedTicketRejectsImageUpload(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
 	cookies := registerAndLogin(t, app, "user", "User12345678")
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	id := createTicket(t, app, "to-close", "will be closed", cookies)
 
 	closeRR := doJSON(app, http.MethodPost, "/api/v1/tickets/"+strconv.FormatInt(id, 10)+"/close", ``, cookies)
@@ -386,7 +386,7 @@ func TestClosedTicketBlocksUserImageDelete(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
 	user := registerAndLogin(t, app, "user", "User12345678")
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 
 	id := createTicket(t, app, "freeze-img", "freeze on close", user)
 	keepFile := uploadedTicketImageFilename(t, app, id, "keep.png", user)
@@ -471,7 +471,7 @@ func TestClosedTicketsWithAttachmentsBefore(t *testing.T) {
 func TestTicketRepliesSurviveStatusUpdatesAndReopenResolved(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "user", "User12345678")
 	id := createTicket(t, app, "conversation", "initial content", user)
 
@@ -533,7 +533,7 @@ func TestTicketRepliesSurviveStatusUpdatesAndReopenResolved(t *testing.T) {
 func TestAdminTicketsAllFilterIncludesResolvedAndClosed(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "user", "User12345678")
 
 	openID := createTicket(t, app, "open ticket", "still open", user)
@@ -588,7 +588,7 @@ func TestAdminTicketsAllFilterIncludesResolvedAndClosed(t *testing.T) {
 func TestCreateTicketPersistsForAdminListAndAudit(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "ticket-user", "User12345678")
 	app.cfg().AuditLogEnabled = true
 
@@ -664,7 +664,7 @@ func TestCreateTicketPersistsForAdminListAndAudit(t *testing.T) {
 func TestAdminTicketDetailAndReplyEndpoint(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "ticket-owner", "Owner123456")
 	id := createTicket(t, app, "chat ticket", "initial content", user)
 	path := "/api/v1/admin/tickets/" + strconv.FormatInt(id, 10)
@@ -715,7 +715,7 @@ func TestAdminTicketDetailAndReplyEndpoint(t *testing.T) {
 func TestAdminTicketListUsesCompactConversationSummary(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "ticket-summary-owner", "Owner123456")
 	id := createTicket(t, app, "summary ticket", "initial content", user)
 	if _, err := app.store().AddTicketReply(id, store.TicketReply{UID: 2, Username: "ticket-summary-owner", Role: store.RoleNormal, Content: "reply body", CreatedAt: time.Now().Unix()}); err != nil {
@@ -761,7 +761,7 @@ func TestAdminTicketListUsesCompactConversationSummary(t *testing.T) {
 func TestAdminTicketReplyEndpointPreservesUserReplies(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "ticket-user", "User123456")
 	id := createTicket(t, app, "reply preserve", "initial content", user)
 
@@ -819,7 +819,7 @@ func TestTicketAdminNotificationTargetsSkipActor(t *testing.T) {
 func TestClosedTicketReplyPolicyAllowsAdminOnly(t *testing.T) {
 	app := newTestApp(t)
 	enableTicketSystem(t, app, nil)
-	admin := registerAndLogin(t, app, "admin", "Admin123456")
+	admin := registerAdmin(t, app, "admin", "Admin123456")
 	user := registerAndLogin(t, app, "user", "User12345678")
 	id := createTicket(t, app, "closed-reply", "initial content", user)
 	if rr := doJSON(app, http.MethodPost, "/api/v1/tickets/"+strconv.FormatInt(id, 10)+"/close", ``, user); rr.Code != http.StatusOK {

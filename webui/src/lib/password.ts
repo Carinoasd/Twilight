@@ -1,5 +1,7 @@
 // Frontend password strength rule. Keep this in sync with the Go backend
 // password validation policy.
+// 提示文案走 i18n（translate 可在 React 组件树外使用），不再写死简体中文。
+import { translate } from "@/lib/i18n";
 
 export interface PasswordStrengthResult {
   ok: boolean;
@@ -10,13 +12,13 @@ export interface PasswordStrengthResult {
 
 export function validatePasswordStrength(
   password: string,
-  label = "新密码"
+  label = translate("passwordStrength.defaultLabel")
 ): PasswordStrengthResult {
   if (!password) {
-    return { ok: false, message: `请提供${label}`, score: 0 };
+    return { ok: false, message: translate("passwordStrength.required", { label }), score: 0 };
   }
   if (password.length > 128) {
-    return { ok: false, message: `${label}过长，最多 128 位`, score: 0 };
+    return { ok: false, message: translate("passwordStrength.tooLong", { label }), score: 0 };
   }
 
   const hasLower = /[a-z]/.test(password);
@@ -35,29 +37,29 @@ export function validatePasswordStrength(
   if (!longEnough) {
     return {
       ok: false,
-      message: `${label}强度不足：至少 8 位，且包含大小写字母和数字`,
+      message: translate("passwordStrength.tooShort", { label }),
       score,
     };
   }
   if (!hasLower) {
-    return { ok: false, message: `${label}强度不足：至少包含一个小写字母`, score };
+    return { ok: false, message: translate("passwordStrength.needLower", { label }), score };
   }
   if (!hasUpper) {
-    return { ok: false, message: `${label}强度不足：至少包含一个大写字母`, score };
+    return { ok: false, message: translate("passwordStrength.needUpper", { label }), score };
   }
   if (!hasDigit) {
-    return { ok: false, message: `${label}强度不足：至少包含一个数字`, score };
+    return { ok: false, message: translate("passwordStrength.needDigit", { label }), score };
   }
 
-  return { ok: true, message: "强度合格", score };
+  return { ok: true, message: translate("passwordStrength.ok"), score };
 }
 
 export function passwordStrengthLabel(score: number): {
   label: string;
   className: string;
 } {
-  if (score <= 1) return { label: "弱", className: "text-destructive" };
-  if (score === 2) return { label: "一般", className: "text-amber-500" };
-  if (score === 3) return { label: "良好", className: "text-emerald-500" };
-  return { label: "强", className: "text-emerald-600" };
+  if (score <= 1) return { label: translate("passwordStrength.levelWeak"), className: "text-destructive" };
+  if (score === 2) return { label: translate("passwordStrength.levelFair"), className: "text-amber-500" };
+  if (score === 3) return { label: translate("passwordStrength.levelGood"), className: "text-emerald-500" };
+  return { label: translate("passwordStrength.levelStrong"), className: "text-emerald-600" };
 }

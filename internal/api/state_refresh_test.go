@@ -317,8 +317,8 @@ func TestAdminInviteQuickMaintenanceDetachesAndRenews(t *testing.T) {
 	if !ok {
 		t.Fatal("detach should clear usage but keep invite code record")
 	}
-	if invite.UsedByUID != 0 || invite.Used || invite.UseCount != 0 || !invite.Active {
-		t.Fatalf("quick detach should clear invite usage: %#v", invite)
+	if invite.UsedByUID != 0 || !invite.Used || invite.UseCount != 1 || invite.Active {
+		t.Fatalf("quick detach should drop the usage reference and keep the code consumed: %#v", invite)
 	}
 }
 

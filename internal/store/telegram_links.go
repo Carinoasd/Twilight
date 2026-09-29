@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -471,12 +472,59 @@ func (s *Store) CleanupTelegramLinks(ctx context.Context, now, uid, telegramID i
 func (s *Store) CleanupOrphanedTelegramLinks(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, `DELETE FROM twilight_telegram_links l USING twilight_state s WHERE s.id=1 AND l.uid>0 AND NOT (s.state->'users' ? l.uid::text)`)
+	// 旧 SQL 用 `NOT (s.state->'users' ? l.uid::text)` 逐列探测整份 JSONB，links
+	// 多时会反复解压 TOAST。改为在同一交易里：对 state 列加 FOR SHARE（挡住并发的
+	// 建号/绑定写入，保证 uid 集合与删除同一时点），只读一次 users 的键到 Go 端，
+	// 再以数组参数一次删除。
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var locked bool
+	err = tx.QueryRowContext(ctx, `SELECT true FROM twilight_state WHERE id = 1 FOR SHARE`).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		// 与旧 SQL 一致：没有 state 列时不删任何链接（不能把空集合当成「所有账号都不存在」）。
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT jsonb_object_keys(COALESCE(state->'users', '{}'::jsonb)) FROM twilight_state WHERE id = 1`)
+	if err != nil {
+		return 0, err
+	}
+	uids := make([]int64, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		uid, err := strconv.ParseInt(key, 10, 64)
+		if err != nil {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links WHERE uid > 0 AND NOT (uid = ANY($1))`, uids)
 	if err != nil {
 		return 0, err
 	}
 	n, err := result.RowsAffected()
-	return int(n), err
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // TelegramLinkCount 仅供测试与诊断。

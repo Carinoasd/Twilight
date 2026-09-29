@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,8 +68,9 @@ func TestPlayRankQueryParsesRangeDaysAndLimit(t *testing.T) {
 	if req.rangeKey != "30d" {
 		t.Fatalf("days should win over range, got %q", req.rangeKey)
 	}
+	// since 对齐到整分钟（让缓存 key 稳定），所以容差放宽到一分钟。
 	wantDays := now.AddDate(0, 0, -30).Unix()
-	if req.since < wantDays-5 || req.since > wantDays+5 {
+	if req.since < wantDays-65 || req.since > wantDays+5 {
 		t.Fatalf("days=30 since=%d want ~%d", req.since, wantDays)
 	}
 
@@ -148,5 +150,47 @@ func TestPlayRankEpisodesKeepsSeasonUnknownRatherThanGuessing(t *testing.T) {
 	}
 	if len(episodes) != 3 {
 		t.Fatalf("unexpected episode count: %#v", episodes)
+	}
+}
+
+// TestPlayRankCacheKeyStableForDaysWindow 回归审查 L14：days= 的缓存 key 不能每秒都变。
+func TestPlayRankCacheKeyStableForDaysWindow(t *testing.T) {
+	first := playRankQuery(httptest.NewRequest(http.MethodGet, "/x?days=30", nil))
+	time.Sleep(1100 * time.Millisecond)
+	second := playRankQuery(httptest.NewRequest(http.MethodGet, "/x?days=30", nil))
+	if a, b := playRankCacheKey(first, false), playRankCacheKey(second, false); a != b {
+		t.Fatalf("cache key changed within a minute: %q vs %q", a, b)
+	}
+}
+
+// TestPlayRankUserRefreshCannotBypassCache 回归审查 L14：普通用户的 refresh=1 不能绕过缓存；
+// 过期条目在写入时被淘汰。
+func TestPlayRankUserRefreshCannotBypassCache(t *testing.T) {
+	app := newTestApp(t)
+	app.cfg().PlayRankEnabled = true
+	app.cfg().PlayRankUserVisible = true
+	_ = registerAndLogin(t, app, "admin", "Admin123456")
+	cookies := registerAndLogin(t, app, "rankuser", "Rank123456")
+	req := playRankQuery(httptest.NewRequest(http.MethodGet, "/x?range=week", nil))
+	app.playRankMu.Lock()
+	app.playRankCache = map[string]playRankSnapshot{
+		playRankCacheKey(req, false): {until: time.Now().Add(time.Minute), data: map[string]any{"sentinel": true}},
+		"stale":                      {until: time.Now().Add(-time.Minute), data: map[string]any{}},
+	}
+	app.playRankMu.Unlock()
+	resp := doJSON(app, http.MethodGet, "/api/v2/emby/play-rank?range=week&refresh=1", "", cookies)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"sentinel":true`) {
+		t.Fatalf("normal user refresh=1 bypassed the cache: %s", resp.Body.String())
+	}
+	// 管理员路径写入新条目时顺带淘汰过期条目。
+	app.playRankData(context.Background(), playRankQuery(httptest.NewRequest(http.MethodGet, "/x?range=day", nil)), true, true)
+	app.playRankMu.Lock()
+	_, staleLeft := app.playRankCache["stale"]
+	app.playRankMu.Unlock()
+	if staleLeft {
+		t.Fatal("expired cache entries must be evicted on write")
 	}
 }

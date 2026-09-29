@@ -18,4 +18,6 @@ const (
 	confirmClearRegcodeUsage   = "CLEAR_REGCODE_USAGE"
 	confirmClearAuditLogs      = "CLEAR_AUDIT_LOGS"
 	confirmPruneAuditLogs      = "PRUNE_AUDIT_LOGS"
+	// 单条删除审计日志也要确认短语，防止误删或脚本逐条抹除。
+	confirmDeleteAuditLog = "DELETE_AUDIT_LOG"
 )

@@ -214,6 +214,8 @@ export type ErrCode =
   | "TG_ID_INVALID"
   | "TG_ID_TAKEN"
   | "DEVICE_ID_REQUIRED"
+  | "DEVICE_ID_INVALID"
+  | "DEVICE_BLOCKED"
   | "IP_REQUIRED"
   | "IP_BLACKLIST_DURATION_INVALID"
   | "UPLOAD_RATE_LIMITED"
@@ -508,6 +510,8 @@ export const ErrCodes = {
   TGIDInvalid: "TG_ID_INVALID",
   TGIDTaken: "TG_ID_TAKEN",
   DeviceIDRequired: "DEVICE_ID_REQUIRED",
+  DeviceIDInvalid: "DEVICE_ID_INVALID",
+  DeviceBlocked: "DEVICE_BLOCKED",
   IPRequired: "IP_REQUIRED",
   IPBlacklistDurationInvalid: "IP_BLACKLIST_DURATION_INVALID",
   UploadRateLimited: "UPLOAD_RATE_LIMITED",

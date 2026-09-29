@@ -139,7 +139,7 @@ func (a *App) handleCreateInviteCode(w http.ResponseWriter, r *http.Request, _ P
 		}
 	}
 	a.audit(r, "create_invite_code", "user", 0, map[string]any{
-		"code": code, "days": days,
+		"code_hint": regcodeAuditHint(code), "days": days, "expires_at": expiresAt, "has_target": targetUsername != "",
 	})
 	created(w, "invite code created", a.inviteCodeDTO(invite))
 }
@@ -233,7 +233,7 @@ func (a *App) handleCreateInviteRenewCode(w http.ResponseWriter, r *http.Request
 		}
 	}
 	a.audit(r, "create_renew_code", "user", child.UID, map[string]any{
-		"code": code, "days": days, "target_uid": child.UID,
+		"code_hint": regcodeAuditHint(code), "days": days, "target_uid": child.UID, "validity_hours": validityHours,
 	})
 	created(w, "renew code created", map[string]any{"code": code, "target_uid": child.UID, "target_username": child.Username, "days": days, "validity_hours": validityHours, "max_code_days": maxDays})
 }
@@ -262,9 +262,13 @@ func (a *App) handleDeleteInviteCode(w http.ResponseWriter, r *http.Request, par
 	if !okUser {
 		return
 	}
+	invite, _ := a.store().InviteCode(params["code"])
 	if statusFromError(w, a.store().DeleteInviteCode(user.UID, params["code"])) {
 		return
 	}
+	a.audit(r, "delete_invite_code", "user", 0, map[string]any{
+		"code_hint": regcodeAuditHint(params["code"]), "days": invite.Days, "use_count": invite.UseCount, "used": invite.Used,
+	})
 	ok(w, "invite code deleted", nil)
 }
 
@@ -293,7 +297,9 @@ func (a *App) handleDetachExpiredInviteChild(w http.ResponseWriter, r *http.Requ
 	if !okDelete {
 		return
 	}
-	ok(w, "已断开下级关系", map[string]any{"uid": uid, "detached": true, "deleted_emby": deletedEmby, "user": publicUser(updated)})
+	// 调用方是上级，不是下级本人：只回最少必要字段。publicUser 会带出下级的
+	// email、telegram_id、registration_code、bgm 状态等个人信息。
+	ok(w, "已断开下级关系", map[string]any{"uid": uid, "detached": true, "deleted_emby": deletedEmby, "user": map[string]any{"uid": updated.UID, "username": updated.Username}})
 }
 
 func (a *App) handleDetachMyExpiredInvite(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -327,6 +333,10 @@ func (a *App) deleteEmbyAndDetachInviteUser(w http.ResponseWriter, r *http.Reque
 		failWithCode(w, http.StatusBadGateway, ErrEmbyDeleteFailed, "Emby 未配置，无法删除 Emby 账号")
 		return store.User{}, false, false
 	}
+	parentUID := int64(0)
+	if rel, okRel := a.store().ParentOf(child.UID); okRel {
+		parentUID = rel.ParentUID
+	}
 	updated, deletedEmby, err := a.detachInviteUserCleanup(r.Context(), child, true)
 	if err != nil {
 		if strings.Contains(err.Error(), "remote status 404") {
@@ -337,7 +347,9 @@ func (a *App) deleteEmbyAndDetachInviteUser(w http.ResponseWriter, r *http.Reque
 			return store.User{}, false, false
 		}
 	}
-	a.audit(r, auditAction, auditCategory, child.UID, map[string]any{"deleted_emby": deletedEmby})
+	a.audit(r, auditAction, auditCategory, child.UID, map[string]any{
+		"deleted_emby": deletedEmby, "parent_uid": parentUID, "old_emby_id": child.EmbyID, "username": child.Username,
+	})
 	return updated, deletedEmby, true
 }
 
@@ -518,6 +530,12 @@ func (a *App) handleInviteUse(w http.ResponseWriter, r *http.Request, _ Params) 
 		if u.EmbyID == "" && u.EmbyGrantLocked && !u.PendingEmby {
 			return store.ErrGrantLocked
 		}
+		// 锁内复核 Emby 名额，堵住锁外预检与消费之间的并发窗口。
+		if !u.PendingEmby {
+			if err := a.embyCapacityExceededHeldLock(u.UID, ""); err != nil {
+				return err
+			}
+		}
 		u.EmbyUsername = firstNonEmpty(stringValue(payload, "emby_username"), u.Username)
 		u.PendingEmby = true
 		u.PendingEmbyDays = &effectiveDays
@@ -529,6 +547,10 @@ func (a *App) handleInviteUse(w http.ResponseWriter, r *http.Request, _ Params) 
 		failWithCode(w, http.StatusBadRequest, ErrCodeRegistrationGrantAlreadyUsed, "当前账号已经使用过 Emby 注册资格，不能重复使用邀请码")
 		return
 	}
+	if errors.Is(err, store.ErrEmbyCapacityReached) {
+		failWithCode(w, http.StatusConflict, ErrEmbyCapacityReached, "Emby 用户数量已达上限")
+		return
+	}
 	if errors.Is(err, store.ErrConflict) {
 		if latest, ok := a.store().User(user.UID); ok && latest.EmbyID != "" {
 			failWithCode(w, http.StatusBadRequest, ErrInviteEmbyBound, "当前账号已绑定 Emby")
@@ -538,6 +560,10 @@ func (a *App) handleInviteUse(w http.ResponseWriter, r *http.Request, _ Params) 
 	if statusFromError(w, err) {
 		return
 	}
+	a.audit(r, "use_invite_code", "user", 0, map[string]any{
+		"code_hint": regcodeAuditHint(code), "inviter_uid": invite.InviterUID, "days": effectiveDays,
+		"expired_at_before": publicExpiryUnix(user.ExpiredAt), "expired_at_after": publicExpiryUnix(u.ExpiredAt),
+	})
 	ok(w, "invite code used", map[string]any{"user": publicUser(u), "days": effectiveDays, "inviter_uid": invite.InviterUID})
 }
 

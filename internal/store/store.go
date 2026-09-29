@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -186,19 +187,29 @@ type User struct {
 	// EmbyDisabled 是远端 Emby 账号「当前是否被禁用」的尽力镜像（true=已禁用）。
 	// 由每次启停 Emby 时回写、并在强制刷新时按远端真值校正。让用户列表无需逐行
 	// 查 Emby 即可区分「Web 正常但 Emby 被单独禁用」。仅在 EmbyID 非空时有意义。
-	EmbyDisabled                            bool     `json:"emby_disabled"`
-	Avatar                                  string   `json:"avatar,omitempty"`
-	Background                              string   `json:"background,omitempty"`
-	BGMMode                                 bool     `json:"bgm_mode"`
-	BGMManageMode                           bool     `json:"bgm_manage_mode"`
-	BGMToken                                string   `json:"bgm_token,omitempty"`
-	CreatedAt                               int64    `json:"created_at"`
-	RegisterTime                            int64    `json:"register_time"`
-	EmbyGrantLocked                         bool     `json:"emby_grant_locked"`
-	RegistrationSource                      string   `json:"registration_source,omitempty"`
-	RegistrationCode                        string   `json:"registration_code,omitempty"`
-	PendingEmby                             bool     `json:"pending_emby"`
-	PendingEmbyDays                         *int     `json:"pending_emby_days,omitempty"`
+	EmbyDisabled bool `json:"emby_disabled"`
+	// EmbyAutoDisabled 表示当前的 Emby 停用是本系统按 Web 状态（停用 / 过期）自动做的，
+	// 而不是管理员单独封禁 Emby。Emby 状态对账任务只会把带这个标记、且 Web 已恢复的
+	// 账号重新启用；EmbyDisabled=false 时恒为 false。
+	EmbyAutoDisabled   bool   `json:"emby_auto_disabled,omitempty"`
+	Avatar             string `json:"avatar,omitempty"`
+	Background         string `json:"background,omitempty"`
+	BGMMode            bool   `json:"bgm_mode"`
+	BGMManageMode      bool   `json:"bgm_manage_mode"`
+	BGMToken           string `json:"bgm_token,omitempty"`
+	CreatedAt          int64  `json:"created_at"`
+	RegisterTime       int64  `json:"register_time"`
+	EmbyGrantLocked    bool   `json:"emby_grant_locked"`
+	RegistrationSource string `json:"registration_source,omitempty"`
+	RegistrationCode   string `json:"registration_code,omitempty"`
+	// EmbyUnboundAt 是最近一次解除 Emby 绑定的时间。cleanup_no_emby 以
+	// max(注册时间, EmbyUnboundAt) 计算「多久没有 Emby」，避免把刚解绑的老用户直接删掉。
+	EmbyUnboundAt   int64 `json:"emby_unbound_at,omitempty"`
+	PendingEmby     bool  `json:"pending_emby"`
+	PendingEmbyDays *int  `json:"pending_emby_days,omitempty"`
+	// PendingEmbyGrantedAt 是最近一次发放（或改动）Emby 开通资格的时间。
+	// cleanup_pending_emby_entitlements 只收回发放超过 N 天的资格；为 0 的旧数据按注册时间算。
+	PendingEmbyGrantedAt                    int64    `json:"pending_emby_granted_at,omitempty"`
 	NotifyOnLoginTelegram                   bool     `json:"notify_on_login_telegram,omitempty"`
 	NotifyOnLoginEmail                      bool     `json:"notify_on_login_email,omitempty"`
 	NotifyOnTicketTelegram                  bool     `json:"notify_on_ticket_telegram,omitempty"`
@@ -212,13 +223,52 @@ type User struct {
 	LegacyAPIKeyStatus                      bool     `json:"legacy_api_key_status"`
 	LegacyPermissions                       []string `json:"legacy_permissions,omitempty"`
 	PasswordHash                            string   `json:"password_hash"`
-	RebindingInProgress                     bool     `json:"rebinding_in_progress"`
-	RebindingSince                          int64    `json:"rebinding_since,omitempty"`
+	// DisabledReason 记录 Web 账号被系统自动停用的原因（空 = 管理员手动或未知）。
+	// 目前只有群成员巡检写 DisabledReasonTelegramMembership；回群自动启用只处理
+	// 这个原因，绝不会把管理员手动停权的人重新放出来。Active 由其他路径改变时
+	// 由 normalizeUserStateMarkers 自动清空，避免旧原因残留。
+	DisabledReason      string `json:"disabled_reason,omitempty"`
+	RebindingInProgress bool   `json:"rebinding_in_progress"`
+	RebindingSince      int64  `json:"rebinding_since,omitempty"`
 	// RebindEmbySuspended 表示“这次 Telegram 换绑流程亲自禁用了远端 Emby”。换绑完成后
 	// 只恢复带这个标记的账号：换绑前就已被管理员单独封禁或因到期停用的 Emby，换绑
 	// 结束时不能被顺手解封。
 	RebindEmbySuspended bool    `json:"rebind_emby_suspended,omitempty"`
 	SeenAnnouncementIDs []int64 `json:"seen_announcement_ids,omitempty"`
+}
+
+// DisabledReasonTelegramMembership 表示账号因退出要求的 Telegram 群组而被巡检停用。
+const DisabledReasonTelegramMembership = "telegram_membership"
+
+// normalizeUserStateMarkers 维护用户状态标记的不变量。DisabledReason：Active 状态变化、而本次
+// 修改没有同时显式设置新原因时，清空旧原因。这样管理员手动启停、续期启用等任何
+// 其他路径都会自然抹掉「群成员巡检停用」标记。
+func normalizeUserStateMarkers(old User, u *User) {
+	if old.Active != u.Active && u.DisabledReason == old.DisabledReason {
+		u.DisabledReason = ""
+	}
+	if u.Active {
+		u.DisabledReason = ""
+	}
+	if !u.EmbyDisabled {
+		u.EmbyAutoDisabled = false
+	}
+	if old.EmbyID != "" && u.EmbyID == "" {
+		u.EmbyUnboundAt = time.Now().Unix()
+	}
+	switch {
+	case !u.PendingEmby:
+		u.PendingEmbyGrantedAt = 0
+	case !old.PendingEmby || !sameOptionalInt(old.PendingEmbyDays, u.PendingEmbyDays):
+		u.PendingEmbyGrantedAt = time.Now().Unix()
+	}
+}
+
+func sameOptionalInt(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 type UserSummaryCounts struct {
@@ -923,6 +973,7 @@ func (s *State) compactHistory() {
 	s.PlaybackSessions = compactTail(s.PlaybackSessions, maxPlaybackSessions)
 	s.EmbyActivityLogs = compactTail(s.EmbyActivityLogs, maxEmbyActivityLogs)
 	s.BangumiSyncLogs = compactTail(s.BangumiSyncLogs, maxStoredBangumiSyncLogs)
+	s.ViolationLogs = compactTail(s.ViolationLogs, maxStoredViolationLogs)
 	// 仅对真正超限的用户回写：compactTail 在未超限时原样返回同一底层切片，
 	// 旧实现仍对每个用户做一次 map 赋值（value 类型 SigninState 是整值拷贝写回）。
 	// 绝大多数用户签到记录远未及 maxSigninRecords，跳过回写省掉每次落盘对全体
@@ -1048,6 +1099,10 @@ func (s *Store) mutateAndSaveLocked(mutate func() error) error {
 	return s.mutateAndSaveWithTxLocked(mutate, nil)
 }
 
+// testHookBeforePersist 仅供测试：mutate 成功后、写库前调用，用来在两者之间插入
+// 「他进程」的写入以制造版本冲突、验证闭包重放。生产代码中恒为 nil。
+var testHookBeforePersist func()
+
 // mutateAndSaveWithTxLocked extends the state version/rollback boundary to
 // dedicated tables. persist runs inside the same transaction and must contain
 // only database writes: a version conflict can retry the entire operation.
@@ -1067,9 +1122,18 @@ func (s *Store) mutateAndSaveWithTxLocked(mutate func() error, persist func(cont
 			return err
 		}
 		if err := mutate(); err != nil {
+			// errNoChange：闭包确认本次未改动 state（复检后发现无事可做），直接视为成功、
+			// 跳过整份 JSONB 序列化与写库，也不递增 version，其他进程无需整份重载。
+			// 闭包承诺未改内存，故不必 restore（省一次多 MB unmarshal）。
+			if errors.Is(err, errNoChange) {
+				return nil
+			}
 			// mutate 失败：本身就不打算落盘，状态可能被改了一半，回滚到快照。
 			s.restoreStateLocked(prev)
 			return err
+		}
+		if testHookBeforePersist != nil {
+			testHookBeforePersist()
 		}
 		if persist == nil {
 			err = s.saveLocked()
@@ -1127,6 +1191,9 @@ func (s *Store) saveLockedForce() error {
 }
 
 func (s *Store) saveStateLocked(force bool) error {
+	if beforeSaveHookForTest != nil {
+		beforeSaveHookForTest()
+	}
 	s.state.ensure()
 	data, err := json.Marshal(s.state)
 	if err != nil {
@@ -1243,19 +1310,44 @@ FROM twilight_state WHERE id = 1`, s.stateVersion).Scan(&data, &version)
 	return nil
 }
 
+// Snapshot 生成备份/迁移用的完整状态快照。
+//
+// 旧实现全程持有 Store 写锁做 runtime/audit（上限百万行）/roster 全表扫描与
+// MarshalIndent；每个 HTTP 请求都要经过 refreshStoreForRequest 的读锁，于是备份
+// 期间整个进程停止响应。现在完全不持 Store 锁：主状态行与各专表都在同一个
+// REPEATABLE READ 只读事务里读取，既不阻塞其他请求，又天然得到同一时点的一致
+// 快照（旧实现主状态与专表之间并不保证同一时点）。
 func (s *Store) Snapshot() ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
+	if s == nil || s.db == nil {
+		return nil, errors.New("store is not open")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return nil, err
 	}
-	state := s.state
+	defer tx.Rollback()
+	var state State
+	var data []byte
+	err = tx.QueryRowContext(ctx, `SELECT state FROM twilight_state WHERE id = 1`).Scan(&data)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		state = emptyState()
+	case err != nil:
+		return nil, err
+	default:
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &state); err != nil {
+				return nil, err
+			}
+		}
+	}
 	state.ensure()
 	// runtime logs 落在独立表 `twilight_runtime_logs`，不会进入 `twilight_state`
 	// 的 jsonb。Snapshot 必须把它们也读出来塞进 State，否则备份/恢复时 state 与
-	// runtime 两条线时点错位（admin 看到"已恢复"但日志仍是恢复点之后的最新数据）。
-	// 这里持锁期间额外做一次 SELECT，不影响并发写（只读快照）。
-	logs, nextID, err := s.snapshotRuntimeLogsLocked()
+	// runtime 两条线时点错位。
+	logs, nextID, err := snapshotRuntimeLogs(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -1265,7 +1357,7 @@ func (s *Store) Snapshot() ([]byte, error) {
 	}
 	// Audit logs also live in a dedicated high-write table. Merge them into the
 	// exported State so JSON backups remain complete and portable.
-	auditLogs, nextAuditID, err := s.snapshotAuditLogsLocked()
+	auditLogs, nextAuditID, err := snapshotAuditLogs(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
@@ -1274,15 +1366,16 @@ func (s *Store) Snapshot() ([]byte, error) {
 	// Telegram roster is another dedicated runtime table. Merge it only for the
 	// portable JSON snapshot; the Store's live State keeps no historical roster
 	// map resident on the Go heap.
-	roster, err := s.snapshotTelegramRosterLocked()
+	roster, err := snapshotTelegramRoster(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	state.TelegramRoster = roster
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	runs, err := schedulerQueueRows(ctx, s.db)
+	runs, err := schedulerQueueRows(ctx, tx)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	state.SchedulerRuns = mergeSchedulerHistory(state.SchedulerRuns, runs)
@@ -1294,18 +1387,11 @@ func (s *Store) Snapshot() ([]byte, error) {
 	return json.MarshalIndent(state, "", "  ")
 }
 
-// snapshotRuntimeLogsLocked 必须在持有 s.mu 的情况下调用，从 PG 拉出所有
-// runtime_logs（按 id 升序）以及 next_id（max(id)+1）。limit 暂不裁剪：
-// 备份要求时点完整，超大表的取舍交由保留策略（PruneRuntimeLogs）控制。
-//
-// 这里走显式 5min 超时：备份场景容忍时间长一些，但不能裸
-// context.Background 让备份卡死时把整个 store 写锁也卡死（Snapshot 由
-// s.mu.Lock 持有写锁调用本函数）。超时回 caller 让 admin 看到错误信息，
-// 比让全站登录 / 注册排队挂起强。
-func (s *Store) snapshotRuntimeLogsLocked() ([]RuntimeLogEntry, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+// snapshotRuntimeLogs 在 Snapshot 的只读事务里拉出所有 runtime_logs（按 id 升序）
+// 以及 next_id（max(id)+1）。limit 暂不裁剪：备份要求时点完整，超大表的取舍交由
+// 保留策略（PruneRuntimeLogs）控制。超时由调用方的 ctx 控制。
+func snapshotRuntimeLogs(ctx context.Context, q schedulerQueryer) ([]RuntimeLogEntry, int64, error) {
+	rows, err := q.QueryContext(ctx, `
 SELECT id, time, level, message, COALESCE(attrs, '{}'::jsonb)::text
 FROM twilight_runtime_logs
 ORDER BY id ASC`)
@@ -1339,10 +1425,8 @@ ORDER BY id ASC`)
 	return out, nextID, nil
 }
 
-func (s *Store) snapshotAuditLogsLocked() ([]AuditLog, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	rows, err := s.db.QueryContext(ctx, `
+func snapshotAuditLogs(ctx context.Context, q schedulerQueryer) ([]AuditLog, int64, error) {
+	rows, err := q.QueryContext(ctx, `
 SELECT id, uid, username, action, category, source, method, target_uid,
        COALESCE(detail, '{}'::jsonb)::text, ip, created_at
 FROM twilight_audit_logs ORDER BY id ASC`)
@@ -1414,6 +1498,17 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links`)
 	}
 	if err == nil {
+		// 恢复后 UID 可能被重新分配给别人：会话只绑定 uid，必须一并作废。
+		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_sessions`)
+	}
+	if err == nil {
+		// 播放统计与 Telegram 身份历史存在独立表、不在快照里。恢复点之后注册的用户
+		// 在恢复后已不存在，NextUserID 又回卷到快照值，新注册者会拿到同一 UID 并
+		// 继承这些行。同一事务里删除所有"不属于恢复后用户"的行；恢复后仍存在的
+		// 用户保留自己的历史。
+		err = deleteRowsOfUnknownUIDsTx(ctx, tx, stateUserIDs(state))
+	}
+	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
@@ -1436,6 +1531,33 @@ func (s *Store) LoadSnapshot(data []byte) error {
 	}
 	if err := s.replaceTelegramRosterLocked(telegramRoster); err != nil {
 		return err
+	}
+	return nil
+}
+
+// uidScopedSideTables 是按 uid 归属、但不随状态快照备份/恢复的专表。
+var uidScopedSideTables = []string{
+	"twilight_playback_records",
+	"twilight_playback_events",
+	"twilight_playback_segments",
+	"twilight_playback_daily",
+	"twilight_telegram_identity_history",
+}
+
+func stateUserIDs(state State) []int64 {
+	uids := make([]int64, 0, len(state.Users))
+	for uid := range state.Users {
+		uids = append(uids, uid)
+	}
+	return uids
+}
+
+// deleteRowsOfUnknownUIDsTx 删除 uidScopedSideTables 中 uid 不在 keep 里的行。
+func deleteRowsOfUnknownUIDsTx(ctx context.Context, tx *sql.Tx, keep []int64) error {
+	for _, table := range uidScopedSideTables {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE NOT (uid = ANY($1))`, keep); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1767,7 +1889,10 @@ func (s *Store) CreateUser(u User) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var created User
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created = input, User{}
 		if s.usernameExistsLocked(u.Username) || s.emailTakenLocked(u.Email, 0) || s.telegramIDTakenLocked(u.TelegramID, 0) || s.embyIDTakenLocked(u.EmbyID, 0) {
 			return ErrConflict
 		}
@@ -1803,7 +1928,10 @@ func (s *Store) CreateInitialAdmin(u User) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var created User
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created = input, User{}
 		if len(s.state.Users) != 0 {
 			return ErrSetupUnavailable
 		}
@@ -1914,7 +2042,10 @@ func (s *Store) CreateUserWithRegCode(u User, regCode string, telegramID int64) 
 	defer s.mu.Unlock()
 	var created User
 	var consumed RegCode
+	input := u
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		u, created, consumed = input, User{}, RegCode{}
 		if s.usernameExistsLocked(u.Username) || s.emailTakenLocked(u.Email, 0) || s.telegramIDTakenLocked(u.TelegramID, 0) || s.telegramIDTakenLocked(telegramID, 0) || s.embyIDTakenLocked(u.EmbyID, 0) {
 			return ErrConflict
 		}
@@ -2123,6 +2254,8 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2131,6 +2264,7 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 		if err := fn(&u); err != nil {
 			return err
 		}
+		normalizeUserStateMarkers(old, &u)
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
@@ -2164,44 +2298,43 @@ func (s *Store) UpdateUsers(uids []int64, fn func(*User) error) (map[int64]error
 	if len(uids) == 0 {
 		return results, nil
 	}
-	if err := s.refreshLocked(); err != nil {
-		return nil, err
-	}
-	prev, err := s.snapshotStateLocked()
+	// 走 mutateAndSaveLocked：版本冲突时基于最新 state 重放整批（旧实现冲突即报错），
+	// results 在闭包开头重建，避免重放残留上一轮的结果。
+	err := s.mutateAndSaveLocked(func() error {
+		results = make(map[int64]error, len(uids))
+		seen := make(map[int64]struct{}, len(uids))
+		changed := false
+		for _, uid := range uids {
+			if _, dup := seen[uid]; dup {
+				continue
+			}
+			seen[uid] = struct{}{}
+			u, ok := s.state.Users[uid]
+			if !ok {
+				results[uid] = ErrNotFound
+				continue
+			}
+			old := u
+			if ferr := fn(&u); ferr != nil {
+				results[uid] = ferr
+				continue
+			}
+			normalizeUserStateMarkers(old, &u)
+			if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
+				results[uid] = ErrConflict
+				continue
+			}
+			s.state.Users[uid] = u
+			s.maintainUserIndexes(old, u, uid)
+			results[uid] = nil
+			changed = true
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	seen := make(map[int64]struct{}, len(uids))
-	changed := false
-	for _, uid := range uids {
-		if _, dup := seen[uid]; dup {
-			continue
-		}
-		seen[uid] = struct{}{}
-		u, ok := s.state.Users[uid]
-		if !ok {
-			results[uid] = ErrNotFound
-			continue
-		}
-		old := u
-		if ferr := fn(&u); ferr != nil {
-			results[uid] = ferr
-			continue
-		}
-		if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
-			results[uid] = ErrConflict
-			continue
-		}
-		s.state.Users[uid] = u
-		s.maintainUserIndexes(old, u, uid)
-		results[uid] = nil
-		changed = true
-	}
-	if !changed {
-		return results, nil
-	}
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
 		return nil, err
 	}
 	return results, nil
@@ -2211,6 +2344,8 @@ func (s *Store) ClearUserEmails() (total int, cleared int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		cleared = 0
 		total = len(s.state.Users)
 		for uid, u := range s.state.Users {
 			if u.Email == "" {
@@ -2236,41 +2371,38 @@ func (s *Store) ClearUserEmails() (total int, cleared int, err error) {
 func (s *Store) LockEmbyGrantForBoundUsers(uids []int64) (updated []int64, missing []int64, skippedNoEmby []int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshLocked(); err != nil {
-		return nil, nil, nil, err
-	}
-	prev, err := s.snapshotStateLocked()
+	// 走 mutateAndSaveLocked；三个结果切片在闭包开头重置，冲突重放不会重复追加。
+	err = s.mutateAndSaveLocked(func() error {
+		updated, missing, skippedNoEmby = nil, nil, nil
+		seen := map[int64]bool{}
+		changed := false
+		for _, uid := range uids {
+			if seen[uid] {
+				continue
+			}
+			seen[uid] = true
+			u, ok := s.state.Users[uid]
+			if !ok {
+				missing = append(missing, uid)
+				continue
+			}
+			if strings.TrimSpace(u.EmbyID) == "" {
+				skippedNoEmby = append(skippedNoEmby, uid)
+				continue
+			}
+			if !u.EmbyGrantLocked {
+				u.EmbyGrantLocked = true
+				s.state.Users[uid] = u
+				changed = true
+			}
+			updated = append(updated, uid)
+		}
+		if !changed {
+			return errNoChange
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	seen := map[int64]bool{}
-	changed := false
-	for _, uid := range uids {
-		if seen[uid] {
-			continue
-		}
-		seen[uid] = true
-		u, ok := s.state.Users[uid]
-		if !ok {
-			missing = append(missing, uid)
-			continue
-		}
-		if strings.TrimSpace(u.EmbyID) == "" {
-			skippedNoEmby = append(skippedNoEmby, uid)
-			continue
-		}
-		if !u.EmbyGrantLocked {
-			u.EmbyGrantLocked = true
-			s.state.Users[uid] = u
-			changed = true
-		}
-		updated = append(updated, uid)
-	}
-	if !changed {
-		return updated, missing, skippedNoEmby, nil
-	}
-	if err := s.saveLocked(); err != nil {
-		s.restoreStateLocked(prev)
 		return nil, nil, nil, err
 	}
 	return updated, missing, skippedNoEmby, nil
@@ -2332,8 +2464,11 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 				s.state.Users[uid] = u
 				userChanged = true
 			}
-			regRefs := s.clearRegCodeRefsForUIDLocked(uid)
-			invRefs := s.clearInviteUsageForUIDLocked(uid)
+			// 管理员显式"清理注册资格记录"：这是管理员主动收回并退还额度的操作
+			// （用于修复迁移误锁等脏数据），与用户自删 / 自助断开不同，保留退还语义，
+			// 走专门的 refund* 函数，避免与删号 / 断开的"只摘引用"路径混用。
+			regRefs := s.refundRegCodeUsageForUIDLocked(uid)
+			invRefs := s.refundInviteUsageForUIDLocked(uid)
 			result.RegcodeRefs += regRefs
 			result.InviteRefs += invRefs
 			if userChanged || regRefs > 0 || invRefs > 0 {
@@ -2350,11 +2485,50 @@ func (s *Store) ClearEmbyGrantForUnboundUsers(uids []int64) (ClearEmbyGrantResul
 	return result, nil
 }
 
-// clearRegCodeRefsForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
-// 回退；回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
+// removeRegCodeRefsForUIDLocked 只从注册码摘除对该 UID 的引用（UsedBy/UsedByUIDs），
+// 不回退 UseCount、不改 Active：用于删号等"用户自身消失"的路径，已消费次数不可退还，
+// 否则单次码可借删号重放。UsedByUIDs 用新切片重建而非就地 [:0] 改写——旧切片的底层
+// 数组可能被锁外持有的 RegCode 副本（RegCode()/ListRegCodes 的返回值）共享，就地
+// 改写会造成数据竞争并篡改调用方手里的快照。返回摘除的 UsedByUIDs 条数。
+func (s *Store) removeRegCodeRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	removed := 0
+	for code, rc := range s.state.RegCodes {
+		dirty := false
+		if rc.UsedBy == uid {
+			rc.UsedBy = 0
+			dirty = true
+		}
+		if slices.Contains(rc.UsedByUIDs, uid) {
+			pruned := make([]int64, 0, len(rc.UsedByUIDs))
+			for _, u := range rc.UsedByUIDs {
+				if u == uid {
+					removed++
+					continue
+				}
+				pruned = append(pruned, u)
+			}
+			if len(pruned) == 0 {
+				pruned = nil
+			}
+			rc.UsedByUIDs = pruned
+			dirty = true
+		}
+		if dirty {
+			s.state.RegCodes[code] = rc
+		}
+	}
+	return removed
+}
+
+// refundRegCodeUsageForUIDLocked 从所有注册码抹除对该 UID 的使用引用，UseCount 相应
+// 回退；仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用，删号走
+// removeRegCodeRefsForUIDLocked（不退还）。回退后若码因"用满次数"被自动停用且现在低于上限，则恢复 Active=true。
 // 返回抹除的引用条数（每个码对同一 UID 至多一条）。UsedByTelegramIDs 保持不动：
 // TG 维度的占用无法可靠映射回单个 UID，避免误删他人记录。
-func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
+func (s *Store) refundRegCodeUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2396,11 +2570,13 @@ func (s *Store) clearRegCodeRefsForUIDLocked(uid int64) int {
 	return removed
 }
 
-// clearInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
+// refundInviteUsageForUIDLocked 解除该 UID 作为"被邀请者(invitee)"的邀请使用记录：
 // 断开邀请关系并抹除其在邀请码上的占用（UsedByUID/Used/UseCount/Active），使其可
 // 重新加入邀请树 / 使用邀请码。只清理其作为 child 的记录；其作为邀请人(inviter)
 // 生成、被他人使用的邀请码不受影响。返回处理的邀请记录数。
-func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
+// 会退还次数并重新启用码，仅供管理员显式清理（ClearEmbyGrantForUnboundUsers）使用；
+// 下级自助 / 管理员断开邀请关系走 detachInviteRefsForUIDLocked（不退还）。
+func (s *Store) refundInviteUsageForUIDLocked(uid int64) int {
 	if uid == 0 {
 		return 0
 	}
@@ -2434,6 +2610,34 @@ func (s *Store) clearInviteUsageForUIDLocked(uid int64) int {
 	return handled
 }
 
+// detachInviteRefsForUIDLocked 断开该 UID 作为被邀请者的邀请关系，并只清掉邀请码上
+// 指向它的 UsedByUID 引用；不回退 UseCount、不改 Used / Active。旧实现（现
+// refundInviteUsageForUIDLocked）会把码退回并重新启用：下级到期后自助断开，同一张
+// 永不过期的邀请码就能被小号再次使用，无限循环且邀请人不知情。下级若需重新加入，
+// 靠"关系已断开"即可使用新的邀请码，不需要复活旧码。返回处理的记录数。
+func (s *Store) detachInviteRefsForUIDLocked(uid int64) int {
+	if uid == 0 {
+		return 0
+	}
+	handled := 0
+	for key, rel := range s.state.InviteRelations {
+		if key != uid && rel.ChildUID != uid {
+			continue
+		}
+		delete(s.state.InviteRelations, key)
+		handled++
+	}
+	for code, c := range s.state.InviteCodes {
+		if c.UsedByUID != uid {
+			continue
+		}
+		c.UsedByUID = 0
+		s.state.InviteCodes[code] = c
+		handled++
+	}
+	return handled
+}
+
 // SetUserRoleAtomic 在同一把写锁内做 last-admin 计数 + 写入。
 // 解决了原 handleAdminUpdateUser / handleAdminSetRole 把"读 ListUsers 计数"
 // 与"UpdateUser 闭包"分两段执行导致的 TOCTOU：两个 admin 并发降级两个不同 admin
@@ -2446,6 +2650,8 @@ func (s *Store) SetUserRoleAtomic(uid int64, newRole int) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2479,6 +2685,8 @@ func (s *Store) SetUserActiveAtomic(uid int64, active bool) (User, error) {
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2494,7 +2702,9 @@ func (s *Store) SetUserActiveAtomic(uid int64, active bool) (User, error) {
 				return ErrLastAdmin
 			}
 		}
+		old := u
 		u.Active = active
+		normalizeUserStateMarkers(old, &u)
 		s.state.Users[uid] = u
 		updated = u
 		return nil
@@ -2545,6 +2755,8 @@ func (s *Store) DisableUserForTelegramMembership(uid int64) (User, bool, string,
 		protectionReason string
 	)
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, disabled, protectionReason = User{}, false, ""
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2569,6 +2781,8 @@ func (s *Store) DisableUserForTelegramMembership(uid int64) (User, bool, string,
 			}
 		}
 		u.Active = false
+		// 标记停用原因，回群自动启用只会处理带这个标记的账号。
+		u.DisabledReason = DisabledReasonTelegramMembership
 		s.state.Users[uid] = u
 		updated = u
 		disabled = true
@@ -2624,6 +2838,8 @@ func (s *Store) bindUserTelegram(uid int64, tgid int64, telegramUsername string,
 		old     int64
 	)
 	err := s.mutateAndSaveWithTxLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, old = User{}, 0
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2687,6 +2903,8 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 		displaced int64
 	)
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, displaced = User{}, 0
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
@@ -2704,7 +2922,9 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 				oldOtherEmbyID := other.EmbyID
 				other.EmbyID = ""
 				other.EmbyUsername = ""
+				other.EmbyUnboundAt = time.Now().Unix()
 				other.PendingEmby = true
+				other.PendingEmbyGrantedAt = time.Now().Unix()
 				s.state.Users[other.UID] = other
 				s.maintainEmbyIDIndex(oldOtherEmbyID, other.EmbyID, other.UID)
 				displaced = other.UID
@@ -2722,6 +2942,7 @@ func (s *Store) BindUserEmbyAtomicWithUpdate(uid int64, embyID, embyUsername str
 				return err
 			}
 		}
+		normalizeUserStateMarkers(before, &u)
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
@@ -2900,40 +3121,10 @@ func (s *Store) deleteUserStateLocked(uid int64) error {
 		}
 	}
 
-	// RegCode：删除用户时清理所有引用并回退 UseCount，释放被占用的码额度。
-	for code, rc := range s.state.RegCodes {
-		dirty := false
-		if rc.UsedBy == uid {
-			rc.UsedBy = 0
-			dirty = true
-		}
-		if len(rc.UsedByUIDs) > 0 {
-			pruned := rc.UsedByUIDs[:0]
-			for _, u := range rc.UsedByUIDs {
-				if u == uid {
-					if rc.UseCount > 0 {
-						rc.UseCount--
-					}
-					continue
-				}
-				pruned = append(pruned, u)
-			}
-			if len(pruned) != len(rc.UsedByUIDs) {
-				if len(pruned) == 0 {
-					rc.UsedByUIDs = nil
-				} else {
-					rc.UsedByUIDs = pruned
-				}
-				dirty = true
-			}
-		}
-		if dirty {
-			if !rc.Active && rc.UseCountLimit != -1 && rc.UseCount < rc.UseCountLimit {
-				rc.Active = true
-			}
-			s.state.RegCodes[code] = rc
-		}
-	}
+	// RegCode：删除用户时只摘除对该 UID 的引用，不回退 UseCount、不重新启用。
+	// 旧实现会退还次数并把用满的码恢复 Active，用户用单次码开通后 /delAccount
+	// 自删即可让同一张码重新可用（重放 / 转手），故已消费的次数永久保留。
+	s.removeRegCodeRefsForUIDLocked(uid)
 
 	// 公告作者匿名化：公告本体不删，只清掉 CreatedByUID 引用。
 	for id, ann := range s.state.Announcements {
@@ -3505,6 +3696,8 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 	var updated User
 	changed := false
 	err := s.mutateAndSaveLocked(func() error {
+		// 版本冲突会重放闭包：外部结果变量每次都从零开始。
+		updated, changed = User{}, false
 		uid, indexed := s.telegramIDMap[telegramID]
 		current, found := s.state.Users[uid]
 		if !indexed {
@@ -3516,11 +3709,12 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 			}
 		}
 		if !indexed || !found || current.TelegramID != telegramID {
-			return nil
+			// 锁内复检发现已解绑/换绑：什么都不改，跳过整份落盘。
+			return errNoChange
 		}
 		updated = current
 		if current.TelegramUsername == username {
-			return nil
+			return errNoChange
 		}
 		old := current
 		current.TelegramUsername = username
@@ -3539,7 +3733,10 @@ func (s *Store) UpdateTelegramUsernameIfBound(telegramID int64, rawUsername stri
 func (s *Store) CreateAPIKey(k APIKey) (APIKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := k
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		k = input
 		k.ID = s.state.NextAPIKeyID
 		s.state.NextAPIKeyID++
 		if k.CreatedAt == 0 {
@@ -3638,6 +3835,8 @@ func (s *Store) UpdateAPIKey(uid, id int64, fn func(*APIKey) error) (APIKey, err
 	defer s.mu.Unlock()
 	var updated APIKey
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = APIKey{}
 		k, ok := s.state.APIKeys[id]
 		if !ok || k.UID != uid {
 			return ErrNotFound
@@ -3800,7 +3999,10 @@ func (s *Store) CreateMediaRequestWithOptions(r MediaRequest, opts MediaRequestC
 	// 的语义 mutateAndSaveLocked 不直接支持——通过闭包外的捕获变量传出。
 	var conflict MediaRequest
 	var conflictHit bool
+	input := r
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		r, conflict, conflictHit = input, MediaRequest{}, false
 		if opts.UserActiveLimit > 0 && s.countActiveMediaRequestsLocked(r.UID) >= opts.UserActiveLimit {
 			return ErrMediaRequestUserActiveLimit
 		}
@@ -3835,16 +4037,17 @@ func (s *Store) CreateMediaRequestWithOptions(r MediaRequest, opts MediaRequestC
 		if r.Revision <= 0 {
 			r.Revision = 1
 		}
-		s.state.MediaRequests[r.ID] = r
+		// 存入副本：调用方传入的 MediaInfo map 不能与 s.state 共用。
+		s.state.MediaRequests[r.ID] = cloneMediaRequest(r)
 		return nil
 	})
 	if conflictHit {
-		return conflict, ErrConflict
+		return cloneMediaRequest(conflict), ErrConflict
 	}
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return r, nil
+	return cloneMediaRequest(r), nil
 }
 
 func mediaRequestInventoryIssue(r MediaRequest) bool {
@@ -3896,7 +4099,7 @@ func (s *Store) MediaRequest(id int64) (MediaRequest, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.state.MediaRequests[id]
-	return r, ok
+	return cloneMediaRequest(r), ok // MediaInfo map 不与 s.state 共用
 }
 
 func (s *Store) ListMediaRequests(uid int64, all bool) []MediaRequest {
@@ -3905,7 +4108,7 @@ func (s *Store) ListMediaRequests(uid int64, all bool) []MediaRequest {
 	out := make([]MediaRequest, 0)
 	for _, r := range s.state.MediaRequests {
 		if all || r.UID == uid {
-			out = append(out, r)
+			out = append(out, cloneMediaRequest(r))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
@@ -3929,7 +4132,7 @@ func (s *Store) FindMediaRequestByKey(key string) (MediaRequest, bool) {
 	defer s.mu.RUnlock()
 	for _, r := range s.state.MediaRequests {
 		if r.RequireKey == key {
-			return r, true
+			return cloneMediaRequest(r), true
 		}
 	}
 	return MediaRequest{}, false
@@ -3940,10 +4143,14 @@ func (s *Store) UpdateMediaRequest(id int64, fn func(*MediaRequest) error) (Medi
 	defer s.mu.Unlock()
 	var updated MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = MediaRequest{}
 		r, ok := s.state.MediaRequests[id]
 		if !ok {
 			return ErrNotFound
 		}
+		// fn 可能写 MediaInfo 的键：先 clone，旧 map 可能正被锁外读者持有。
+		r = cloneMediaRequest(r)
 		if err := fn(&r); err != nil {
 			return err
 		}
@@ -3956,7 +4163,7 @@ func (s *Store) UpdateMediaRequest(id int64, fn func(*MediaRequest) error) (Medi
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return updated, nil
+	return cloneMediaRequest(updated), nil
 }
 
 func (s *Store) DeleteMediaRequest(id int64) error {
@@ -3969,6 +4176,8 @@ func (s *Store) DeleteMediaRequestIfRevision(id int64, expectedRevision *int64) 
 	defer s.mu.Unlock()
 	var deleted MediaRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = MediaRequest{}
 		request, ok := s.state.MediaRequests[id]
 		if !ok {
 			return ErrNotFound
@@ -3983,7 +4192,7 @@ func (s *Store) DeleteMediaRequestIfRevision(id int64, expectedRevision *int64) 
 	if err != nil {
 		return MediaRequest{}, err
 	}
-	return deleted, nil
+	return cloneMediaRequest(deleted), nil
 }
 
 func (s *Store) UpsertBindCode(code BindCode) error {
@@ -4009,6 +4218,8 @@ func (s *Store) ConfirmBindCodeAtomic(code string, telegramID int64, telegramUse
 	var updated User
 	var userUpdated bool
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		confirmed, updated, userUpdated = BindCode{}, User{}, false
 		bind, ok := s.state.BindCodes[code]
 		if !ok {
 			return ErrNotFound
@@ -4081,6 +4292,8 @@ func (s *Store) CleanupExpiredBindCodes(now int64) (int, error) {
 	defer s.mu.Unlock()
 	deleted := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = 0
 		for code, bind := range s.state.BindCodes {
 			if bind.ExpiresAt > 0 && bind.ExpiresAt <= now {
 				delete(s.state.BindCodes, code)
@@ -4107,6 +4320,8 @@ func (s *Store) RepairLegacyTelegramBindResidue() (int, error) {
 	}
 	deleted := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = 0
 		for code := range s.state.BindCodes {
 			delete(s.state.BindCodes, code)
 			deleted++
@@ -4196,6 +4411,12 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 				changed = true
 			}
 			if grant, ok := grants[uid]; ok {
+				// 只有用户侧"授权锁本身丢失"才算真正的残留（旧流程码侧已记账、用户侧
+				// 更新丢失）。授权锁完好却无 Emby、无 PendingEmby，说明资格已被正常
+				// 消费后又被收回：管理员解绑 / 删除 Emby、清注册队列、排程收回待开通
+				// 资格等。旧逻辑对这类用户也重发 PendingEmby，重启或保存设置即让被
+				// 移除的用户重新拿到完整天数，故这里记下修复前的锁状态作为闸门。
+				lostGrantLock := !u.EmbyGrantLocked
 				if !u.EmbyGrantLocked || strings.TrimSpace(u.RegistrationSource) == "" || strings.TrimSpace(u.RegistrationCode) == "" {
 					u.EmbyGrantLocked = true
 					if strings.TrimSpace(u.RegistrationSource) == "" {
@@ -4207,7 +4428,7 @@ func (s *Store) RepairRegistrationResidue() (RegistrationResidueRepair, error) {
 					result.RestoredGrantLocks++
 					changed = true
 				}
-				if strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
+				if lostGrantLock && strings.TrimSpace(u.EmbyID) == "" && !u.PendingEmby {
 					days := grant.days
 					u.PendingEmby = true
 					u.PendingEmbyDays = &days
@@ -4237,7 +4458,11 @@ func normalizeRegistrationGrantDays(days int) int {
 func (s *Store) UpsertAnnouncement(a Announcement) (Announcement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := a
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		// 否则上一轮分配的 ID 会被沿用，可能覆盖他进程刚用同一 ID 新建的条目。
+		a = input
 		now := time.Now().Unix()
 		if a.ID == 0 {
 			a.ID = s.state.NextAnnouncementID
@@ -4364,12 +4589,23 @@ func (s *Store) MarkAnnouncementsSeen(uid int64, ids []int64) error {
 		if !ok {
 			return ErrNotFound
 		}
+		// 只记录真实存在的公告：请求体里的 ids 由客户端提供，不做校验的话一个普通
+		// 用户就能反复塞进数万个随机 ID，让整份状态文档无限膨胀、每次落盘都在全局
+		// 锁里排序整张表。已删除公告的旧记录也顺手清掉。
+		valid := map[int64]bool{}
+		for _, ann := range s.state.Announcements {
+			valid[ann.ID] = true
+		}
 		existingSet := map[int64]bool{}
 		for _, id := range u.SeenAnnouncementIDs {
-			existingSet[id] = true
+			if valid[id] {
+				existingSet[id] = true
+			}
 		}
 		for _, id := range ids {
-			existingSet[id] = true
+			if valid[id] {
+				existingSet[id] = true
+			}
 		}
 		seen := make([]int64, 0, len(existingSet))
 		for id := range existingSet {
@@ -4385,7 +4621,11 @@ func (s *Store) MarkAnnouncementsSeen(uid int64, ids []int64) error {
 func (s *Store) UpsertDeveloperJSPreset(p DeveloperJSPreset) (DeveloperJSPreset, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := p
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		// 否则上一轮分配的 ID 会被沿用，可能覆盖他进程刚用同一 ID 新建的条目。
+		p = input
 		now := time.Now().Unix()
 		if p.ID == 0 {
 			p.ID = s.state.NextDeveloperJSPresetID
@@ -4614,6 +4854,8 @@ func (s *Store) ConsumeInviteCode(code string, childUID int64) (InviteCode, erro
 	defer s.mu.Unlock()
 	var consumed InviteCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		consumed = InviteCode{}
 		c, ok := s.state.InviteCodes[code]
 		if !ok || !c.Active {
 			return ErrNotFound
@@ -4633,6 +4875,11 @@ func (s *Store) ConsumeInviteCode(code string, childUID int64) (InviteCode, erro
 		// 邀请码并发请求会双双通过预检，第二次消费覆盖关系并烧掉两个邀请人的码。
 		// 此处一旦发现已有上级即 ErrConflict，让先到者赢、后到者整体回滚。
 		if _, exists := s.parentOfLocked(childUID); exists {
+			return ErrConflict
+		}
+		// 邀请人不能是被邀请人自己的下级：X 邀请 Y、Y 再发码给 X 会形成 X↔Y 环，
+		// 之后所有按父链向上走的计算都会在全局写锁里死循环。
+		if c.InviterUID != 0 && s.isDescendantLocked(c.InviterUID, childUID) {
 			return ErrConflict
 		}
 		c.UseCount++
@@ -4659,6 +4906,8 @@ func (s *Store) ConsumeInviteCodeAndUpdateUser(code string, childUID int64, maxD
 	var updated User
 	var consumed InviteCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, consumed = User{}, InviteCode{}
 		u, okUser := s.state.Users[childUID]
 		if !okUser {
 			return ErrNotFound
@@ -4678,6 +4927,11 @@ func (s *Store) ConsumeInviteCodeAndUpdateUser(code string, childUID int64, maxD
 			return ErrConflict
 		}
 		if _, exists := s.parentOfLocked(childUID); exists {
+			return ErrConflict
+		}
+		// 邀请人不能是被邀请人自己的下级：X 邀请 Y、Y 再发码给 X 会形成 X↔Y 环，
+		// 之后所有按父链向上走的计算都会在全局写锁里死循环。
+		if c.InviterUID != 0 && s.isDescendantLocked(c.InviterUID, childUID) {
 			return ErrConflict
 		}
 		// 锁内重检邀请树深度与根用户上限，防止并发绕过
@@ -4807,7 +5061,10 @@ func (s *Store) inviteDepthLocked(uid int64, maxDepth int) int {
 
 func (s *Store) inviteRootLocked(uid int64) int64 {
 	current := uid
-	for {
+	// seen 防护：历史数据里若已经存在环（本修复之前可以产生），也必须能结束。
+	seen := map[int64]bool{}
+	for !seen[current] {
+		seen[current] = true
 		rel, ok := s.parentOfLocked(current)
 		if !ok {
 			break
@@ -4829,7 +5086,9 @@ func (s *Store) inviteDescendantCountLocked(rootUID int64) int {
 
 func (s *Store) isDescendantLocked(uid, ancestor int64) bool {
 	current := uid
-	for {
+	seen := map[int64]bool{}
+	for !seen[current] {
+		seen[current] = true
 		rel, ok := s.parentOfLocked(current)
 		if !ok {
 			return false
@@ -4839,13 +5098,14 @@ func (s *Store) isDescendantLocked(uid, ancestor int64) bool {
 		}
 		current = rel.ParentUID
 	}
+	return false
 }
 
 func (s *Store) DetachInvite(uid int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mutateAndSaveLocked(func() error {
-		s.clearInviteUsageForUIDLocked(uid)
+		s.detachInviteRefsForUIDLocked(uid)
 		return nil
 	})
 }
@@ -4869,7 +5129,45 @@ func (s *Store) RegCode(code string) (RegCode, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.state.RegCodes[code]
-	return r, ok
+	// 深拷贝 UsedByUIDs/UsedByTelegramIDs：删除用户等写路径会修剪这些 slice，
+	// 锁外的调用方不能与 s.state 共用底层数组。
+	return cloneRegCode(r), ok
+}
+
+// UpdateRegCode 在 store 写锁内读取注册码的最新值并交给 fn 做字段级修改。
+// 管理员编辑 / 清理使用记录原先在锁外读快照、改字段后 UpsertRegCode 整笔覆写：
+// 其间若有用户成功兑换，UseCount++ 与 UsedByUIDs 会被旧值覆盖（次数倒退、
+// per-identity 记录丢失），码在其间被删除还会被复活。fn 基于最新状态执行，
+// 版本冲突重放时也会重新读取；码不存在返回 ErrNotFound。
+func (s *Store) UpdateRegCode(code string, fn func(*RegCode) error) (RegCode, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updated RegCode
+	err := s.mutateAndSaveLocked(func() error {
+		rc, ok := s.state.RegCodes[code]
+		if !ok {
+			return ErrNotFound
+		}
+		if len(rc.UsedByUIDs) > 0 {
+			rc.UsedByUIDs = append([]int64(nil), rc.UsedByUIDs...)
+		}
+		if len(rc.UsedByTelegramIDs) > 0 {
+			rc.UsedByTelegramIDs = append([]int64(nil), rc.UsedByTelegramIDs...)
+		}
+		if fn != nil {
+			if err := fn(&rc); err != nil {
+				return err
+			}
+		}
+		rc.Code = code
+		s.state.RegCodes[code] = rc
+		updated = rc
+		return nil
+	})
+	if err != nil {
+		return RegCode{}, err
+	}
+	return updated, nil
 }
 
 func (s *Store) UpsertRegCode(code RegCode) error {
@@ -4970,11 +5268,15 @@ func (s *Store) ConsumeRegCodeAndUpdateUser(code string, uid, telegramID int64, 
 	var updated User
 	var consumed RegCode
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated, consumed = User{}, RegCode{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound
 		}
 		now := time.Now().Unix()
+		// 用闭包内局部变量：直接改写参数 telegramID 会让冲突重放沿用上一轮的回填值。
+		telegramID := telegramID
 		if telegramID == 0 {
 			telegramID = u.TelegramID
 		}
@@ -5081,7 +5383,7 @@ func (s *Store) ListRegCodes() []RegCode {
 	defer s.mu.RUnlock()
 	out := make([]RegCode, 0, len(s.state.RegCodes))
 	for _, c := range s.state.RegCodes {
-		out = append(out, c)
+		out = append(out, cloneRegCode(c)) // 不与 s.state 共用 UsedBy* 底层数组
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out
@@ -5120,11 +5422,20 @@ func (s *Store) DeleteRegCode(code string) error {
 	})
 }
 
+// beforeSaveHookForTest 仅供测试注入：在 saveStateLocked 落盘前调用，用来稳定制造
+// 版本冲突以验证重放 / 重试。生产代码中恒为 nil。
+var beforeSaveHookForTest func()
+
 func (s *Store) DeleteRegCodes(codes []string) (deleted []string, missing []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	deletedSet := map[string]bool{}
+	var deletedSet map[string]bool
 	mutErr := s.mutateAndSaveLocked(func() error {
+		// 版本冲突时 mutateAndSaveLocked 会重放本闭包：闭包外的累加变数必须在开头
+		// 重置，否则 deleted / missing 会重复，甚至同一个码同时出现在两边
+		// （第一次删掉的码在重放时被判为 missing）。
+		deleted, missing = nil, nil
+		deletedSet = map[string]bool{}
 		seen := map[string]bool{}
 		for _, code := range codes {
 			code = strings.TrimSpace(code)
@@ -5167,7 +5478,10 @@ func (s *Store) CreateRebindRequest(req RebindRequest) (RebindRequest, error) {
 	defer s.mu.Unlock()
 	var existingHit RebindRequest
 	var hit bool
+	input := req
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		req, existingHit, hit = input, RebindRequest{}, false
 		for _, existing := range s.state.RebindRequests {
 			if existing.UID == req.UID && existing.Status == "pending" {
 				existingHit = existing
@@ -5215,6 +5529,8 @@ func (s *Store) ReviewRebindRequest(id, reviewerUID int64, status, note string) 
 	defer s.mu.Unlock()
 	var updated RebindRequest
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = RebindRequest{}
 		req, ok := s.state.RebindRequests[id]
 		if !ok {
 			return ErrNotFound
@@ -5367,6 +5683,9 @@ func appendUniqueInt64(values []int64, value int64) []int64 {
 	return append(values, value)
 }
 
+// maxStoredViolationLogs 是 ViolationLogs 在 state 中保留的上限（保留最新的）。
+const maxStoredViolationLogs = 1000
+
 // AddViolationLog records a code violation attempt.
 func (s *Store) AddViolationLog(log ViolationLog) error {
 	s.mu.Lock()
@@ -5378,6 +5697,9 @@ func (s *Store) AddViolationLog(log ViolationLog) error {
 		log.ID = s.state.NextViolationLogID
 		s.state.NextViolationLogID++
 		s.state.ViolationLogs = append(s.state.ViolationLogs, log)
+		// 设上限：违规记录存在整份 JSONB 里，反复提交诱饵码/指名码就能让它无限
+		// 成长、拖慢每次落盘。只保留最新 maxStoredViolationLogs 条。
+		s.state.ViolationLogs = compactTail(s.state.ViolationLogs, maxStoredViolationLogs)
 		return nil
 	})
 }
@@ -5483,6 +5805,50 @@ ON CONFLICT (id) DO UPDATE SET
 	return err
 }
 
+// BindTelegramBotOffset 把持久化 offset 绑定到当前 Bot 身份（getMe 返回的数字 id）。
+//
+// 修复：原先只在同一进程内发现 username 变化才 reset；停机换 Token 再重启时
+// 进程内没有旧身份可比，会沿用旧 Bot 的 offset，新 Bot 小于该值的 update 全被
+// Telegram 当成已确认丢弃。现在库里记下 bot_id：与当前 id 不同就把 offset 归零。
+// 历史行 bot_id=0（升级前）视为未知身份，直接认领、保留 offset。
+// 返回当前应使用的 offset，以及是否因为换 Bot 而重置。
+func (s *Store) BindTelegramBotOffset(botID int64) (int64, bool, error) {
+	if botID <= 0 {
+		offset, err := s.TelegramBotOffset()
+		return offset, false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), telegramRuntimeDBTimeout)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO twilight_telegram_runtime (id, update_offset, bot_id, updated_at)
+VALUES (1, 0, $1, now())
+ON CONFLICT (id) DO NOTHING`, botID); err != nil {
+		return 0, false, err
+	}
+	var offset, storedBot int64
+	if err := tx.QueryRowContext(ctx, `SELECT update_offset, bot_id FROM twilight_telegram_runtime WHERE id = 1 FOR UPDATE`).Scan(&offset, &storedBot); err != nil {
+		return 0, false, err
+	}
+	reset := storedBot != 0 && storedBot != botID
+	if reset {
+		offset = 0
+	}
+	if reset || storedBot != botID {
+		if _, err := tx.ExecContext(ctx, `UPDATE twilight_telegram_runtime SET update_offset = $1, bot_id = $2, updated_at = now() WHERE id = 1`, offset, botID); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return offset, reset, nil
+}
+
 // ResetTelegramBotOffset clears the cursor when getMe proves that configuration
 // now points to a different Bot identity.
 func (s *Store) ResetTelegramBotOffset() error {
@@ -5503,6 +5869,8 @@ var (
 	ErrExpired          = errors.New("expired")
 	ErrLastAdmin        = errors.New("last admin")
 	ErrGrantLocked      = errors.New("emby grant locked")
+	// ErrDeviceBlocked 表示设备已被管理员封禁：用户不能自助信任（解封）或删除它。
+	ErrDeviceBlocked = errors.New("device blocked")
 	// ErrRegCodeAlreadyUsedByUser 表示同一身份（UID 或 TelegramID）重复消费同一张
 	// 多次数/无限次注册码。语义为「N 次 = N 个人各一次」：UseCount 是可服务人数上限，
 	// 不是单人可叠加的次数。缺此守卫时，用户可对同一张 use_count_limit>1（或 -1）的码
@@ -5525,6 +5893,12 @@ var (
 // 则 fail-closed 上抛（这些路径的调用方要么丢弃错误、要么可安全重试），
 // 绝不再走「盲写整份 jsonb 覆盖他进程刚提交的写」的丢更新老路。
 var errStateVersionConflict = errors.New("state version conflict")
+
+// errNoChange 由 mutateAndSaveLocked 的闭包返回，表示「复检后无任何改动」：
+// helper 据此跳过落盘并向调用方返回 nil。闭包返回它之前绝不能改动 s.state，
+// 否则这些改动会成为未落盘的幽灵变更。只用于 persist==nil 的 mutateAndSaveLocked
+// 以及 persist 在无改动时也无需执行的场景。
+var errNoChange = errors.New("store: mutation made no change")
 
 var (
 	errTelegramMembershipRebindProtected = errors.New("telegram membership rebind protected")

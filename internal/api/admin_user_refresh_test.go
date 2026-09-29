@@ -251,3 +251,41 @@ func TestAdminToggleEmbyEnableBlockedForInactiveWeb(t *testing.T) {
 		t.Fatalf("enable for inactive web should be 409, got %d body=%s", resp.Code, resp.Body.String())
 	}
 }
+
+// TestAdminRefreshKeepsWhitelistEmbyDespiteStaleExpiry 回归审查 M5：白名单用户带着
+// 升级前留下的过期 ExpiredAt，强制刷新不能把他的 Emby 停掉。
+func TestAdminRefreshKeepsWhitelistEmbyDespiteStaleExpiry(t *testing.T) {
+	app := newTestApp(t)
+	adminCookies := registerAndLogin(t, app, "admin", "Admin123456")
+	user, err := app.store().CreateUser(store.User{Username: "vip", Role: store.RoleWhitelist, Active: true, EmbyID: "emby-vip", EmbyUsername: "vip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store().UpdateUser(user.UID, func(u *store.User) error { u.ExpiredAt = 1000000000; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	policyWrites := 0
+	app.cfg().EmbyToken = "emby-token"
+	emby := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/emby-vip":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"Id":"emby-vip","Name":"vip","Policy":{"IsDisabled":false}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/emby-vip/Policy":
+			policyWrites++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected Emby request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer emby.Close()
+	app.cfg().EmbyURL = emby.URL
+
+	resp := doJSONWithHeaders(app, http.MethodPost, fmt.Sprintf("/api/v1/admin/users/%d/refresh-status", user.UID), "", adminCookies, map[string]string{"X-Twilight-Client": "webui"})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("refresh-status status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if policyWrites != 0 {
+		t.Fatalf("whitelist user's Emby must not be disabled, policy writes=%d", policyWrites)
+	}
+}

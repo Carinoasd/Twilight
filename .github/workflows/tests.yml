@@ -182,8 +182,14 @@ jobs:
     - name: Type check
       run: pnpm typecheck
 
-    - name: Test Telegram link status lifecycle
-      run: pnpm test:telegram-link-status
+    - name: Frontend unit tests
+      # 逐个跑 package.json 里所有 test:* 脚本（node --test），新增脚本无需再改这里。
+      run: |
+        for script in $(node -e 'const s=require("./package.json").scripts;console.log(Object.keys(s).filter(k=>k.startsWith("test:")).join(" "))'); do
+          echo "::group::pnpm $script"
+          pnpm -s "$script"
+          echo "::endgroup::"
+        done
 
     - name: Lint
       run: pnpm lint

@@ -93,68 +93,7 @@ func tomlSectionFieldFromLine(line, currentSection string) (section string, key 
 	return currentSection, strings.TrimSpace(rawKey), true
 }
 
-// maskTOMLSecrets 对磁盘原文 TOML 做行级密钥遮蔽：凡是落在某 section 下、且被
-// configSectionDefs 标记为 Type=="secret" 的非空字段，整行重写为 key = "<哨兵>"。
-// 与 maskConfigSecrets（作用于 values）同口径，保证 handleConfigTOMLGet 的
-// content 与 raw_content 两侧都不外泄真实密钥。section 名按大小写不敏感匹配
-// （isSecretField 内部精确匹配，这里先归一到 configSectionDefs 的规范名）。
-func maskTOMLSecrets(content string) string {
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || key == "" {
-			continue
-		}
-		if !isSecretField(section, strings.ToLower(key)) {
-			continue
-		}
-		// 已是空值的 secret 行无需遮蔽（区分"未配置"与"已配置但遮蔽"）。
-		_, rawVal, _ := strings.Cut(line, "=")
-		if tomlScalarIsEmpty(rawVal) {
-			continue
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(secretMaskValue)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// restoreTOMLSecrets 把 PUT 回传的 TOML 里仍是 secretMaskValue 哨兵的 secret 行
-// 还原为 current（内存配置 values）中的真实值。管理员未改动密钥时前端原样回传
-// 哨兵，这里防止哨兵被写盘覆盖真实密钥。非哨兵值视为显式覆盖，保持不动。
-func restoreTOMLSecrets(content string, current map[string]map[string]any) string {
-	if content == "" {
-		return content
-	}
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || key == "" {
-			continue
-		}
-		lowerKey := strings.ToLower(key)
-		if !isSecretField(section, lowerKey) {
-			continue
-		}
-		_, rawVal, _ := strings.Cut(line, "=")
-		if strings.TrimSpace(rawVal) != strconv.Quote(secretMaskValue) {
-			continue
-		}
-		realValue := ""
-		if fields, ok := current[section]; ok {
-			if text, ok := fields[lowerKey].(string); ok {
-				realValue = text
-			}
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(realValue)
-	}
-	return strings.Join(lines, "\n")
-}
+// maskTOMLSecrets / restoreTOMLSecrets 已改为结构化实现，见 config_secret_toml.go。
 
 // canonicalConfigSection 把 TOML 里出现的 section 名归一到 configSectionDefs 使用
 // 的规范 Key（大小写不敏感匹配）。无法匹配时原样返回，交给 isSecretField 自然
@@ -168,24 +107,20 @@ func canonicalConfigSection(section string) string {
 	return section
 }
 
-// tomlScalarIsEmpty 判断 TOML 标量赋值的值部分是否为"空"（空串 "" / ” 或纯空白）。
-// 用于 maskTOMLSecrets 跳过未配置的 secret 字段。
-func tomlScalarIsEmpty(rawVal string) bool {
-	v := strings.TrimSpace(rawVal)
-	return v == "" || v == `""` || v == "''"
-}
-
 func (a *App) handleConfigTOMLPutSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	content := stringValue(payload, "content")
+	var before map[string]map[string]any
 	info, status, message := a.editConfig(stringValue(payload, "expected_revision"), func(snapshot configEditSnapshot) (string, error) {
-		return restoreTOMLSecrets(content, configValues(snapshot.file)), nil
+		before = configValues(snapshot.file)
+		// 结构化回填：只有位于密钥键路径上的哨兵才换成磁盘同一路径的真值。
+		return restoreTOMLSecrets(content, snapshot.content, configValues(snapshot.file))
 	})
 	if status != http.StatusOK {
 		failConfigEdit(w, status, message)
 		return
 	}
-	a.audit(r, "update_config_toml", "admin", 0, map[string]any{"bytes": len(content)})
+	a.audit(r, "update_config_toml", "admin", 0, map[string]any{"bytes": len(content), "changed_keys": a.configChangedKeysSince(before)})
 	ok(w, "配置已保存并热重载", info)
 }
 
@@ -222,7 +157,13 @@ func (a *App) handleConfigBackupInspect(w http.ResponseWriter, r *http.Request, 
 	// 管理端预览，必须走 maskTOMLSecrets 与 handleConfigTOMLGet 同口径遮蔽，
 	// 否则"读取任意历史备份"就成了绕过 GET 遮蔽拿明文密钥的旁路。真正的恢复
 	// （handleConfigRestore）读的是磁盘原文、不经此遮蔽，因此预览遮蔽不影响恢复。
-	ok(w, "OK", map[string]any{"backup": backup, "content": stripProtectedAdminConfig(maskTOMLSecrets(string(content))), "config_file": a.configFilePath()})
+	masked, err := maskTOMLSecrets(string(content))
+	if err != nil {
+		// 无法解析就无法可靠遮蔽，宁可拒绝也不回传原文。
+		failWithCode(w, http.StatusBadRequest, ErrConfigBackupInvalid, "配置备份无法解析")
+		return
+	}
+	ok(w, "OK", map[string]any{"backup": backup, "content": stripProtectedAdminConfig(masked), "config_file": a.configFilePath()})
 }
 
 func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Params) {
@@ -258,6 +199,7 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 		},
 	}
 	if boolValue(payload, "dry_run", false) || boolValue(payload, "preview", false) || stringValue(payload, "confirm") != configRestoreConfirmPhrase {
+		skipAuditForDryRun(r)
 		ok(w, "配置恢复预览已生成", result)
 		return
 	}
@@ -273,7 +215,7 @@ func (a *App) handleConfigRestore(w http.ResponseWriter, r *http.Request, _ Para
 	result["pre_operation_backup"] = info["backup"]
 	result["reload"] = info["reload"]
 	result["revision"] = info["revision"]
-	a.audit(r, "restore_config_backup", "admin", 0, map[string]any{"backup": backup.Name, "bytes": len(content)})
+	a.audit(r, "restore_config_backup", "admin", 0, map[string]any{"backup": backup.Name, "bytes": len(content), "changed_keys": configChangedKeys(configValues(snapshot.file), a.currentFileConfigValues())})
 	ok(w, "配置已恢复并热重载", result)
 }
 
@@ -396,13 +338,66 @@ func (a *App) handleConfigSchemaFull(w http.ResponseWriter, r *http.Request, _ P
 func (a *App) handleConfigSchemaUpdateSafe(w http.ResponseWriter, r *http.Request, _ Params) {
 	payload := decodeMap(r)
 	rawSections, _ := payload["sections"].(map[string]any)
+	var before map[string]map[string]any
+	if snapshot, err := a.configEditSnapshot(); err == nil {
+		before = configValues(snapshot.file)
+	}
 	info, status, message := a.patchConfigSections(stringValue(payload, "expected_revision"), rawSections)
 	if status != http.StatusOK {
 		failConfigEdit(w, status, message)
 		return
 	}
-	a.audit(r, "update_config_schema", "admin", 0, map[string]any{"sections": sortedKeys(rawSections)})
+	a.audit(r, "update_config_schema", "admin", 0, map[string]any{"sections": sortedKeys(rawSections), "changed_keys": a.configChangedKeysSince(before)})
 	ok(w, "配置已保存并热重载", info)
+}
+
+// currentFileConfigValues 返回当前配置文件本身（不含覆盖层）的规范化值；读取失败返回 nil。
+func (a *App) currentFileConfigValues() map[string]map[string]any {
+	snapshot, err := a.configEditSnapshot()
+	if err != nil {
+		return nil
+	}
+	return configValues(snapshot.file)
+}
+
+// configChangedKeysSince 对比 before 与当前配置文件，返回变化的 "Section.key"。
+func (a *App) configChangedKeysSince(before map[string]map[string]any) []string {
+	if before == nil {
+		return nil
+	}
+	return configChangedKeys(before, a.currentFileConfigValues())
+}
+
+// configChangedKeys 返回两份规范化配置值之间变化的键路径（"Section.key"）。
+// 审计只记"哪些键变了"，不记前后值，密钥字段因此也不会进入审计明细。
+func configChangedKeys(before, after map[string]map[string]any) []string {
+	if before == nil || after == nil {
+		return nil
+	}
+	changed := []string{}
+	seen := map[string]bool{}
+	visit := func(section, key string) {
+		path := section + "." + key
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		if !reflect.DeepEqual(before[section][key], after[section][key]) {
+			changed = append(changed, path)
+		}
+	}
+	for section, fields := range before {
+		for key := range fields {
+			visit(section, key)
+		}
+	}
+	for section, fields := range after {
+		for key := range fields {
+			visit(section, key)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }
 
 // existingConfigContent 返回磁盘上的配置原文。文件不存在或读不出来时返回空串，
@@ -442,11 +437,11 @@ func (a *App) saveConfigContentLocked(content, expectedRevision string) (map[str
 	}
 	content = normalizedContent
 	content = mergeProtectedAdminConfig(content, string(existing))
-	// repo_url 与 admin_uids/admin_usernames 同属"禁止网页改写"字段：git 自动更新
-	// 的来源仓库只能由运维在配置文件侧设定，防止被盗管理员会话改 origin 后触发
-	// 更新实现 RCE。这里在写盘前把提交内容中的 repo_url 就地还原为磁盘原值。
-	if hadExisting {
-		content = restoreProtectedRepoURL(content, string(existing))
+	// repo_url 与 admin_uids/admin_usernames 同属"禁止网页改写"字段：无论磁盘原文
+	// 是否写了 repo_url 行，写盘前一律强制为磁盘文件本身解析出的值（见
+	// enforceProtectedRepoURL）。
+	if status, message := enforceRepoURLForSave(configFile, &content); status != http.StatusOK {
+		return nil, status, message
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
 		return nil, http.StatusBadRequest, "配置校验失败"
@@ -540,8 +535,8 @@ func (a *App) saveInitialSetupConfigContentLocked(content, adminUsername string)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return nil, http.StatusInternalServerError, "读取配置失败"
 	}
-	if hadExisting {
-		content = restoreProtectedRepoURL(content, string(existing))
+	if status, message := enforceRepoURLForSave(configFile, &content); status != http.StatusOK {
+		return nil, status, message
 	}
 	if err := validateConfigContent(configFile, []byte(content)); err != nil {
 		return nil, http.StatusBadRequest, "配置校验失败"
@@ -581,6 +576,23 @@ func (a *App) saveInitialSetupConfigContentLocked(content, adminUsername string)
 		info["backup_path"] = backupInfo.Path
 	}
 	return info, http.StatusOK, ""
+}
+
+// enforceRepoURLForSave 是两条写盘路径共用的 repo_url 强制入口。
+func enforceRepoURLForSave(configFile string, content *string) (int, string) {
+	protected, err := protectedRepoURL(configFile)
+	if err != nil {
+		return http.StatusInternalServerError, "读取配置失败"
+	}
+	enforced, err := enforceProtectedRepoURL(configFile, *content, protected)
+	if err != nil {
+		if errors.Is(err, errProtectedRepoURL) {
+			return http.StatusBadRequest, "repo_url 只能在服务器配置文件或环境变量中修改"
+		}
+		return http.StatusBadRequest, "配置校验失败"
+	}
+	*content = enforced
+	return http.StatusOK, ""
 }
 
 func normalizeConfigContent(configFile, content string) (string, error) {
@@ -788,59 +800,64 @@ func protectedAdminConfigLine(trimmed string) bool {
 	}
 }
 
-// restoreProtectedRepoURL 把提交 TOML 里 [SystemUpdate].repo_url 的值就地还原为
-// 磁盘原值（existing），防止经网页配置接口改写 git 自动更新的来源仓库。
+// errProtectedRepoURL 表示提交内容试图（含经别名键）改写 git 自动更新来源。
+var errProtectedRepoURL = errors.New("system update repo_url is not editable from web config")
+
+// protectedRepoURL 返回写盘时 [SystemUpdate].repo_url 必须保持的值：磁盘配置
+// 文件本身（不含 env / .local 覆盖）解析出的值；文件里没有该键时就是代码默认值。
 //
 // 威胁模型：repo_url 决定 git 自动更新 pull 的 origin。若允许网页改写，被盗的
-// 管理员会话可把 origin 指向攻击者 fork，再触发更新即可在服务器上 RCE。该字段
-// 只能由运维在配置文件 / 环境变量侧设定。
-//
-// 为什么用"就地替换值"而非 [Admin] 那种"整段剥离 + 末尾追加"：repo_url 位于
-// [SystemUpdate] 段内，该段还有 branch / restart_services 等普通字段。若整段剥离
-// 再追加一个只含 repo_url 的 [SystemUpdate]，会产生重复 section 头——TOML 规范
-// 不允许同名 table 重复定义，直接解析失败。就地替换与 restoreTOMLSecrets 同构，
-// 不改变文档结构。
-//
-// 行为：仅当提交内容在 [SystemUpdate] 段内出现 repo_url 行时才替换其值为磁盘原值；
-// 提交侧删除该行（清空 repo_url、停用自动更新）属于合法操作，不阻止。
-func restoreProtectedRepoURL(content, existing string) string {
-	if content == "" {
-		return content
+// 管理员会话可把 origin 指向攻击者 fork，再触发更新即可植入恶意代码。该字段
+// 只能由运维在配置文件 / 环境变量侧设定。旧实现只在磁盘原文找得到
+// [SystemUpdate] 下的 repo_url 行时才还原，文件里没有该行（值来自默认）、
+// 用引号键或根层裸键时会直接放行。
+func protectedRepoURL(configFile string) (string, error) {
+	cfg, err := config.LoadFileOnly(configFile)
+	if err != nil {
+		return "", err
 	}
-	diskRepoURL, hasDisk := systemUpdateRepoURL(existing)
-	if !hasDisk {
-		return content
-	}
-	lines := strings.Split(content, "\n")
-	section := ""
-	for i, line := range lines {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || !strings.EqualFold(section, "SystemUpdate") || !strings.EqualFold(key, "repo_url") {
-			continue
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		lines[i] = indent + key + " = " + strconv.Quote(diskRepoURL)
-	}
-	return strings.Join(lines, "\n")
+	return cfg.SystemUpdateRepoURL, nil
 }
 
-// systemUpdateRepoURL 从 TOML 文本里抽取 [SystemUpdate].repo_url 的字符串值。
-func systemUpdateRepoURL(content string) (string, bool) {
-	section := ""
-	for _, line := range strings.Split(content, "\n") {
-		nextSection, key, isAssign := tomlSectionFieldFromLine(line, section)
-		section = canonicalConfigSection(nextSection)
-		if !isAssign || !strings.EqualFold(section, "SystemUpdate") || !strings.EqualFold(key, "repo_url") {
-			continue
-		}
-		_, rawVal, _ := strings.Cut(line, "=")
-		if v, err := strconv.Unquote(strings.TrimSpace(rawVal)); err == nil {
-			return v, true
-		}
-		return strings.Trim(strings.TrimSpace(rawVal), `"`), true
+// loadConfigContentFileOnly 把一段候选配置按"仅文件"口径解析（与 config.Load 同一个
+// 读取器，别名、大小写规则完全一致）。
+func loadConfigContentFileOnly(configFile, content string) (config.Config, error) {
+	dir := filepath.Dir(configFile)
+	tmpPath := filepath.Join(dir, ".twilight_config_probe_"+strconv.FormatInt(time.Now().UnixNano(), 10)+".toml")
+	if err := os.WriteFile(tmpPath, []byte(content), 0o600); err != nil {
+		return config.Config{}, err
 	}
-	return "", false
+	defer os.Remove(tmpPath)
+	return config.LoadFileOnly(tmpPath)
+}
+
+// enforceProtectedRepoURL 在已规范化的候选内容上强制 repo_url = protected：
+//  1. 规范位置 [SystemUpdate].repo_url 直接改写为 protected（静默，兼容"原样回传"的
+//     正常保存与配置还原）；
+//  2. 再用真实读取器解析一次，若经别名（根层 repo_url、大小写不同的表名等）仍解析
+//     出别的值，直接拒绝保存。
+func enforceProtectedRepoURL(configFile, content, protected string) (string, error) {
+	cfg, err := loadConfigContentFileOnly(configFile, content)
+	if err != nil {
+		return "", err
+	}
+	if cfg.SystemUpdateRepoURL != protected {
+		values := configValues(cfg)
+		values["SystemUpdate"]["repo_url"] = protected
+		ensureTicketDefaults(values)
+		content, err = mergeConfigTOML(content, values)
+		if err != nil {
+			return "", err
+		}
+		cfg, err = loadConfigContentFileOnly(configFile, content)
+		if err != nil {
+			return "", err
+		}
+	}
+	if cfg.SystemUpdateRepoURL != protected {
+		return "", errProtectedRepoURL
+	}
+	return content, nil
 }
 
 func writeConfigBackupBytes(configFile, backupDir string, content []byte) (store.BackupInfo, error) {
@@ -959,7 +976,7 @@ func regcodeDecoyActionOptions() []map[string]any {
 	}
 }
 
-const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用户面板文本，支持换行；留空使用内置模板。安全限制：不会提供邮箱、Emby ID、密码、Token 或服务器线路占位符。\n\n" +
+const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用户面板文本，支持换行；留空使用内置模板。安全限制：面板发在群里所有人可见，不提供完整邮箱、Emby ID、密码、Token 或服务器线路占位符；{email} 只输出遮罩邮箱，{registration_code} 只输出卡码前 4 位。\n\n" +
 	"== 用户信息 ==\n" +
 	"{server_name}=站点名称；{username}=Web 用户名；{uid}=用户 UID；{role}=角色名称；{role_id}=角色数字；{is_admin}=是否管理员；{is_protected}=是否受保护\n" +
 	"== Web 账号 ==\n" +
@@ -969,7 +986,7 @@ const telegramGroupUserPanelTemplateDescription = "自定义 /twguser 群组用�
 	"== Emby 绑定 ==\n" +
 	"{emby_status}=绑定摘要（含用户名）；{emby_bound_status}=绑定状态（不含用户名）；{emby_bound}=是否已绑定；{emby_enabled_status}=本地 Emby 启用/禁用状态；{emby_username}=用户名；{emby_unbind_allowed}=是否允许自助解绑\n" +
 	"== 注册 ==\n" +
-	"{registration_source}=注册/授权来源；{registration_code}=注册/授权卡码；{pending_emby}=是否待补建；{pending_emby_days}=待补建授权天数\n" +
+	"{registration_source}=注册/授权来源；{registration_code}=注册/授权卡码（仅前 4 位）；{pending_emby}=是否待补建；{pending_emby_days}=待补建授权天数\n" +
 	"== Emby 远端 ==\n" +
 	"{emby_remote_block}=完整远端信息块；{emby_remote_status}=远端查询状态；{emby_remote_username}=远端用户名；{emby_remote_enabled}=远端启用/禁用；{emby_remote_role}=远端权限；{emby_remote_hidden}=远端隐藏；{emby_last_activity}=最近活动\n" +
 	"== Bangumi ==\n" +
@@ -1072,12 +1089,14 @@ func configSectionDefs() []configSectionDef {
 			{Key: "force_bind_group", Label: "强制群组绑定检查", Type: "bool", Description: "用户在 Bot 中确认绑定码时，必须已加入配置的群组"},
 			{Key: "channel_id", Label: "频道 ID", Type: "list", Description: "Bot 推送和强制绑定检查的频道"},
 			{Key: "force_bind_channel", Label: "强制频道绑定检查", Type: "bool", Description: "用户在 Bot 中确认绑定码时，必须已加入配置的频道"},
-			{Key: "enable_tg_panel", Label: "启用 Bot 面板", Type: "bool", Description: "启用更多 Bot 查询命令和管理查询入口"},
+			{Key: "enable_tg_panel", Label: "启用 Bot 面板", Type: "bool", Description: "启用 /twguser 群组用户管理面板；关闭后 /twguser 与面板按钮全部停用"},
 			{Key: "group_user_panel_template", Label: "/twguser 面板模板", Type: "textarea", Description: telegramGroupUserPanelTemplateDescription, PlaceholderHints: placeholderHintsGroupPanel},
 			{Key: "require_group_membership", Label: "强制群成员", Type: "bool", Description: "巡检发现退群时禁用本地或 Emby"},
 			{Key: "ban_on_leave", Label: "退群封禁", Type: "bool", Description: "退群后在群组永久封禁"},
-			{Key: "auto_enable_rejoined", Label: "回群自动启用", Type: "bool", Description: "退群后重新加入且未过期时，巡检自动重新启用 Web 账号；Emby 需单独启用，关闭时进入人工复核"},
+			{Key: "auto_enable_rejoined", Label: "回群自动启用", Type: "bool", Description: "因退群被巡检停用的账号重新入群且未过期时，巡检自动重新启用 Web 账号，并恢复当时随之停用的 Emby；管理员手动停权的账号不受影响；关闭时进入人工复核"},
 			{Key: "group_check_concurrency", Label: "巡检并发", Type: "int", Description: "getChatMember 并发数"},
+			{Key: "membership_breaker_percent", Label: "巡检熔断比例（%）", Type: "int", Description: "单轮拟停用人数超过扫描人数的该百分比（且至少 3 人）时整轮中止、不停用任何人；0 关闭"},
+			{Key: "membership_breaker_max", Label: "巡检熔断人数", Type: "int", Description: "单轮拟停用人数超过该值时整轮中止、不停用任何人；0 关闭"},
 			{Key: "group_action_concurrency", Label: "写操作并发", Type: "int", Description: "踢出、封禁等动作并发数"},
 			{Key: "bot_start_text", Label: "Bot 开始文案", Type: "textarea", Description: "覆盖私聊 /start 文案，支持换行", PlaceholderHints: placeholderHintsBotText},
 			{Key: "bot_group_start_text", Label: "群聊开始文案", Type: "textarea", Description: "覆盖群聊 /start 提示，支持换行", PlaceholderHints: placeholderHintsBotText},
@@ -1181,8 +1200,17 @@ func configSectionDefs() []configSectionDef {
 			{Key: "expiring_check_time", Label: "到期提醒检查", Type: "string", Description: "每日 HH:MM"},
 			{Key: "daily_stats_time", Label: "每日统计", Type: "string", Description: "每日 HH:MM"},
 			{Key: "session_cleanup_interval", Label: "会话检查间隔", Type: "int", Description: "小时"},
+			{Key: "emby_reconcile_interval", Label: "Emby 状态对账间隔", Type: "int", Description: "小时；emby_state_reconcile 默认执行间隔，把漏掉的 Emby 启停收敛回来"},
 			{Key: "cleanup_no_emby_time", Label: "无Emby清理时间", Type: "string", Description: "每日 HH:MM，清理注册后长期未绑定 Emby 的账号"},
 			{Key: "cleanup_pending_emby_time", Label: "未使用资格清理时间", Type: "string", Description: "每日 HH:MM，收回长期未使用的 Emby 开通资格"},
+			{Key: "timezone", Label: "调度时区", Type: "string", Description: "每日任务的时区（IANA 名，如 Asia/Shanghai）；留空使用服务器进程本地时区（Docker 通常是 UTC）"},
+			{Key: "group_membership_check_time", Label: "群成员巡检时间", Type: "string", Description: "每日 HH:MM，Telegram 群成员校验"},
+			{Key: "telegram_bindings_check_time", Label: "Telegram 绑定检查时间", Type: "string", Description: "每日 HH:MM，扫描重复或异常的 Telegram 绑定"},
+			{Key: "failure_notify", Label: "任务失败通知", Type: "bool", Description: "任务失败时用 Telegram 通知管理员（Telegram.admin_id 与绑定了 Telegram 的管理员），恢复时再通知一次；连续失败只通知第一次"},
+			{Key: "retry_failed_after_minutes", Label: "失败重试间隔（分钟）", Type: "int", Description: "可安全重放的每日任务失败后，过该分钟数自动重试一次；0 关闭"},
+			{Key: "auto_backup_enabled", Label: "定期数据库备份", Type: "bool", Description: "每天自动备份一次数据库到 Database.backup_dir"},
+			{Key: "auto_backup_time", Label: "定期备份时间", Type: "string", Description: "每日 HH:MM"},
+			{Key: "auto_backup_keep", Label: "自动备份保留份数", Type: "int", Description: "只保留最近 N 份自动备份，更早的自动删除；手动备份不受影响"},
 			{Key: "cleanup_unused_uploads_time", Label: "未使用上传清理时间", Type: "string", Description: "每日 HH:MM，清理未被引用的历史上传文件"},
 			{Key: "cleanup_audit_logs_time", Label: "审计日志清理时间", Type: "string", Description: "每日 HH:MM，按保留策略清理过期审计日志"},
 			{Key: "cleanup_ticket_images_time", Label: "工单图片清理时间", Type: "string", Description: "每日 HH:MM，按保留天数清理已关闭工单的图片附件"},
@@ -1206,7 +1234,8 @@ func configSectionDefs() []configSectionDef {
 		{Key: "BangumiSync", Title: "Bangumi 管理与同步", Description: "Bangumi 自动同步（Webhook）与个人番剧管理\n关闭同步功能后：所有自动同步、用户/Bangumi 相关接口均拒绝服务，但管理员仍可查看用户 Bangumi 配置状态\n关闭管理功能后：用户面板隐藏手动管理区，无法查看或修改 Bangumi 收藏", Category: "integration", Collapsed: true, Fields: []configFieldDef{
 			{Key: "enabled", Label: "启用同步功能", Type: "bool", Description: "总开关。关闭后自动同步、Bangumi 个人页、收藏管理、收藏修改等所有 Bangumi 相关功能均拒绝服务，管理员仍可查看用户 BGM 配置状态"},
 			{Key: "manage_enabled", Label: "启用管理功能", Type: "bool", Description: "允许用户在个人面板手动管理、修改 Bangumi 收藏状态、进度及评分；关闭时隐藏前端管理入口并拒绝收藏修改接口"},
-			{Key: "webhook_secret", Label: "Webhook 密钥", Type: "secret", Description: "Bangumi Webhook 校验密钥（留空则不验证签名）"},
+			{Key: "webhook_secret", Label: "Webhook 密钥", Type: "secret", Description: "Bangumi Webhook 校验密钥（留空则拒绝所有 Webhook）；推荐用它对 timestamp + body 做 HMAC-SHA256 签名"},
+			{Key: "webhook_allow_legacy_token", Label: "允许共享 Token 鉴权（兼容期）", Type: "bool", Description: "开启时仍接受 X-Twilight-Bangumi-Token 头或 ?token= 的旧式鉴权（会记警告，无法防重放）；关闭后只接受 X-Twilight-Bangumi-Signature 签名请求"},
 		}},
 		{Key: "Ticket", Title: "工单系统", Description: "用户提交工单与管理员处理；工单类型请在「工单处理」页面管理", Category: "policy", Collapsed: true, Fields: []configFieldDef{
 			{Key: "enabled", Label: "启用工单系统", Type: "bool", Description: "开启后用户可提交工单，管理员可在后台管理"},
@@ -1280,7 +1309,7 @@ func configValues(cfg config.Config) map[string]map[string]any {
 			"force_subscribe":  cfg.TelegramForceSubscribe,
 			"force_bind_group": cfg.TelegramForceBindGroup, "channel_id": cfg.TelegramChannelIDs, "force_bind_channel": cfg.TelegramForceBindChannel,
 			"require_group_membership": cfg.TelegramRequireMembership,
-			"enable_tg_panel":          cfg.TelegramEnablePanel, "ban_on_leave": cfg.TelegramBanOnLeave, "auto_enable_rejoined": cfg.TelegramAutoEnableRejoined, "group_check_concurrency": cfg.TelegramGroupCheckConcurrency, "group_action_concurrency": cfg.TelegramGroupActionConcurrency,
+			"enable_tg_panel":          cfg.TelegramEnablePanel, "ban_on_leave": cfg.TelegramBanOnLeave, "auto_enable_rejoined": cfg.TelegramAutoEnableRejoined, "group_check_concurrency": cfg.TelegramGroupCheckConcurrency, "membership_breaker_percent": cfg.TelegramMembershipBreakerPercent, "membership_breaker_max": cfg.TelegramMembershipBreakerMax, "group_action_concurrency": cfg.TelegramGroupActionConcurrency,
 			"group_user_panel_template": cfg.TelegramGroupUserPanelTemplate,
 			"bot_start_text":            cfg.TelegramBotStartText, "bot_group_start_text": cfg.TelegramBotGroupStartText, "bot_start_title": cfg.TelegramBotStartTitle,
 			"bot_start_intro": cfg.TelegramBotStartIntro, "bot_bind_prompt_text": cfg.TelegramBotBindPromptText, "bot_help_text": cfg.TelegramBotHelpText,
@@ -1322,10 +1351,10 @@ func configValues(cfg config.Config) map[string]map[string]any {
 			"email_validation_mode": cfg.EmailValidationMode, "email_whitelist": cfg.EmailWhitelist, "email_blacklist": cfg.EmailBlacklist,
 		},
 		"Security":     {"forgot_password_enabled": cfg.ForgotPasswordEnabled, "forgot_password_emby_enabled": cfg.ForgotPasswordEmbyEnabled, "forgot_password_email_enabled": cfg.ForgotPasswordEmailEnabled, "bot_internal_secret": cfg.BotInternalSecret},
-		"Scheduler":    {"enabled": cfg.SchedulerEnabled, "tick_interval_seconds": cfg.SchedulerTickIntervalSeconds, "expired_check_time": cfg.SchedulerExpiredCheckTime, "expiring_check_time": cfg.SchedulerExpiringCheckTime, "daily_stats_time": cfg.SchedulerDailyStatsTime, "session_cleanup_interval": cfg.SchedulerSessionCleanupInterval, "cleanup_no_emby_time": cfg.SchedulerCleanupNoEmbyTime, "cleanup_pending_emby_time": cfg.SchedulerCleanupPendingEmbyTime, "cleanup_unused_uploads_time": cfg.SchedulerCleanupUnusedUploadsTime, "cleanup_audit_logs_time": cfg.SchedulerCleanupAuditLogsTime, "cleanup_ticket_images_time": cfg.SchedulerCleanupTicketImagesTime},
+		"Scheduler":    {"enabled": cfg.SchedulerEnabled, "tick_interval_seconds": cfg.SchedulerTickIntervalSeconds, "expired_check_time": cfg.SchedulerExpiredCheckTime, "expiring_check_time": cfg.SchedulerExpiringCheckTime, "daily_stats_time": cfg.SchedulerDailyStatsTime, "session_cleanup_interval": cfg.SchedulerSessionCleanupInterval, "emby_reconcile_interval": cfg.SchedulerEmbyReconcileInterval, "cleanup_no_emby_time": cfg.SchedulerCleanupNoEmbyTime, "timezone": cfg.SchedulerTimezone, "group_membership_check_time": cfg.SchedulerGroupMembershipCheckTime, "telegram_bindings_check_time": cfg.SchedulerTelegramBindingsCheckTime, "failure_notify": cfg.SchedulerFailureNotify, "retry_failed_after_minutes": cfg.SchedulerRetryFailedAfterMinutes, "auto_backup_enabled": cfg.SchedulerAutoBackupEnabled, "auto_backup_time": cfg.SchedulerAutoBackupTime, "auto_backup_keep": cfg.SchedulerAutoBackupKeep, "cleanup_pending_emby_time": cfg.SchedulerCleanupPendingEmbyTime, "cleanup_unused_uploads_time": cfg.SchedulerCleanupUnusedUploadsTime, "cleanup_audit_logs_time": cfg.SchedulerCleanupAuditLogsTime, "cleanup_ticket_images_time": cfg.SchedulerCleanupTicketImagesTime},
 		"SystemUpdate": {"auto_update_enabled": cfg.SystemUpdateEnabled, "repo_url": cfg.SystemUpdateRepoURL, "branch": cfg.SystemUpdateBranch, "restart_services": cfg.SystemUpdateRestartServices, "auto_update_trigger_type": cfg.SystemUpdateTriggerType, "auto_update_interval_hours": cfg.SystemUpdateIntervalHours, "auto_update_time": cfg.SystemUpdateTime},
 		"Notification": {"enabled": cfg.NotificationEnabled, "expiry_remind_days": cfg.NotificationExpiryRemindDays, "login_notify_telegram_template": cfg.LoginNotifyTelegramTemplate, "login_notify_email_subject_template": cfg.LoginNotifyEmailSubjectTemplate, "login_notify_email_body_template": cfg.LoginNotifyEmailBodyTemplate},
-		"BangumiSync":  {"enabled": cfg.BangumiEnabled, "manage_enabled": cfg.BangumiManageEnabled, "webhook_secret": cfg.BangumiWebhookSecret},
+		"BangumiSync":  {"enabled": cfg.BangumiEnabled, "manage_enabled": cfg.BangumiManageEnabled, "webhook_secret": cfg.BangumiWebhookSecret, "webhook_allow_legacy_token": cfg.BangumiWebhookAllowLegacyToken},
 		"Ticket":       {"enabled": cfg.TicketSystemEnabled, "types": cfg.TicketTypes, "user_open_limit": cfg.TicketUserOpenLimit, "global_open_limit": cfg.TicketGlobalOpenLimit, "image_max_size": cfg.TicketImageMaxSize, "image_max_count": cfg.TicketImageMaxCount, "image_retention_days": cfg.TicketImageRetentionDays, "notify_telegram_template": cfg.TicketNotifyTelegramTemplate},
 		"AuditLog": {
 			"enabled": cfg.AuditLogEnabled, "auto_cleanup_enabled": cfg.AuditLogAutoCleanupEnabled,

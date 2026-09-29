@@ -34,6 +34,9 @@ const (
 
 	// playRankCacheTTL 让榜单在有人反复刷新页面时不至于每次都跑一遍聚合查询。
 	playRankCacheTTL = 60 * time.Second
+
+	// playRankCacheMaxEntries 是榜单缓存条目上限，超过就整表清空重来。
+	playRankCacheMaxEntries = 256
 )
 
 // playRankSnapshot 是榜单缓存条目：until 之前可以直接复用 data。
@@ -117,7 +120,8 @@ func playRankQuery(r *http.Request) playRankRequest {
 				parsed = playRankMaxDays
 			}
 			rangeKey = strconv.Itoa(parsed) + "d"
-			since = now.AddDate(0, 0, -parsed).Unix()
+			// 对齐到整分钟：否则每秒一个不同的 since，缓存永远命中不了。
+			since = now.Truncate(time.Minute).AddDate(0, 0, -parsed).Unix()
 		}
 	}
 	limit := playRankDefaultLimit
@@ -163,8 +167,7 @@ func maskPlayRankUsername(name string) string {
 // refresh=true 时跳过缓存并写回新结果。
 func (a *App) playRankData(ctx context.Context, req playRankRequest, includeIdentity bool, refresh bool) map[string]any {
 	// 排序必须进缓存键：两组排序是两份不同的榜单，共用一个键会互相覆盖。
-	key := req.rangeKey + "|" + strconv.FormatInt(req.since, 10) + "|" + strconv.Itoa(req.limit) + "|" +
-		req.groupBy + "|" + req.sortBy + "|" + strconv.FormatBool(includeIdentity)
+	key := playRankCacheKey(req, includeIdentity)
 
 	a.playRankMu.Lock()
 	if !refresh {
@@ -183,9 +186,26 @@ func (a *App) playRankData(ctx context.Context, req playRankRequest, includeIden
 	if a.playRankCache == nil {
 		a.playRankCache = map[string]playRankSnapshot{}
 	}
-	a.playRankCache[key] = playRankSnapshot{until: time.Now().Add(playRankCacheTTL), data: data}
+	// 写入前淘汰过期条目，并给条目数设上限：旧实现只增不删，days/limit 组合多了
+	// 缓存会一直涨。
+	now := time.Now()
+	for k, v := range a.playRankCache {
+		if !now.Before(v.until) {
+			delete(a.playRankCache, k)
+		}
+	}
+	if len(a.playRankCache) >= playRankCacheMaxEntries {
+		a.playRankCache = map[string]playRankSnapshot{}
+	}
+	a.playRankCache[key] = playRankSnapshot{until: now.Add(playRankCacheTTL), data: data}
 	a.playRankMu.Unlock()
 	return data
+}
+
+// playRankCacheKey 由决定榜单内容的参数组成。since 已由 rangeKey（日历窗口或
+// 「N 天」）与分钟对齐决定，不再进 key：进了就等于每秒一个新 key。
+func playRankCacheKey(req playRankRequest, includeIdentity bool) string {
+	return req.rangeKey + "|" + strconv.Itoa(req.limit) + "|" + req.groupBy + "|" + req.sortBy + "|" + strconv.FormatBool(includeIdentity)
 }
 
 func (a *App) buildPlayRank(ctx context.Context, req playRankRequest, includeIdentity bool) map[string]any {
@@ -347,7 +367,9 @@ func (a *App) handleV2PlayRank(w http.ResponseWriter, r *http.Request, _ Params)
 	}
 
 	req := playRankQuery(r)
-	refresh := r.URL.Query().Get("refresh") == "1"
+	// refresh=1 会跳过缓存直接跑聚合，只允许管理员使用；普通用户一律走缓存，
+	// 否则任何人都能用 refresh=1 反复打满数据库。
+	refresh := p.User.Role == store.RoleAdmin && r.URL.Query().Get("refresh") == "1"
 	ok(w, "OK", a.playRankData(r.Context(), req, false, refresh))
 }
 

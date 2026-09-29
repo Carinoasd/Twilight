@@ -15,7 +15,7 @@ Twilight 的邀请树（Invite Tree）让已注册用户互相邀请生成新的
 | 树根（root） | 邀请关系图中没有上级（在 `invite_relations` 中没有以自己为 `child` 的关系）的节点。 |
 | 层级（depth） | 从该节点向上回溯到根的层数，根本身 = 1。示例 `C → A → B`（C 邀请了 A，A 邀请了 B）：C=1，A=2，B=3，整树深度为 3。 |
 | 子树（subtree） | 以某节点为根、向下递归的所有后代集合。 |
-| 断开（detach） | 删除某用户作为 `child` 的那条边（即抹掉它的上级指向），同时清理其占用的邀请码使用记录，避免后续按旧邀请码使用痕迹重建关系。它名下的子节点不变，但它自己晋升为新的树根。 |
+| 断开（detach） | 删除某用户作为 `child` 的那条边（即抹掉它的上级指向），同时清掉邀请码上指向它的 `used_by_uid` 引用，避免后续按旧邀请码使用痕迹重建关系；邀请码本身保持已使用（不退回 `use_count`、不重新启用），防止同一张码被其他账号再次使用。它名下的子节点不变，但它自己晋升为新的树根。 |
 | 级联删除（cascade delete） | 以某节点为起点，按指定层级（`cascade_depth`）一并删除若干代后代。 |
 
 数据模型（`internal/store/store.go`）：
@@ -169,9 +169,9 @@ V2 管理资源：`GET /api/v2/admin/invite/tree` 返回 `data.item`，其中 `r
 | 仅停用 / 启用（`cascade_depth=1`） | 邀请关系完全不变；仅翻转 `Active` 并同步 Emby。 |
 | 级联禁用 / 启用（`cascade_depth>=2` 或 `<0`/`>=999`） | 仅翻转层级内各用户的 `Active` 并同步 Emby；邀请关系完全不动；受保护管理员自动跳过。 |
 | `mode=emby_only`（任意 `cascade_depth`） | 仅删除 Emby 账号并清空绑定字段；本地账号、上下级、邀请码全部保留。 |
-| 下级自助断开（`POST /invite/me/detach-expired`） | 仅当自己存在邀请上级，且 Emby 已到期、Emby 已禁用，或 Web 已禁用且仍绑定 Emby 时，完全删除自己的 Emby 账号、清空本地 Emby 绑定与待开通状态，并解除自己的上级关系；同时清理对应邀请码的使用占用，避免刷新后恢复；不改变 Web 账号的启用 / 禁用状态。 |
-| 上级清理下级（`POST /invite/children/:uid/detach-expired`） | 仅当目标是 Emby 已到期、Emby 已禁用，或 Web 已禁用且仍绑定 Emby 的直属下级时，完全删除其 Emby 账号、清空绑定与待开通状态，并解除上下级关系；同时清理对应邀请码的使用占用，避免刷新后恢复；不改变目标 Web 账号的启用 / 禁用状态。 |
-| 管理员断开（`POST /admin/invite/users/:uid/detach`） | 删除该用户作为 `child` 的边并清理其占用的邀请码使用记录，自身晋升新树根；不动其 Emby 账号与下级。`invite_enabled=false` 时仍可执行，用于维护历史关系。 |
+| 下级自助断开（`POST /invite/me/detach-expired`） | 仅当自己存在邀请上级，且 Emby 已到期、Emby 已禁用，或 Web 已禁用且仍绑定 Emby 时，完全删除自己的 Emby 账号、清空本地 Emby 绑定与待开通状态，并解除自己的上级关系；同时清掉对应邀请码上的使用者引用，避免刷新后恢复（邀请码仍保持已使用，不会重新启用）；不改变 Web 账号的启用 / 禁用状态。 |
+| 上级清理下级（`POST /invite/children/:uid/detach-expired`） | 仅当目标是 Emby 已到期、Emby 已禁用，或 Web 已禁用且仍绑定 Emby 的直属下级时，完全删除其 Emby 账号、清空绑定与待开通状态，并解除上下级关系；同时清掉对应邀请码上的使用者引用，避免刷新后恢复（邀请码仍保持已使用，不会重新启用）；不改变目标 Web 账号的启用 / 禁用状态。 |
+| 管理员断开（`POST /admin/invite/users/:uid/detach`） | 删除该用户作为 `child` 的边并清掉邀请码上的使用者引用（码保持已使用），自身晋升新树根；不动其 Emby 账号与下级。`invite_enabled=false` 时仍可执行，用于维护历史关系。 |
 
 ## 核心校验
 
@@ -183,7 +183,7 @@ V2 管理资源：`GET /api/v2/admin/invite/tree` 返回 `data.item`，其中 `r
 2. 邀请人账号 `Active`（否则「账号已被禁用」）。
 3. `userEntitlementOK`：账号未过期（`Active=true` 且 `ExpiredAt` 不在过去）。这是与 `maxCodeDays` 重叠的显式防御纵深，确保「Active 但已过期」的账号无法签发邀请码。
 4. 若 `invite_require_emby = true`，邀请人必须已绑定 Emby。
-5. `maxCodeDays(user) > 0`：邀请人剩余有效期足以分配天数（永久号取 `permanent_invite_max_days`）。
+5. `maxCodeDays(user) > 0`：邀请人剩余有效期足以分配天数（永久号取 `permanent_invite_max_days`）。尚未开通 Emby 的普通用户 `expired_at=-1` 只表示「未设置」，不按永久号处理：持有待开通资格时以待开通天数封顶，没有待开通资格则不能发码。
 6. 当前层级 `inviteDepth(uid) < invite_max_depth`。
 7. 若 `invite_root_user_limit > 0`，整棵树的后代数量未达上限（`inviteDescendantCount(rootUID)`）。
 8. 若 `invite_limit != -1`，未使用的邀请码数量未达 `invite_limit`（仅统计 `active && use_count==0 && 未过期` 的码）。
@@ -196,7 +196,7 @@ V2 管理资源：`GET /api/v2/admin/invite/tree` 返回 `data.item`，其中 `r
 
 - 实际开通天数 `effectiveDays` 取邀请码的 `days`，若 `<=0` 或超过邀请人剩余天数则收敛到 `maxDays`。
 - **原子消费**：`store.ConsumeInviteCodeAndUpdateUser` 在一次加锁的状态变更里完成「`use_count++` / 标记 `used` / 达到 `use_count_limit` 时置 `active=false`」、写入 `invite_relations[childUID]`（指向邀请人）以及更新被邀请人权益。其中再次校验邀请码 `active`、未超用量上限、未过期、邀请人不等于使用者，任一不满足即整体失败回滚。
-- 被邀请人会被标记为 `PendingEmby`（待开通），写入用户级 `emby_grant_locked=true`，并把过期时间按 `effectiveDays` 顺延，且不会超过邀请人的过期时间（`boundedInviteExpiry`）。该锁不会因后续删除邀请码或断开邀请关系而解除。
+- 被邀请人会被标记为 `PendingEmby`（待开通），写入用户级 `emby_grant_locked=true`，并把过期时间按 `effectiveDays` 顺延，且不会超过邀请人的过期时间（`boundedInviteExpiry`）。真正开通 Emby（自助注册、自助绑定或管理员绑定）时会按邀请人当时的到期时间再封顶一次；邀请人已到期时自助开通会被拒绝（`INVITER_DAYS_SHORT`）。该锁不会因后续删除邀请码或断开邀请关系而解除。
 
 > 邀请码生成时即固定 `use_count_limit = 1`，因此每张邀请码只能被使用一次；用过的码自动失效。被本人删除时，`store.DeleteInviteCode` 会把该邀请码从状态文档物理移除，即使它已经被使用过也不再保留在邀请码列表里。删除码不会解除已经建立的邀请关系，避免“删码”误伤历史上下级；需要断开关系时使用自助 / 管理员 detach 入口。
 

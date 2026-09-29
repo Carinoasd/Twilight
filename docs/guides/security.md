@@ -158,7 +158,7 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 - 用 Nginx / Caddy 暴露单一入口，仅开放 80/443；后端服务端口尽量仅监听内网或本机；限制管理接口访问来源（网段 / IP / WAF）。
 - 后端对所有响应附带安全响应头（`applySecurityHeaders`）：`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin`、`Permissions-Policy`、`X-Permitted-Cross-Domain-Policies: none`、`Cross-Origin-Opener-Policy`、`Cross-Origin-Resource-Policy`，以及一条收紧的 `Content-Security-Policy`（`default-src 'none'`，后端只吐 JSON / 静态上传资源）。WebUI 由 Next.js 提供：`webui/src/proxy.ts`（Next.js middleware）按请求注入 CSP（`connect-src` 从 `NEXT_PUBLIC_API_URL` 推导，附加白名单逐条过 origin 校验），`next.config.mjs` 的 `headers()` 输出与请求上下文无关的静态安全头。Nginx 负责同源反代和缓存边界：只有 `/_next/static/` 下带 hash 的产物长期缓存，HTML 外壳保持 `no-store`。
 - 反向代理若覆盖这些头，应保持同等或更严格策略。
-- 信任代理头需谨慎：仅当 `API.trust_proxy_headers = true` **且** 直接上游落在 `API.trusted_proxy_cidrs` 列表内时，`clientIP` 才消费 `CF-Connecting-IP` / `X-Real-IP` / `X-Forwarded-For`；否则一律用 TCP 对端地址（fail-closed）。`trusted_proxy_cidrs` 为空时即便 `trust_proxy_headers = true` 也不会消费任何代理头，启动期会打 `Error` 提示。`X-Forwarded-For` 按从右向左逐跳验证，避免客户端伪造最左端 IP 绕过 IP 限流 / 黑名单。
+- 信任代理头需谨慎：仅当 `API.trust_proxy_headers = true` **且** 直接上游落在 `API.trusted_proxy_cidrs` 列表内时，`clientIP` 才消费 `CF-Connecting-IP` / `X-Real-IP` / `X-Forwarded-For`；否则一律用 TCP 对端地址（fail-closed）。`trusted_proxy_cidrs` 为空时即便 `trust_proxy_headers = true` 也不会消费任何代理头，启动期会打 `Error` 提示。`X-Forwarded-For` 按从右向左逐跳验证，避免客户端伪造最左端 IP 绕过 IP 限流 / 黑名单。注意 `CF-Connecting-IP` 优先级最高：受信代理必须覆盖或清空客户端自带的这个头（仓库的 `deploy/nginx-twilight.conf` 已 `proxy_set_header CF-Connecting-IP ""`），否则任何人都能伪造 IP；部署在 Cloudflare 后面时应在 nginx 用 `real_ip_header CF-Connecting-IP` 还原真实 IP。
 
 ## 9. 前端资源、背景图与头像
 
@@ -187,6 +187,7 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 - 后台「安全中心」集中展示操作审计、运行日志、违规风控入口；设备/IP 审查入口指向「Emby 管理 → 设备 / IP 审查」页签。安全中心内嵌 `[Security]`、`[RateLimit]`、`[AuditLog]`、`[DeviceLimit]` 的结构化配置编辑。
 - 配置管理中的安全相关配置段保留兼容入口，但默认折叠并提示跳转安全中心；所有保存仍写入同一个 `config.toml`，不创建第二套配置源。
 - 所有新增管理端接口均使用 `AuthAdmin`，状态变更与沙箱执行写入审计日志。Telegram Bot 与群组 inline 管理面板产生的写操作使用 `source=telegram` 记录操作者、目标 UID 与动作详情；审计日志自身的删除、清空、裁剪接口不会在清理后向同一张审计日志表追加新记录，避免管理员无法真正清空日志。V2 审计页面使用 `/api/v2/admin/audit-logs`，V1 路径仅保留兼容入口。
+- 注册、卡码、邀请、续期、签到与注册资格 / 队列的写操作都有显式审计：`register`、`create_regcode` / `update_regcode` / `delete_regcode` / `batch_delete_regcode` / `clear_regcode_usage`、`use_code`、`renew_account`、`create_invite_code` / `create_renew_code` / `delete_invite_code` / `use_invite_code`、`admin_renew_user` / `admin_set_expiry`、`grant_registration_entitlement` / `bulk_grant_registration_entitlement` / `clear_registration_queue`、`signin` / `renew_with_signin_points`。卡码与邀请码只记录 `code_hint` / `code_hints` / `deleted_hints`（保留首尾各 4 个字符），不写完整可兑换码值；以 `code` 结尾的键会被遮罩为 `[REDACTED]`，因此不要改回 `code` 键。续期与改到期记录 `expired_at_before` / `expired_at_after` 或 `before` / `after`。
 - 操作审计保存在独立的 `twilight_audit_logs` 表，写入、检索和保留策略不再重写整份 `twilight_state`。筛选值全部使用 SQL 参数，排序字段只能从后端白名单选择，搜索中的 `%`、`_` 与反斜杠按字面量转义。历史快照里的 `audit_logs` 会在启动时幂等迁移；数据库备份仍包含完整审计历史。
 
 ## 11. 最小权限原则
@@ -238,6 +239,7 @@ Emby 改密的当前 Web 密码证明与个人邮箱验证码证明只启用一�
 `Register.emby_user_limit`（默认 `-1` 不限制）使用统一容量口径：
 
 - 占用名额的来源：已绑定 Emby 的系统用户、`PendingEmby` 待开通资格、自由注册 / 卡码队列中正在创建的请求。
+- 管理员签发的有效注册码 / 白名单码（type 1/3）按剩余次数预占名额；未使用的邀请码不预占 Emby 名额，也不计入系统用户上限（邀请码只能由已注册用户使用），被使用后受邀者进入 `PendingEmby` 才占用。
 - 注册码注册、邀请码开通、用户自助补建、手动绑定、管理员授予开通资格、独立 Emby 账号创建等路径都应在创建或新增绑定前检查容量。
 - 删除 Emby 账号或清理待开通资格后释放对应名额；独立 Emby 账号不写入本地用户表，因此还会额外读取 Emby 端总用户数做兜底。
 

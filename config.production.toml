@@ -136,16 +136,21 @@ group_id = []
 channel_id = []
 # 是否强制订阅指定群/频道才能使用（按 Bot 校验）
 force_subscribe = false
-# 是否启用完整内联面板（关闭后仅保留 /help /bind /me）
+# 是否启用 /twguser 群组用户管理面板（关闭后 /twguser 与已发出面板的按钮全部停用；其他命令不受影响）
 enable_tg_panel = false
 # /twguser 群组用户面板模板；留空使用内置默认。完整占位符说明见后台配置页。
 group_user_panel_template = ""
 # 强制要求绑定/已绑定用户保持在群组内；退群会被自动禁用并同步 Emby
 require_group_membership = false
-# 上面开启时的定时巡检间隔（分钟）
-group_check_interval_minutes = 30
+# 巡检时间由 [Scheduler] group_membership_check_time 决定（每日 HH:MM），
+# 也可以在后台「定时任务」里改成按间隔执行
 # 群组巡检 get_chat_member 并发数；过高可能触发 Telegram 限流
 group_check_concurrency = 24
+# 群组巡检熔断：单轮拟停用人数超过扫描人数的该百分比（且至少 3 人），或超过绝对人数时，
+# 整轮中止、不停用任何人，并把任务标记为失败。群 ID 配错、Bot 被踢出群导致的
+# "chat not found" 等群组层级错误同样会让整轮中止。0 表示关闭对应的一项。
+membership_breaker_percent = 20
+membership_breaker_max = 50
 # 群组禁用/踢出/封禁等写操作并发数；建议低于巡检并发
 group_action_concurrency = 8
 # 退群完全封禁模式：开启后巡检发现退群用户会在所有 GROUP_ID 群里被永久 ban
@@ -242,7 +247,11 @@ invite_code_random_algorithm = "hex10"
 
 # —— 长期无 Emby 的悬空用户自动清理
 auto_cleanup_no_emby = false
+# 天数从注册时间与最近一次解绑 Emby 的时间中较晚者算起
 auto_cleanup_no_emby_days = 7
+# —— 收回长期未使用的 Emby 开通资格（只收回发放超过下面天数仍未创建 Emby 的资格）
+auto_cleanup_pending_emby = false
+auto_cleanup_pending_emby_days = 7
 
 # —— 签到 / 积分（原 [Signin] 节并入此处。可选启用积分续期，无排行榜）
 # 命名说明：原 [Signin].enabled 改为 signin_enabled 避免与 SAR 整体开关混淆；
@@ -359,6 +368,7 @@ api_key_default_per_minute = 300
 # 各 job 的触发时间 / 间隔现在统一在「定时任务」页面按 job 维度调整，
 # 下方字段仅作为「首次拉起或重置」时的默认值；运行时被 DB 中的 schedule 覆盖。
 [Scheduler]
+# 每日任务（HH:MM）使用的时区，IANA 名称；留空使用服务器进程本地时区（Docker 通常是 UTC）
 timezone = "Asia/Shanghai"
 enabled = true
 # 主循环检查间隔（秒，10-300）
@@ -371,12 +381,27 @@ expiring_check_time = "09:00"
 daily_stats_time = "00:05"
 # 会话清理间隔（小时，默认值）
 session_cleanup_interval = 6
-# Emby 用户同步间隔（小时，默认值）
-emby_sync_interval = 6
+# Emby 状态对账间隔（小时）：emby_state_reconcile 自动把「应停用却仍启用」与
+# 「本系统自动停用、Web 已恢复」的 Emby 账号收敛回来；不做名称认领（emby_sync 仍只能手动执行）
+emby_reconcile_interval = 6
 # 清理无 Emby 账号（每日 HH:MM）
 cleanup_no_emby_time = "03:30"
 # 清理未使用 Emby 开通资格（每日 HH:MM）
 cleanup_pending_emby_time = "03:45"
+# Telegram 群成员巡检（每日 HH:MM）
+group_membership_check_time = "03:10"
+# Telegram 重复绑定检查（每日 HH:MM）
+telegram_bindings_check_time = "03:20"
+# 任务失败时用 Telegram 通知管理员（Telegram.admin_id 与绑定了 Telegram 的管理员账号），
+# 恢复成功时再通知一次；同一任务连续失败只通知第一次
+failure_notify = true
+# 可安全重放的每日任务失败后，过多少分钟自动重试一次（每天最多一次）；0 关闭
+retry_failed_after_minutes = 15
+# 定期数据库备份（默认关闭）：每天 auto_backup_time 备份到 Database.backup_dir，
+# 只保留最近 auto_backup_keep 份自动备份；手动备份不会被自动删除
+auto_backup_enabled = false
+auto_backup_time = "04:15"
+auto_backup_keep = 7
 # 清理未使用上传文件（每日 HH:MM）
 cleanup_unused_uploads_time = "02:20"
 # 审计日志自动清理（每日 HH:MM）
@@ -412,8 +437,11 @@ new_media_notify = false
 [BangumiSync]
 # 开启后看完 Emby 自动在 BGM 标记进度（每个用户必须配置自己的 Token）
 enabled = false
-# Emby Webhook 共享密钥；建议设置并在通知 URL 后追加 ?token=该值
+# Webhook 密钥。推荐用它对 "timestamp.body" 做 HMAC-SHA256，放在 X-Twilight-Bangumi-Signature: sha256=<hex>，
+# 并带 X-Twilight-Bangumi-Timestamp；旧的 X-Twilight-Bangumi-Token 头 / ?token= 只在兼容期可用
 webhook_secret = ""
+# 兼容期开关：true 时仍接受共享 token 鉴权（记警告，无法防重放）；确认改用签名后设为 false
+webhook_allow_legacy_token = true
 auto_add_collection = true
 private_collection = true
 # 命中关键词的条目不同步

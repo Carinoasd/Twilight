@@ -29,6 +29,7 @@ func (a *App) handleV2CurrentUser(w http.ResponseWriter, r *http.Request, p Para
 
 func (a *App) handleV2Logout(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
+	a.auditLogout(r, current(r), false)
 	a.revokeSession(r.Context(), current(r).Token)
 	a.clearSessionCookie(w)
 	ok(w, "logged out", nil)
@@ -37,6 +38,7 @@ func (a *App) handleV2Logout(w http.ResponseWriter, r *http.Request, p Params) {
 func (a *App) handleV2LogoutAll(w http.ResponseWriter, r *http.Request, p Params) {
 	w.Header().Set("Cache-Control", "no-store")
 	principal := current(r)
+	a.auditLogout(r, principal, true)
 	a.revokeAllSessions(r.Context(), principal.User.UID)
 	a.clearSessionCookie(w)
 	ok(w, "all sessions logged out", nil)

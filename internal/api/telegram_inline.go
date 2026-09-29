@@ -143,6 +143,17 @@ func telegramGroupUserSearchUsage() string {
 }
 
 func (a *App) telegramSendGroupAdminAuth(ctx context.Context, chatID, commandMessageID int64, query string, message *telegramMessage) {
+	// 修复：同一聊天里同一 sender_chat 身份 30 秒内只发一个验证面板，防止刷屏。
+	var senderID int64
+	if message != nil {
+		senderID = message.SenderChat.ID
+		if senderID == 0 {
+			senderID = message.From.ID
+		}
+	}
+	if !a.telegramPanelThrottle.allow(telegramCooldownKey("auth", chatID, senderID), telegramUnauthorizedCooldown) {
+		return
+	}
 	panel := a.telegramCreateAuthPanel(chatID, commandMessageID, query, telegramReplyTelegramID(message))
 	markup := telegramInlineKeyboard([][]telegramInlineButton{
 		{{Text: "验证管理员身份", Data: "gadm:auth:" + panel.Token}},
@@ -395,6 +406,11 @@ func (a *App) telegramHandleCallback(ctx context.Context, callback *telegramCall
 		return
 	}
 	callbackID := callback.ID
+	// 修复：enable_tg_panel=false 时，已发出的旧面板按钮也不能再执行任何操作。
+	if !a.cfg().TelegramEnablePanel {
+		_ = a.telegramAnswerCallbackQuery(ctx, callbackID, "群组用户管理面板未启用。", true)
+		return
+	}
 	actorID := callback.From.ID
 	message := callback.Message
 	var chatID, messageID int64
@@ -419,8 +435,8 @@ func (a *App) telegramHandleCallback(ctx context.Context, callback *telegramCall
 		return
 	}
 	if !a.telegramAdminID(actorID) {
+		// 修复：非管理员点击只弹出 callback 提示，不再往群里发消息、挂定时器。
 		_ = a.telegramAnswerCallbackQuery(ctx, callbackID, "没有管理员权限。", true)
-		a.telegramSendUnauthorizedAndCleanup(ctx, panel.ChatID, panel.CommandMessageID)
 		return
 	}
 	if mode == "auth" {
@@ -558,19 +574,24 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 		}
 		updated, err := a.store().SetUserActiveAtomic(target.UID, enabled)
 		if err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_"+action+"_user", target.UID, err, map[string]any{"chat_id": panel.ChatID})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "更新用户状态失败: "+err.Error())
 			return
 		}
-		if !enabled {
-			a.sessions().DeleteUser(ctx, updated.UID)
-		}
-		if !enabled {
-			_, _ = a.disableRemoteEmbyForWebState(ctx, updated)
-		}
-		a.auditTelegramAction(actorID, "telegram_panel_"+action+"_user", "admin", target.UID, map[string]any{
+		detail := map[string]any{
 			"chat_id": panel.ChatID,
 			"enabled": enabled,
-		})
+		}
+		if !enabled {
+			a.sessions().DeleteUser(ctx, updated.UID)
+			// 修复：Emby 同步结果写进审计，失败不再被吞掉。
+			synced, syncErr := a.disableRemoteEmbyForWebState(ctx, updated)
+			detail["emby_synced"] = synced
+			if syncErr != nil {
+				detail["emby_error"] = telegramAuditError(syncErr)
+			}
+		}
+		a.auditTelegramAction(actorID, "telegram_panel_"+action+"_user", "admin", target.UID, detail)
 		a.telegramEditPanelWithNotice(ctx, panel, updated, "用户状态已更新。")
 	case "emby_disable", "emby_enable":
 		if a.telegramProtectedTarget(target) {
@@ -591,6 +612,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 			return
 		}
 		if err := a.embyApplyEnabledState(ctx, target.UID, target.EmbyID, enableEmby); err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_"+action, target.UID, err, map[string]any{"chat_id": panel.ChatID})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "Emby 状态更新失败: "+telegramPanelSafeError(err))
 			return
 		}
@@ -628,6 +650,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 			return nil
 		})
 		if err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_grant_register", target.UID, err, map[string]any{"chat_id": panel.ChatID, "days": days})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "授予注册资格失败: "+err.Error())
 			return
 		}
@@ -654,6 +677,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 			return
 		}
 		if err := a.deleteLocalUser(ctx, target); err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_delete_user", target.UID, err, map[string]any{"chat_id": panel.ChatID, "target_username": target.Username})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "删除用户失败: "+err.Error())
 			return
 		}
@@ -694,6 +718,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 		}
 		updated, err := a.telegramDeleteTargetEmby(ctx, target)
 		if err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_delete_emby", target.UID, err, map[string]any{"chat_id": panel.ChatID})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "删除 Emby 账号失败: "+telegramPanelSafeError(err))
 			return
 		}
@@ -717,6 +742,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 			return nil
 		})
 		if err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_"+action, target.UID, err, map[string]any{"chat_id": panel.ChatID})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "更新白名单状态失败: "+err.Error())
 			return
 		}
@@ -745,6 +771,7 @@ func (a *App) telegramApplyPanelAction(ctx context.Context, panel telegramPanelC
 			err = a.telegramBanChatMember(ctx, fmt.Sprint(panel.ChatID), target.TelegramID)
 		}
 		if err != nil {
+			a.auditTelegramFailure(actorID, "telegram_panel_"+action+"_telegram_group", target.UID, fmt.Errorf("%s", a.telegramSanitizeError(err)), map[string]any{"chat_id": panel.ChatID})
 			a.telegramEditPanelWithNotice(ctx, panel, target, "Telegram 群组操作失败: "+a.telegramSanitizeError(err))
 			return
 		}
@@ -864,7 +891,9 @@ func (a *App) telegramGroupUserPanelPlaceholders(ctx context.Context, chatID int
 	} else if u.BGMMode {
 		bgmSyncStatus = "可同步"
 	}
-	email := strings.TrimSpace(u.Email)
+	// 修复：面板发在群里，所有群成员可见；{email} 只给遮罩后的邮箱，
+	// {registration_code} 只给卡码前缀（多次使用码可能仍有效，不能完整外泄）。
+	email := maskEmail(strings.TrimSpace(u.Email))
 	if email == "" {
 		email = "-"
 	}
@@ -897,7 +926,7 @@ func (a *App) telegramGroupUserPanelPlaceholders(ctx context.Context, chatID int
 		"emby_username":        embyUsername,
 		"emby_unbind_allowed":  telegramYesNoLabel(a.userCanSelfUnbindEmby(u)),
 		"registration_source":  registrationSourceLabel(u.RegistrationSource),
-		"registration_code":    firstNonEmpty(u.RegistrationCode, "-"),
+		"registration_code":    telegramMaskedRegistrationCode(u.RegistrationCode),
 		"pending_emby":         telegramYesNoLabel(u.PendingEmby),
 		"pending_emby_days":    telegramPendingEmbyDaysLabel(u.PendingEmbyDays),
 		"emby_remote_block":    remote.Block,
@@ -1390,4 +1419,17 @@ func telegramRandomToken() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
+}
+
+// telegramMaskedRegistrationCode 只保留卡码前 4 个字符，其余用 *** 代替。
+func telegramMaskedRegistrationCode(code string) string {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "-"
+	}
+	runes := []rune(code)
+	if len(runes) <= 4 {
+		return "***"
+	}
+	return string(runes[:4]) + "***"
 }

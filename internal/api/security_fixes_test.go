@@ -212,24 +212,23 @@ func TestFirstRegistrantIsNotAutoAdmin(t *testing.T) {
 }
 
 // TestConfiguredUsernameIsPromotedToAdmin 正向：配置了 admin_usernames 时，
-// 用该用户名注册的账户会被提升为管理员（且仅该用户名）。
+// 空库首位用该用户名注册的账户会被提升为管理员。
 func TestConfiguredUsernameIsPromotedToAdmin(t *testing.T) {
 	app := newTestApp(t) // harness 配置 AdminUsernames=["admin"]
-	// 先注册一个非配置用户名 —— 即便是首个用户也不应是 admin。
-	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"plainuser","password":"Plain123456"}`, nil); resp.Code != http.StatusCreated {
-		t.Fatalf("register plainuser status=%d body=%s", resp.Code, resp.Body.String())
-	}
-	plain, _ := app.store().FindUserByUsername("plainuser")
-	if plain.Role == store.RoleAdmin {
-		t.Fatalf("non-configured first user must not be admin: %#v", plain)
-	}
-	// 配置的用户名注册后应成为 admin。
 	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"admin","password":"Admin123456"}`, nil); resp.Code != http.StatusCreated {
 		t.Fatalf("register admin status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	admin, ok := app.store().FindUserByUsername("admin")
 	if !ok || admin.Role != store.RoleAdmin || !admin.Active {
 		t.Fatalf("configured admin username was not promoted: ok=%v user=%#v", ok, admin)
+	}
+	// 之后注册的非配置用户名不是 admin。
+	if resp := doJSON(app, http.MethodPost, "/api/v1/users/register", `{"username":"plainuser","password":"Plain123456"}`, nil); resp.Code != http.StatusCreated {
+		t.Fatalf("register plainuser status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	plain, _ := app.store().FindUserByUsername("plainuser")
+	if plain.Role == store.RoleAdmin {
+		t.Fatalf("non-configured user must not be admin: %#v", plain)
 	}
 }
 
@@ -311,5 +310,43 @@ func TestUIDRouteRejectsMalformedTarget(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body.String(), "uid") {
 		t.Fatalf("malformed uid response should explain the parameter: %s", resp.Body.String())
+	}
+}
+
+// TestRepoURLCannotBeSetWhenMissingOnDisk 防回归：磁盘配置没有 repo_url 行
+// （值来自默认）时，网页提交的 repo_url（规范位置或根层别名）都不得生效。
+func TestRepoURLCannotBeSetWhenMissingOnDisk(t *testing.T) {
+	for name, submittedRepo := range map[string]string{
+		"section": "\n[SystemUpdate]\nrepo_url = \"https://evil.example/fork.git\"\nbranch = \"main\"\n",
+		"root":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := newTestApp(t)
+			app.cfg().ConfigFile = filepath.Join(app.cfg().DatabaseDir, "config.toml")
+			databaseConfig := "[Database]\n" +
+				"driver = \"postgres\"\n" +
+				"backup_dir = " + strconv.Quote(app.cfg().DatabaseBackupDir) + "\n"
+			existing := "[Global]\nserver_name = \"old\"\n\n" + databaseConfig
+			if err := os.WriteFile(app.cfg().ConfigFile, []byte(existing), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			submitted := "[Global]\nserver_name = \"new\"\n\n" + databaseConfig + submittedRepo
+			if name == "root" {
+				submitted = "repo_url = \"https://evil.example/fork.git\"\n" + submitted
+			}
+			_, status, _ := app.saveConfigContent(submitted)
+			data, _ := os.ReadFile(app.cfg().ConfigFile)
+			if status == http.StatusOK {
+				cfg, err := config.LoadFileOnly(app.cfg().ConfigFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(cfg.SystemUpdateRepoURL, "evil.example") || strings.Contains(app.cfg().SystemUpdateRepoURL, "evil.example") {
+					t.Fatalf("SECURITY REGRESSION: repo_url set via web config: file=%q\n%s", cfg.SystemUpdateRepoURL, data)
+				}
+			} else if strings.Contains(string(data), "evil.example") {
+				t.Fatalf("rejected save must not touch disk:\n%s", data)
+			}
+		})
 	}
 }

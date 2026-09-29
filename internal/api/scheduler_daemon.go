@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	// 内嵌时区数据库：精简镜像可能没有 /usr/share/zoneinfo，Scheduler.timezone 仍要能解析。
+	_ "time/tzdata"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -71,7 +73,7 @@ func (a *App) runSchedulerLoop(ctx context.Context) (err error) {
 			return nil
 		}
 		a.reloadConfigIfChanged()
-		now := time.Now()
+		now := time.Now().In(a.schedulerLocation())
 		interval := clamp(a.cfg().SchedulerTickIntervalSeconds, 10, 300)
 		if interval != lastInterval {
 			nextDue = time.Time{}
@@ -109,23 +111,56 @@ func (a *App) runDueSchedulerJobs(ctx context.Context) {
 		zap.L().Warn("scheduler history unavailable")
 		return
 	}
-	now := time.Now()
+	// cron_daily 的「几点」按 Scheduler.timezone 解释（schedulerJobDueFromSnapshot 用 now.Location()）。
+	now := time.Now().In(a.schedulerLocation())
 	for _, id := range ids {
 		spec := a.schedulerDefaultTriggerSpec(id)
 		schedule := overview.Schedules[id]
 		if schedule.IsCustom {
 			spec = schedule.TriggerSpec
 		}
-		if schedulerTriggerDisabled(spec) || !schedulerJobDueFromSnapshot(spec, now, overview.Runs[id]) {
+		if schedulerTriggerDisabled(spec) {
 			continue
+		}
+		trigger := "scheduler"
+		if !schedulerJobDueFromSnapshot(spec, now, overview.Runs[id]) {
+			// 每日任务失败后不必等 24 小时：可安全重放的任务补一次重试。
+			if !a.schedulerRetryDue(id, spec, now, overview.Runs[id]) {
+				continue
+			}
+			trigger = schedulerRetryTrigger
 		}
 		last := overview.Runs[id].LatestAuto.ID
 		params := a.schedulerRuntimeParamsFromSchedule(id, schedule.RuntimeParams)
-		_, _, err = a.store().EnqueueSchedulerRun(ctx, store.SchedulerRun{JobID: id, Type: "auto", Trigger: "scheduler", Params: params, ScheduleRevision: schedule.Revision}, &last)
+		_, _, err = a.store().EnqueueSchedulerRun(ctx, store.SchedulerRun{JobID: id, Type: "auto", Trigger: trigger, Params: params, ScheduleRevision: schedule.Revision}, &last)
 		if err != nil {
 			zap.L().Warn("scheduler enqueue failed", zap.String("job_id", id))
 		}
 	}
+}
+
+// schedulerLocation 返回调度使用的时区。Scheduler.timezone 为空时用进程本地时区；
+// 名字无效时同样回退本地时区并告警（只在值变化时告警一次）。
+func (a *App) schedulerLocation() *time.Location {
+	name := strings.TrimSpace(a.cfg().SchedulerTimezone)
+	if name == "" {
+		return time.Local
+	}
+	if cached := a.schedulerTZCache.Load(); cached != nil && cached.name == name {
+		return cached.loc
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		zap.L().Warn("invalid Scheduler.timezone, falling back to local time", zap.String("timezone", name), zap.Error(err))
+		loc = time.Local
+	}
+	a.schedulerTZCache.Store(&schedulerTZEntry{name: name, loc: loc})
+	return loc
+}
+
+type schedulerTZEntry struct {
+	name string
+	loc  *time.Location
 }
 
 func schedulerJobEnabledByConfig(systemUpdateEnabled bool, job map[string]any) bool {
@@ -214,6 +249,13 @@ func schedulerFinishedRun(jobID, runType, trigger string, started int64, summary
 			summary["terminated"] = true
 		}
 	}
+	// 任务没有返回 error、但摘要明确报告 success=false（例如部分用户处理失败、
+	// Emby 停用失败）时，旧实现仍显示「成功」，管理员看不到问题。这里一律按失败处理。
+	if err == nil && schedulerSummaryReportsFailure(summary) {
+		status = "failed"
+		message, _ = sanitizeSchedulerText(firstNonEmpty(asString(summary["error"]), "job reported failure (success=false)"), schedulerMaxPersistedErrorRunes)
+		errText = message
+	}
 	finished := time.Now().Unix()
 	return store.SchedulerRun{
 		JobID:      jobID,
@@ -228,6 +270,15 @@ func schedulerFinishedRun(jobID, runType, trigger string, started int64, summary
 		Logs:       sanitizeSchedulerLogs(logs),
 		Error:      errText,
 	}
+}
+
+// schedulerSummaryReportsFailure 只认显式的 success=false；没有这个键的摘要不算失败。
+func schedulerSummaryReportsFailure(summary map[string]any) bool {
+	if summary == nil {
+		return false
+	}
+	value, ok := summary["success"]
+	return ok && !boolish(value)
 }
 
 func sanitizeSchedulerSummary(summary map[string]any) map[string]any {
@@ -410,6 +461,12 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 			hours = 6
 		}
 		return map[string]any{"type": "interval", "seconds": hours * 3600}
+	case "emby_state_reconcile":
+		hours := a.cfg().SchedulerEmbyReconcileInterval
+		if hours <= 0 {
+			hours = 6
+		}
+		return map[string]any{"type": "interval", "seconds": hours * 3600}
 	case "cleanup_no_emby":
 		return dailySpec(a.cfg().SchedulerCleanupNoEmbyTime, 3, 30)
 	case "cleanup_pending_emby_entitlements":
@@ -428,7 +485,15 @@ func (a *App) schedulerDefaultTriggerSpec(jobID string) map[string]any {
 			return map[string]any{"type": "interval", "seconds": hours * 3600}
 		}
 	case "cleanup_unlinked_emby":
-		return dailySpec("05:00", 5, 0)
+		// 删除远端账号的维护任务默认不自动执行（旧实现列表却显示 05:00 的下次时间）。
+		// 管理员在后台保存自定义排程即表示启用自动执行（仍默认仅扫描不删除）。
+		return map[string]any{"type": "manual"}
+	case "auto_backup_database":
+		return dailySpec(a.cfg().SchedulerAutoBackupTime, 4, 15)
+	case "enforce_group_membership":
+		return dailySpec(a.cfg().SchedulerGroupMembershipCheckTime, 3, 10)
+	case "check_telegram_bindings":
+		return dailySpec(a.cfg().SchedulerTelegramBindingsCheckTime, 3, 20)
 	case "emby_sync", "cleanup_emby_devices", "kick_unknown_group_members":
 		return map[string]any{"type": "manual"}
 	case "cleanup_unused_uploads":

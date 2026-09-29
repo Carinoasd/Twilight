@@ -140,6 +140,8 @@ func (s *Store) ConsumeEmailVerificationAtomic(id, candidateHash string, now int
 	var out EmailVerification
 	result := EmailVerificationNotFound
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		out, result = EmailVerification{}, EmailVerificationNotFound
 		v, ok := s.state.EmailVerifications[id]
 		if !ok {
 			result = EmailVerificationNotFound
@@ -390,6 +392,8 @@ func (s *Store) CleanupExpiredEmailVerifications(now int64) (int, error) {
 	defer s.mu.Unlock()
 	deleted := 0
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		deleted = 0
 		for id, v := range s.state.EmailVerifications {
 			if v.ExpiresAt > 0 && v.ExpiresAt <= now {
 				delete(s.state.EmailVerifications, id)
@@ -409,6 +413,8 @@ func (s *Store) ClearUnverifiedEmails() (total int, cleared int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		total, cleared = 0, 0
 		for uid, u := range s.state.Users {
 			if u.Email != "" && !u.EmailVerified {
 				old := u
@@ -431,6 +437,8 @@ func (s *Store) CleanupUnverifiedEmailsByAge(cutoffUnix int64) (total int, clear
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err = s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		total, cleared = 0, 0
 		for uid, u := range s.state.Users {
 			if u.Email != "" && !u.EmailVerified && u.CreatedAt > 0 && u.CreatedAt < cutoffUnix {
 				old := u
@@ -545,6 +553,8 @@ func (s *Store) SetUserEmailVerifiedAtomic(uid int64, email string, verified, fo
 	defer s.mu.Unlock()
 	var updated User
 	err := s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		updated = User{}
 		u, ok := s.state.Users[uid]
 		if !ok {
 			return ErrNotFound

@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/lib/i18n";
 
 /**
  * Next.js App Router 路由级错误边界。
@@ -19,6 +20,7 @@ export default function GlobalError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const { t } = useI18n();
   useEffect(() => {
     if (process.env.NODE_ENV !== "production") {
       // eslint-disable-next-line no-console
@@ -35,14 +37,14 @@ export default function GlobalError({
       <div className="w-full max-w-md rounded-lg border border-destructive/40 bg-card p-6 shadow-sm">
         <div className="mb-3 flex items-center gap-2 text-destructive">
           <AlertTriangle className="h-5 w-5" aria-hidden="true" />
-          <h1 className="text-base font-semibold">页面崩溃了</h1>
+          <h1 className="text-base font-semibold">{t("errorPage.title")}</h1>
         </div>
         <p className="mb-4 text-sm text-muted-foreground">
-          抱歉，页面遇到未预期错误。可以先重试；如果反复失败，请刷新或回到首页。
+          {t("errorPage.description")}
         </p>
         {error.digest && (
           <p className="mb-3 text-xs text-muted-foreground">
-            错误 ID：<code className="rounded bg-muted px-1 py-0.5">{error.digest}</code>
+            {t("errorPage.errorId")}<code className="rounded bg-muted px-1 py-0.5">{error.digest}</code>
           </p>
         )}
         {process.env.NODE_ENV !== "production" && error.message && (
@@ -53,7 +55,7 @@ export default function GlobalError({
         <div className="flex flex-wrap gap-2">
           <Button size="sm" onClick={reset}>
             <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden="true" />
-            重试
+            {t("errorPage.retry")}
           </Button>
           <Button
             size="sm"
@@ -64,7 +66,7 @@ export default function GlobalError({
               }
             }}
           >
-            回到首页
+            {t("errorPage.home")}
           </Button>
         </div>
       </div>

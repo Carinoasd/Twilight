@@ -327,7 +327,10 @@ func (s *Store) UpsertBangumiCollectionCache(entry BangumiCollectionCacheEntry) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	input := entry
 	return s.mutateAndSaveLocked(func() error {
+		// 冲突重放时重置闭包外的结果变量，避免沿用上一轮的值或重复累加。
+		entry = input
 		if s.state.BangumiCollectionCache == nil {
 			s.state.BangumiCollectionCache = map[string]BangumiCollectionCacheEntry{}
 		}

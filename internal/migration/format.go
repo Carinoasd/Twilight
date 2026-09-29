@@ -366,13 +366,22 @@ func writeZipFile(zw *zip.Writer, name string, data []byte) error {
 }
 
 func Open(data []byte, password string, limits Limits) (Archive, error) {
-	if len(data) == 0 {
+	return OpenReaderAt(bytes.NewReader(data), int64(len(data)), password, limits)
+}
+
+// OpenReaderAt 与 Open 相同，但直接从 io.ReaderAt 读取外层 ZIP（例如 HTTP 上传
+// 已落到临时文件的 multipart.File），不必先把最多约 528MB 的整个封包读进内存。
+func OpenReaderAt(src io.ReaderAt, size int64, password string, limits Limits) (Archive, error) {
+	if src == nil || size <= 0 {
 		return Archive{}, fmt.Errorf("%w: empty archive", ErrInvalidArchive)
+	}
+	if size > MaxArchiveBytes {
+		return Archive{}, ErrArchiveLimit
 	}
 	if limits.MaxFiles <= 0 || limits.MaxFileBytes <= 0 || limits.MaxTotalBytes <= 0 || limits.MaxManifest <= 0 {
 		limits = DefaultLimits()
 	}
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	reader, err := zip.NewReader(src, size)
 	if err != nil {
 		return Archive{}, fmt.Errorf("%w: %v", ErrInvalidArchive, err)
 	}

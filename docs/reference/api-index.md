@@ -112,7 +112,8 @@ V2 基础协议入口使用 `/api/v2`，当前只提供不带秘密的能力协�
 | PUT | `/api/v2/admin/announcements/{announcement_id}` | Admin | V2 更新公告 |
 | DELETE | `/api/v2/admin/announcements/{announcement_id}` | Admin | V2 删除公告 |
 | GET | `/api/v2/admin/audit-logs` | Admin | V2 操作审计日志分页资源；服务端筛选、参数化排序且不缓存 |
-| DELETE | `/api/v2/admin/audit-logs/{log_id}` | Admin | V2 删除单条审计日志；兼容 `log_id` 路由参数 |
+| GET | `/api/v2/admin/audit-logs/actions` | Admin | 审计表中出现过的 action（含条数）与可选 source，供筛选下拉使用 |
+| DELETE | `/api/v2/admin/audit-logs/{log_id}` | Admin | V2 删除单条审计日志；需要 `DELETE_AUDIT_LOG`，删除后写不可删的 `delete_audit_log` |
 | POST | `/api/v2/admin/audit-logs/clear` | Admin | V2 清空审计日志；需要 `CLEAR_AUDIT_LOGS` |
 | POST | `/api/v2/admin/audit-logs/prune` | Admin | V2 按条数/天数裁剪审计日志；需要 `PRUNE_AUDIT_LOGS` |
 | GET | `/api/v2/admin/config/schema` | Admin | V2 读取脱敏结构化配置 schema；不返回服务器路径或 secret 明文 |
@@ -566,7 +567,8 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | DELETE | `/api/v2/admin/violations/{violation_id}` | Admin | V2 删除单条违规记录 |
 | POST | `/api/v2/admin/violations/clear` | Admin | V2 清空违规记录；需要 `CLEAR_VIOLATIONS` 确认短语 |
 | GET | `/api/v1/admin/audit-logs` | Admin | 操作审计日志列表（支持 category/action/uid/search 筛选与分页） |
-| DELETE | `/api/v1/admin/audit-logs/{log_id}` | Admin | 删除单条操作审计日志 |
+| GET | `/api/v1/admin/audit-logs/actions` | Admin | 审计表中出现过的 action 列表 |
+| DELETE | `/api/v1/admin/audit-logs/{log_id}` | Admin | 删除单条操作审计日志（需确认短语 `DELETE_AUDIT_LOG`） |
 | POST | `/api/v1/admin/audit-logs/clear` | Admin | 清空全部审计日志（需确认短语 `CLEAR_AUDIT_LOGS`） |
 | GET | `/api/v1/admin/bangumi/users` | Admin | 列出所有用户的 Bangumi 同步状态 |
 | GET | `/api/v1/admin/bangumi/records/{uid}` | Admin | 查看某用户的播放记录 |
@@ -771,7 +773,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | POST | `/api/v2/security/devices/{device_id}/trust` | User | 把设备标记为受信任（免风控/二次校验）：置 `Trusted=true` 且 `Blocked=false`。写审计 `trust_device` |
 | GET | `/api/v2/security/login-history` | User | 自己的登录历史：`limit` 默认 50、钳制 1–100；返回 `{records, total}` |
 | GET | `/api/v2/admin/security/ip-blacklist` | Admin | 列出全局 IP 黑名单条目 |
-| POST | `/api/v2/admin/security/ip-blacklist` | Admin | 新增黑名单条目：`ip` 必填，`reason` 可选，`hours` 为 `-1` 或不传表示永久、>0 为封禁小时数（0 或别的负数返回 400）。写审计 `add_ip_blacklist` |
+| POST | `/api/v2/admin/security/ip-blacklist` | Admin | 新增黑名单条目：`ip` 必填（单个 IPv4/IPv6 或 CIDR 前缀，服务端校验并规范化，格式错误返回 400 `IP_INVALID`），`reason` 可选，`hours` 为 `-1` 或不传表示永久、>0 为封禁小时数（0 或别的负数返回 400）。写审计 `add_ip_blacklist`（`expire_at` 为过期时间戳，`-1` 表示永久） |
 | DELETE | `/api/v2/admin/security/ip-blacklist` | Admin | 将 IP 移出黑名单，DELETE 请求体传 `{ip}`。写审计 `delete_ip_blacklist` |
 | GET | `/api/v2/admin/security/suspicious` | Admin | 可疑登录活动：`hours` 默认 24，返回被拦截的登录记录（`uid`、`ip`、`device`、`time`、`reason`） |
 | GET | `/api/v2/admin/security/users/{uid}/devices` | Admin | 管理员查看**任意用户**的设备列表；非 Admin 访问带 `:uid` 的路径直接 403，uid 非正整数 400 |
@@ -787,7 +789,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | GET | `/api/v2/me/telegram/link/{id}/status` | User | 查自己签发的绑定链接状态。带 UID 校验，只能查自己的；没有长轮询，前端按 `poll_interval` 轮询 |
 | POST | `/api/v2/me/telegram/rebind-complete` | User | 结束自己的 Telegram 换绑流程：校验新账号已加入要求的群组/频道，未加入返回 403 `TG_BIND_GROUP_CHECK_FAILED` 并保持换绑中 |
 | POST | `/api/v2/me/use-code` | User | 使用注册码/续期码/邀请码：`code`（或 `reg_code`）必填，`check_only` 为 true 时只预览不消费，`emby_username` 可选。要求邮箱已验证，限流 10 次/分钟 |
-| GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}` <!-- 待确认 --> |
+| GET | `/api/v2/me/use-code/status` | User | 与 `/registration/emby/queue-status` 共用 handler 的登录用户视角；当前为终态占位实现，始终返回 `{status:"success", pending:false, terminal:true}`；后端不签发 `status_token`，WebUI 已不再轮询，仅为旧客户端兼容保留 |
 | POST | `/api/v2/me/renew` | User | 用续期码自助续期：`reg_code` 必填；拒绝"绑了 Emby 管理员账号的非系统管理员"（403），限流 10 次/分钟；只接受 `type == 2` 的续期码 |
 | PUT | `/api/v2/settings/username` | User | 修改自己的用户名：`new_username` 必填并通过 `validate.ValidateUsername`；Emby 管理员账号的非系统管理员被 403 拦截 |
 | PUT | `/api/v2/settings/password/generate` | User | 生成并强制重置随机密码（`Twilight-` + 32 位 hex），限流 5 次/分钟；重置后**先吊销该用户全部会话再为当前调用方签发新会话**（会踢掉其他设备） |
@@ -801,7 +803,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | ---- | ---- | ---- | ---- |
-| GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列 <!-- 待确认 --> |
+| GET | `/api/v2/registration/emby/queue-status` | Public | 注册/开通排队状态查询。当前为终态占位实现，始终返回 `status:"success"`、`pending:false`、`terminal:true`，不读真实队列；后端不签发 `status_token`，WebUI 已不再轮询，仅为旧客户端兼容保留 |
 | GET | `/api/v2/registration/regcode/check` | Public | 注册前校验注册码，按 IP 限流 10 次/分钟。**诱饵码与定向码（指名用户名/Telegram/TargetUID）一律按 404 处理**，避免枚举；命中返回 `type`、`type_name`、`days`、`valid` |
 | GET | `/api/v2/registration/telegram/link/{id}/status` | Public | 注册场景查绑定链接状态：必须携带签发时返回的 `X-Telegram-Link-Secret` 头，否则一律 `not_found`。503 不作为过期处理 |
 | GET | `/api/v2/signin/config` | Public | 签到公开规则：`enabled`、`currency_name`、`daily_min`、`daily_max`、`streak_bonus_enabled`、`bonus_table`、`reset_after_miss`、`renewal`。与 `/system/config` 的 `signin` 字段同源 |

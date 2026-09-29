@@ -25,7 +25,7 @@ func (a *App) handleTelegramUpdateBatch(ctx context.Context, updates []telegramU
 		zap.L().Warn("telegram update batch state refresh failed", zap.Error(err))
 		return false
 	}
-	processTelegramUpdateBatch(ctx, updates, telegramUpdateBatchMaxWorkers, a.handleTelegramUpdateSafely)
+	processTelegramUpdateBatch(ctx, updates, telegramUpdateBatchMaxWorkers, telegramBoundedUpdateHandler(telegramUpdateHandleLimit, a.handleTelegramUpdateSafely))
 	return true
 }
 
