@@ -345,6 +345,7 @@ func (a *App) registerV2Routes() {
 	a.add(http.MethodGet, "/api/v2/emby/latest", AuthUser, a.handleV2EmbyLatest)
 	a.add(http.MethodGet, "/api/v2/emby/sessions/count", AuthUser, a.handleV2EmbySessionCount)
 	a.add(http.MethodGet, "/api/v2/emby/items/:item_id/image", AuthUser, a.handleV2EmbyItemImage)
+	a.add(http.MethodGet, "/api/v2/emby/play-rank/avatars/:filename", AuthUser, a.handleV2PlayRankAvatar)
 	a.add(http.MethodPost, "/api/v2/emby/urls/probe", AuthUser, a.handleV2EmbyURLProbe)
 	a.add(http.MethodPost, "/api/v2/emby/bangumi/webhook", AuthPublic, a.handleV2BangumiWebhook)
 	a.add(http.MethodGet, "/api/v2/admin/emby/activity", AuthAdmin, a.handleV2AdminEmbyActivity)

@@ -808,14 +808,16 @@ type PlaybackRankOptions struct {
 // 这部剧被看过的集数。"播放 30 次"到底是 30 个人各看一集、还是一个人刷了同一集
 // 30 遍，光看 Plays 分不出来，必须靠它。
 type PlaybackMediaRank struct {
-	ItemID     string
-	Title      string
-	SeriesName string
-	MediaType  string
-	Plays      int
-	Duration   int64
-	Viewers    int
-	Episodes   int
+	// RepresentativeItemID resolves artwork without exposing an episode as the series identity.
+	RepresentativeItemID string
+	ItemID               string
+	Title                string
+	SeriesName           string
+	MediaType            string
+	Plays                int
+	Duration             int64
+	Viewers              int
+	Episodes             int
 }
 
 // PlaybackUserRank 是一个用户在同一时间窗内的聚合。UID 只下发给管理员接口，
@@ -913,7 +915,7 @@ const playbackSeriesKey = `COALESCE(NULLIF(series_name, ''), NULLIF(title, ''), 
 
 func queryPlaybackMediaRankDB(db *sql.DB, opts PlaybackRankOptions) ([]PlaybackMediaRank, error) {
 	query := `SELECT item_id, MAX(title), COALESCE(MAX(series_name), ''), COALESCE(MAX(media_type), ''),
-COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id)
+COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id), MIN(item_id COLLATE "C")
 FROM twilight_playback_records
 WHERE played_at >= $1 AND item_id <> ''
 GROUP BY item_id
@@ -923,7 +925,7 @@ LIMIT $2`
 	case PlaybackRankGroupSeries:
 		query = `SELECT '' AS item_id, MAX(` + playbackSeriesKey + `) AS title, '' AS series_name,
 COALESCE(MAX(media_type), '') AS media_type,
-COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id)
+COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id), MIN(item_id COLLATE "C")
 FROM twilight_playback_records
 WHERE played_at >= $1 AND item_id <> '' AND ` + playbackSeriesKey + ` <> '' AND ` + playbackSeriesFilterSQL + `
 GROUP BY ` + playbackSeriesKey + `
@@ -931,7 +933,7 @@ ORDER BY ` + playbackRankOrderBy(opts.SortBy, "2") + `
 LIMIT $2`
 	case PlaybackRankGroupMovie:
 		query = `SELECT item_id, MAX(title), '' AS series_name, COALESCE(MAX(media_type), ''),
-COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id)
+COUNT(*), COALESCE(SUM(duration), 0), COUNT(DISTINCT uid), COUNT(DISTINCT item_id), MIN(item_id COLLATE "C")
 FROM twilight_playback_records
 WHERE played_at >= $1 AND item_id <> '' AND ` + playbackMovieFilterSQL + `
 GROUP BY item_id
@@ -948,7 +950,7 @@ LIMIT $2`
 	out := make([]PlaybackMediaRank, 0, opts.Limit)
 	for rows.Next() {
 		var item PlaybackMediaRank
-		if err := rows.Scan(&item.ItemID, &item.Title, &item.SeriesName, &item.MediaType, &item.Plays, &item.Duration, &item.Viewers, &item.Episodes); err != nil {
+		if err := rows.Scan(&item.ItemID, &item.Title, &item.SeriesName, &item.MediaType, &item.Plays, &item.Duration, &item.Viewers, &item.Episodes, &item.RepresentativeItemID); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -1034,6 +1036,9 @@ func (s *Store) playbackRankFromMemory(opts PlaybackRankOptions) ([]PlaybackMedi
 			}
 			agg.item.Plays++
 			agg.item.Duration += record.Duration
+			if agg.item.RepresentativeItemID == "" || record.ItemID < agg.item.RepresentativeItemID {
+				agg.item.RepresentativeItemID = record.ItemID
+			}
 			if agg.item.Title == "" {
 				agg.item.Title = record.Title
 			}

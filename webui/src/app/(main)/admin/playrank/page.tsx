@@ -16,18 +16,14 @@ import { useToast } from "@/hooks/use-toast";
 import { useI18n } from "@/lib/i18n";
 import { api, type PlayRankGroupBy, type PlayRankRange, type PlayRankResponse, type PlayRankSortBy } from "@/lib/api";
 import { PlayRankMediaLabel } from "@/components/play-rank-media-label";
+import { PlayRankImage } from "@/components/play-rank-image";
+import { PlayRankMetrics } from "@/components/play-rank-metrics";
 
 const rankRanges: PlayRankRange[] = ["day", "week", "month", "all"];
 // 三个榜单一次只看一个：剧集榜、电影榜、用户榜。单集明细不再在界面上展示。
 type RankBoard = "series" | "movie" | "users";
 const rankBoards: RankBoard[] = ["series", "movie", "users"];
 const rankSorts: PlayRankSortBy[] = ["plays", "duration"];
-
-// 当前排序指标用正常字重显示，另一个压暗。不这么做的话，两列数字并排、
-// 看的人不知道这一屏究竟是照哪一列排的。
-function metricClass(active: boolean): string {
-  return active ? "text-sm font-medium text-foreground" : "text-xs text-muted-foreground";
-}
 
 // 同步窗口：活动日志只能按"过去 N 小时"回拉，默认 24 小时。想让榜单覆盖更久的
 // 历史，得先按更长的窗口把日志拉回来——否则库里没有数据，切到总榜也是空的。
@@ -312,28 +308,29 @@ export default function AdminPlayRankPage() {
                 <h2 className="text-sm font-semibold">{t("playRank.userTitle")}</h2>
                 <Badge variant="secondary" className="ml-auto text-xs">{users.length}</Badge>
               </div>
-              <div className="flex items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground">
+              <div className="hidden items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground sm:flex">
                 <span className="w-6 shrink-0 text-center">{t("playRank.rank")}</span>
                 <span className="min-w-0 flex-1">{t("playRank.username")}</span>
                 <span className="w-14 shrink-0 text-right">{t("playRank.titles")}</span>
-                <span className={`shrink-0 ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
+                <span className={`w-12 shrink-0 text-right ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
                 <span className={`w-20 shrink-0 text-right ${sortBy === "duration" ? "text-foreground" : ""}`}>{t("playRank.duration")}</span>
               </div>
               {users.length === 0 ? (
                 <Empty hint={emptyHint} />
               ) : (
                 users.map((item, index) => (
-                  <div key={`${item.uid ?? item.user_name}-${index}`} className="flex items-center gap-3 border-t border-border/50 px-3 py-2.5">
+                  <div key={`${item.uid ?? item.user_name}-${index}`} className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-t border-border/50 px-3 py-2.5 sm:flex sm:gap-3">
                     <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{item.username || item.user_name || t("playRank.unknown")}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {t("playRank.uid")} {item.uid ?? "—"}
-                      </p>
+                    <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
+                      <PlayRankImage src={item.avatar_url} kind="avatar" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{item.username || item.user_name || t("playRank.unknown")}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {t("playRank.uid")} {item.uid ?? "—"}
+                        </p>
+                      </div>
                     </div>
-                    <span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{item.items}</span>
-                    <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
-                    <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
+                    <PlayRankMetrics plays={item.plays} duration={formatDuration(item.duration)} sortBy={sortBy} count={item.items} countLabel={t("playRank.titles")} />
                   </div>
                 ))
               )}
@@ -349,23 +346,21 @@ export default function AdminPlayRankPage() {
                 </h2>
                 <Badge variant="secondary" className="ml-auto text-xs">{media.length}</Badge>
               </div>
-              <div className="flex items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground">
+              <div className="hidden items-center gap-3 px-3 py-2 text-xs font-medium text-muted-foreground sm:flex">
                 <span className="w-6 shrink-0 text-center">{t("playRank.rank")}</span>
                 <span className="min-w-0 flex-1">{t("playRank.media")}</span>
                 <span className="w-14 shrink-0 text-right">{t("playRank.viewers")}</span>
-                <span className={`shrink-0 ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
+                <span className={`w-12 shrink-0 text-right ${sortBy === "plays" ? "text-foreground" : ""}`}>{t("playRank.plays")}</span>
                 <span className={`w-20 shrink-0 text-right ${sortBy === "duration" ? "text-foreground" : ""}`}>{t("playRank.duration")}</span>
               </div>
               {media.length === 0 ? (
                 <Empty hint={emptyHint} />
               ) : (
                 media.map((item, index) => (
-                  <div key={`${item.item_id || item.title}-${index}`} className="flex items-center gap-3 border-t border-border/50 px-3 py-2.5">
+                  <div key={`${item.item_id || item.title}-${index}`} className="grid grid-cols-[1.5rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-t border-border/50 px-3 py-2.5 sm:flex sm:gap-3">
                     <span className="w-6 shrink-0 text-center text-sm font-semibold text-muted-foreground">{index + 1}</span>
                     <PlayRankMediaLabel item={item} groupBy={groupBy} />
-                    <span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{item.viewers}</span>
-                    <span className={`shrink-0 tabular-nums ${metricClass(sortBy === "plays")}`}>{item.plays}</span>
-                    <span className={`w-20 shrink-0 text-right tabular-nums ${metricClass(sortBy === "duration")}`}>{formatDuration(item.duration)}</span>
+                    <PlayRankMetrics plays={item.plays} duration={formatDuration(item.duration)} sortBy={sortBy} count={item.viewers} countLabel={t("playRank.viewers")} />
                   </div>
                 ))
               )}

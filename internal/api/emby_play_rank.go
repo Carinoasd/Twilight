@@ -224,10 +224,11 @@ func (a *App) buildPlayRank(ctx context.Context, req playRankRequest, includeIde
 	// 季号/集号不落在播放记录表里，而是每次构建榜单时向 Emby 批量取回来补上。
 	// 这样历史记录不需要迁移就能显示集数；Emby 不可用时拿不到编号，只是少了
 	// 一个标识，榜单本身照常返回。
-	// 只有单集明细才需要季/集号；剧集榜一行是整部剧、电影榜没有集数，不必问 Emby。
+	// 剧集榜用代表条目的 SeriesId 取整剧海报；电影可直接使用自己的图片接口。
+	metadata := a.playRankMetadata(ctx, media, req.groupBy)
 	episodes := map[string]playRankEpisode{}
 	if req.groupBy == playRankGroupItem {
-		episodes = a.playRankEpisodes(ctx, media)
+		episodes = playRankEpisodesFromMetadata(metadata)
 	}
 
 	mediaItems := make([]map[string]any, 0, len(media))
@@ -246,14 +247,19 @@ func (a *App) buildPlayRank(ctx context.Context, req playRankRequest, includeIde
 			entry["season_number"] = position.Season
 			entry["episode_number"] = position.Episode
 		}
+		if poster := playRankPosterURL(item, req.groupBy, metadata); poster != "" {
+			entry["poster_url"] = poster
+		}
 		mediaItems = append(mediaItems, entry)
 	}
 
 	userItems := make([]map[string]any, 0, len(users))
 	for _, item := range users {
 		username := ""
+		avatar := ""
 		if user, ok := a.store().User(item.UID); ok {
 			username = user.Username
+			avatar = playRankAvatarURL(user.Avatar)
 		}
 		display := username
 		if display == "" {
@@ -267,6 +273,9 @@ func (a *App) buildPlayRank(ctx context.Context, req playRankRequest, includeIde
 			"plays":     item.Plays,
 			"duration":  item.Duration,
 			"items":     item.Items,
+		}
+		if avatar != "" {
+			entry["avatar_url"] = avatar
 		}
 		if includeIdentity {
 			entry["uid"] = item.UID

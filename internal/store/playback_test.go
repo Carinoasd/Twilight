@@ -103,6 +103,9 @@ func TestPlaybackRankGroupBySeriesMergesEpisodes(t *testing.T) {
 	if top.ItemID != "" || top.SeriesName != "" {
 		t.Fatalf("series row must not carry per-episode identity: %+v", top)
 	}
+	if top.RepresentativeItemID != "ep1" {
+		t.Fatalf("series artwork must retain a deterministic representative: %+v", top)
+	}
 
 	// 电影榜只统计电影，一部一行。
 	byMovie, _, err := st.PlaybackRank(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupMovie})
@@ -117,6 +120,9 @@ func TestPlaybackRankGroupBySeriesMergesEpisodes(t *testing.T) {
 	memSeries, _, _ := st.playbackRankFromMemory(PlaybackRankOptions{Limit: 10, GroupBy: PlaybackRankGroupSeries, SortBy: PlaybackRankSortPlays})
 	if len(memMovie) != 1 || len(memSeries) != 1 {
 		t.Fatalf("memory fallback must filter by type too: movie=%#v series=%#v", memMovie, memSeries)
+	}
+	if memSeries[0].RepresentativeItemID != top.RepresentativeItemID || memMovie[0].RepresentativeItemID != byMovie[0].RepresentativeItemID {
+		t.Fatalf("artwork representatives differ between SQL and memory: %v %v", memSeries, memMovie)
 	}
 
 	// 未知分组值必须退回逐条明细，绝不能把未过滤的字符串带进 GROUP BY。
