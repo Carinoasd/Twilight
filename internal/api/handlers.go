@@ -1119,39 +1119,30 @@ func (a *App) handleQueueStatus(w http.ResponseWriter, r *http.Request, _ Params
 func (a *App) handleRebindComplete(w http.ResponseWriter, r *http.Request, _ Params) {
 	p := current(r)
 	if !p.User.RebindingInProgress {
-		ok(w, "not in rebinding", nil)
+		ok(w, "not in rebinding", publicUser(p.User))
 		return
 	}
-	if p.User.TelegramID == 0 {
+	u, changed, err := a.finishTelegramRebind(r.Context(), p.User, true)
+	var missing telegramRebindMissingError
+	switch {
+	case errors.Is(err, errTelegramRebindNotBound):
 		failWithCode(w, http.StatusBadRequest, ErrTGNotBound, "尚未完成 Telegram 绑定")
 		return
-	}
-	// 换绑完成后检查新 Telegram 账号是否在要求的群组/频道中
-	if missing, err := a.telegramBindRequirementMissing(r.Context(), p.User.TelegramID); err != nil {
+	case errors.Is(err, errTelegramRebindMembershipCheck):
 		failWithCode(w, http.StatusForbidden, ErrTGBindGroupCheckFailed, "Telegram 账号未加入要求的群组/频道，换绑失败")
 		return
-	} else if len(missing) > 0 {
-		failWithCode(w, http.StatusForbidden, ErrTGBindGroupCheckFailed, "Telegram 账号未加入要求的群组/频道："+strings.Join(missing, "、"))
+	case errors.As(err, &missing):
+		failWithCode(w, http.StatusForbidden, ErrTGBindGroupCheckFailed, "Telegram 账号未加入要求的群组/频道："+strings.Join(missing.missing, "、"))
 		return
-	}
-	u, changed, err := a.store().CompleteUserTelegramRebind(p.User.UID, p.User.TelegramID, p.User.RebindingSince)
-	if errors.Is(err, store.ErrConflict) {
+	case errors.Is(err, store.ErrConflict):
 		failWithCode(w, http.StatusConflict, ErrConflict, "绑定状态已变化，请刷新后重试")
 		return
 	}
 	if statusFromError(w, err) {
 		return
 	}
-	// 换绑完成后同步恢复 Emby 账号
-	if changed && u.EmbyID != "" {
-		sideCtx, sideCancel := schedulerSideEffectContext(r.Context())
-		if a.embyShouldEnableUser(u) {
-			_ = a.embyApplyEnabledState(sideCtx, u.UID, u.EmbyID, true)
-		}
-		sideCancel()
-	}
 	if changed {
-		a.audit(r, "complete_telegram_rebind", "user", 0, nil)
+		a.audit(r, "complete_telegram_rebind", "user", 0, map[string]any{"emby_disabled": u.EmbyDisabled})
 	}
 	ok(w, "rebinding complete", publicUser(u))
 }
@@ -1180,7 +1171,11 @@ func (a *App) handleUnbindTelegram(w http.ResponseWriter, r *http.Request, _ Par
 	if statusFromError(w, err) {
 		return
 	}
-	a.audit(r, "unbind_telegram", "user", 0, nil)
+	detail := map[string]any{"emby_suspended": result.EmbySuspended}
+	if result.EmbySuspendError != nil {
+		detail["emby_suspend_failed"] = true
+	}
+	a.audit(r, "unbind_telegram", "user", 0, detail)
 	ok(w, result.Message, publicUser(*result.User))
 }
 

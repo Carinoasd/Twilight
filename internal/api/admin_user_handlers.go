@@ -947,9 +947,28 @@ func (a *App) handleAdminSetRole(w http.ResponseWriter, r *http.Request, params 
 
 func (a *App) handleAdminUnbindTelegram(w http.ResponseWriter, r *http.Request, params Params) {
 	uid, _ := int64Param(params, "uid")
+	actor := current(r).User.UID
+	// 系统强制绑定 Telegram 时，管理员解绑普通账号等同于发起换绑：进入换绑状态、
+	// 立即停用 Emby、网页端强制重新绑定，绑定完成后自动恢复。未开启强制绑定时保持
+	// 原来的“只解绑”语义。
+	if a.cfg().ForceBindTelegram {
+		u, old, err := a.store().BeginAdminTelegramRebind(uid, actor)
+		if statusFromError(w, err) {
+			return
+		}
+		a.cleanupUserTelegramResidue(uid, old)
+		suspended, suspendErr := a.suspendEmbyForTelegramRebind(r.Context(), u)
+		detail := map[string]any{"old_telegram_id": old, "rebind_required": u.RebindingInProgress, "emby_suspended": suspended}
+		if suspendErr != nil {
+			detail["emby_suspend_failed"] = true
+		}
+		a.audit(r, "admin_unbind_telegram", "admin", uid, detail)
+		ok(w, "Telegram unbound", map[string]any{"uid": u.UID, "username": u.Username, "old_telegram_id": old, "rebind_required": u.RebindingInProgress, "emby_suspended": suspended})
+		return
+	}
 	old := int64(0)
 	u, err := a.store().UpdateUser(uid, func(u *store.User) error {
-		if u.Role == store.RoleAdmin && u.UID != current(r).User.UID {
+		if u.Role == store.RoleAdmin && u.UID != actor {
 			return store.ErrConflict
 		}
 		old = u.TelegramID

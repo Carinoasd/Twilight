@@ -214,7 +214,11 @@ type User struct {
 	PasswordHash                            string   `json:"password_hash"`
 	RebindingInProgress                     bool     `json:"rebinding_in_progress"`
 	RebindingSince                          int64    `json:"rebinding_since,omitempty"`
-	SeenAnnouncementIDs                     []int64  `json:"seen_announcement_ids,omitempty"`
+	// RebindEmbySuspended 表示“这次 Telegram 换绑流程亲自禁用了远端 Emby”。换绑完成后
+	// 只恢复带这个标记的账号：换绑前就已被管理员单独封禁或因到期停用的 Emby，换绑
+	// 结束时不能被顺手解封。
+	RebindEmbySuspended bool    `json:"rebind_emby_suspended,omitempty"`
+	SeenAnnouncementIDs []int64 `json:"seen_announcement_ids,omitempty"`
 }
 
 type UserSummaryCounts struct {
