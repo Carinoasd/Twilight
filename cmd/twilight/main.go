@@ -46,7 +46,12 @@ func run(args []string) error {
 	case "bot":
 		return runBot(args[2:])
 	case "reset-2fa":
-		return runTwoFactorReset(args[2:])
+		err := runTwoFactorReset(args[2:])
+		if err != nil {
+			// This offline command does not install the runtime logger.
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return err
 	case "migrate-json":
 		return runMigrateJSON(args[2:])
 	case "version", "--version", "-v":
