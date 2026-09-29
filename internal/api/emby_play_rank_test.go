@@ -89,14 +89,17 @@ func TestPlayRankQueryParsesRangeDaysAndLimit(t *testing.T) {
 }
 
 func TestPlayRankQueryParsesGroupBy(t *testing.T) {
-	// 默认（不带参数、空值、未知值）都必须是逐条明细：宁可退回明细，也不能把
-	// 未经白名单校验的字符串带进 store 的 GROUP BY。
-	for _, raw := range []string{"", "item", "series", "SERIES", "all", "; DROP TABLE x"} {
+	// 默认（不带参数、空值、未知值）都是剧集榜；item / movie 必须精确匹配，未经
+	// 白名单校验的字符串绝不能带进 store 的 GROUP BY。
+	for _, raw := range []string{"", "item", "series", "movie", "MOVIE", "SERIES", "all", "; DROP TABLE x"} {
 		// 必须转义：httptest.NewRequest 会把未编码的空格当成 HTTP 版本分隔符。
 		req := playRankQuery(httptest.NewRequest(http.MethodGet, "/play-rank?group_by="+url.QueryEscape(raw), nil))
-		want := playRankGroupItem
-		if raw == "series" {
-			want = playRankGroupSeries
+		want := playRankGroupSeries
+		switch raw {
+		case "item":
+			want = playRankGroupItem
+		case "movie":
+			want = playRankGroupMovie
 		}
 		if req.groupBy != want {
 			t.Fatalf("group_by=%q parsed as %q want %q", raw, req.groupBy, want)

@@ -189,8 +189,10 @@
   }
 
   :lang(en-US) {
-    word-break: break-word;
-    overflow-wrap: anywhere;
+    /* anywhere 会把 “Unbound” 这类短单词拦腰截断（Unboun / d），只在单词本身
+       放不下时才断开即可；未翻译回退的中文仍按 keep-all 不在词中间断行。 */
+    word-break: normal;
+    overflow-wrap: break-word;
   }
 
   .dark body { color-scheme: dark; }

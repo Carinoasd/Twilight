@@ -773,7 +773,7 @@ export interface PlayRankUserItem {
 }
 
 // 媒体榜的聚合维度：item 是逐集/逐部，series 把一部剧的所有集合并成一行。
-export type PlayRankGroupBy = "item" | "series";
+export type PlayRankGroupBy = "item" | "series" | "movie";
 
 // 榜单按哪个指标排序：plays 是播放次数（偏向热度），duration 是累计时长（偏向
 // 实际投入）。一部 20 分钟的番刷 30 遍和一部三小时电影看 1 次，两种排序给出的
