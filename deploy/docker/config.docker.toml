@@ -193,6 +193,15 @@ restart_services = false
 
 # ───────── 通知 ─────────
 [Notification]
+# 事件与管道独立开关；新增邮件通知默认关闭。
+login_telegram_enabled = true
+login_email_enabled = true
+expiry_telegram_enabled = true
+expiry_email_enabled = false
+ticket_telegram_enabled = true
+ticket_email_enabled = false
+scheduler_telegram_enabled = true
+scheduler_email_enabled = false
 enabled = true
 expiry_remind_days = 3
 

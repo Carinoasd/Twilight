@@ -32,6 +32,10 @@ type renewResult struct {
 
 // updateProfile 更新用户资料（邮箱、用户名、Bangumi 设置、通知偏好等）
 func (s *userService) updateProfile(ctx context.Context, user store.User, payload map[string]any) (updateProfileResult, error) {
+	notificationPrefs, notificationErr := parseNotificationPreferences(payload)
+	if notificationErr != nil {
+		return updateProfileResult{}, notificationErr
+	}
 	bgmModeSet := false
 	bgmModeNext := false
 	bgmManageModeSet := false
@@ -137,6 +141,7 @@ func (s *userService) updateProfile(ctx context.Context, user store.User, payloa
 				u.BGMManageMode = false
 			}
 		}
+		notificationPrefs.apply(u)
 		if notifyLoginTelegramSet {
 			u.NotifyOnLoginTelegram = notifyLoginTelegramNext
 		}

@@ -226,6 +226,14 @@ type Config struct {
 	InviteCodeFormat                string
 	RegCodeRandomAlgorithm          string
 	InviteCodeRandomAlgorithm       string
+	LoginNotifyTelegramEnabled      bool
+	LoginNotifyEmailEnabled         bool
+	ExpiryNotifyTelegramEnabled     bool
+	ExpiryNotifyEmailEnabled        bool
+	TicketNotifyTelegramEnabled     bool
+	TicketNotifyEmailEnabled        bool
+	SchedulerNotifyTelegramEnabled  bool
+	SchedulerNotifyEmailEnabled     bool
 	NotificationEnabled             bool
 	NotificationExpiryRemindDays    int
 	LoginNotifyTelegramTemplate     string
@@ -562,6 +570,14 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	} else {
 		cfg.EmailAutoCleanupUnverifiedHours = reader.intValue(cfg.EmailAutoCleanupUnverifiedHours, "Email.auto_cleanup_unverified_hours", "email_auto_cleanup_unverified_hours")
 	}
+	cfg.LoginNotifyTelegramEnabled = reader.boolValue(cfg.LoginNotifyTelegramEnabled, "Notification.login_telegram_enabled")
+	cfg.LoginNotifyEmailEnabled = reader.boolValue(cfg.LoginNotifyEmailEnabled, "Notification.login_email_enabled")
+	cfg.ExpiryNotifyTelegramEnabled = reader.boolValue(cfg.ExpiryNotifyTelegramEnabled, "Notification.expiry_telegram_enabled")
+	cfg.ExpiryNotifyEmailEnabled = reader.boolValue(cfg.ExpiryNotifyEmailEnabled, "Notification.expiry_email_enabled")
+	cfg.TicketNotifyTelegramEnabled = reader.boolValue(cfg.TicketNotifyTelegramEnabled, "Notification.ticket_telegram_enabled")
+	cfg.TicketNotifyEmailEnabled = reader.boolValue(cfg.TicketNotifyEmailEnabled, "Notification.ticket_email_enabled")
+	cfg.SchedulerNotifyTelegramEnabled = reader.boolValue(cfg.SchedulerNotifyTelegramEnabled, "Notification.scheduler_telegram_enabled")
+	cfg.SchedulerNotifyEmailEnabled = reader.boolValue(cfg.SchedulerNotifyEmailEnabled, "Notification.scheduler_email_enabled")
 	cfg.NotificationEnabled = reader.boolValue(cfg.NotificationEnabled, "Notification.enabled", "notification_enabled")
 	cfg.NotificationExpiryRemindDays = reader.intValue(cfg.NotificationExpiryRemindDays, "Notification.expiry_remind_days", "expiry_remind_days")
 	cfg.LoginNotifyTelegramTemplate = reader.stringValue(cfg.LoginNotifyTelegramTemplate, "Notification.login_notify_telegram_template", "login_notify_telegram_template")
@@ -709,6 +725,14 @@ func defaults() Config {
 		InviteCodeFormat:                     "INV{random}",
 		RegCodeRandomAlgorithm:               "base32-20",
 		InviteCodeRandomAlgorithm:            "hex10",
+		LoginNotifyTelegramEnabled:           true,
+		LoginNotifyEmailEnabled:              true,
+		ExpiryNotifyTelegramEnabled:          true,
+		ExpiryNotifyEmailEnabled:             false,
+		TicketNotifyTelegramEnabled:          true,
+		TicketNotifyEmailEnabled:             false,
+		SchedulerNotifyTelegramEnabled:       true,
+		SchedulerNotifyEmailEnabled:          false,
 		NotificationEnabled:                  true,
 		NotificationExpiryRemindDays:         3,
 		LoginNotifyTelegramTemplate:          DefaultLoginNotifyTelegramTemplate,
@@ -982,6 +1006,30 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("TWILIGHT_BOT_INTERNAL_SECRET"); v != "" {
 		cfg.BotInternalSecret = v
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_LOGIN_TELEGRAM_ENABLED"); v != "" {
+		cfg.LoginNotifyTelegramEnabled = boolValue(v, cfg.LoginNotifyTelegramEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_LOGIN_EMAIL_ENABLED"); v != "" {
+		cfg.LoginNotifyEmailEnabled = boolValue(v, cfg.LoginNotifyEmailEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_EXPIRY_TELEGRAM_ENABLED"); v != "" {
+		cfg.ExpiryNotifyTelegramEnabled = boolValue(v, cfg.ExpiryNotifyTelegramEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_EXPIRY_EMAIL_ENABLED"); v != "" {
+		cfg.ExpiryNotifyEmailEnabled = boolValue(v, cfg.ExpiryNotifyEmailEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_TICKET_TELEGRAM_ENABLED"); v != "" {
+		cfg.TicketNotifyTelegramEnabled = boolValue(v, cfg.TicketNotifyTelegramEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_TICKET_EMAIL_ENABLED"); v != "" {
+		cfg.TicketNotifyEmailEnabled = boolValue(v, cfg.TicketNotifyEmailEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_SCHEDULER_TELEGRAM_ENABLED"); v != "" {
+		cfg.SchedulerNotifyTelegramEnabled = boolValue(v, cfg.SchedulerNotifyTelegramEnabled)
+	}
+	if v := os.Getenv("TWILIGHT_NOTIFICATION_SCHEDULER_EMAIL_ENABLED"); v != "" {
+		cfg.SchedulerNotifyEmailEnabled = boolValue(v, cfg.SchedulerNotifyEmailEnabled)
 	}
 	if v := os.Getenv("TWILIGHT_NOTIFICATION_ENABLED"); v != "" {
 		cfg.NotificationEnabled = boolValue(v, cfg.NotificationEnabled)

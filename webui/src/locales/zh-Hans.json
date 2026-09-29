@@ -157,7 +157,22 @@
     "retryBindCode": "重新获取绑定链接",
     "rebindInstructions": "点击下方按钮获取绑定链接，然后在 Telegram 中打开完成验证",
     "rebindRequiredDescription": "解绑已完成，Emby 账号已暂停使用。请立即绑定新的 Telegram 账号，绑定完成后 Emby 会自动恢复。",
-    "rebindCompleteFailed": "换绑尚未完成"
+    "rebindCompleteFailed": "换绑尚未完成",
+    "notificationsTitle": "通知偏好",
+    "notificationsDescription": "按事件选择 Telegram 或邮件。管道需由管理员开启；邮件只发送到已验证邮箱。",
+    "ticketNotifyEmail": "工单邮件通知",
+    "ticketNotifyEmailDesc": "收到工单公开回复或状态更新；管理员也可接收其他用户的工单变动。",
+    "expiryNotifyTelegram": "到期 Telegram 提醒",
+    "expiryNotifyTelegramDesc": "账号即将到期时通过 Telegram 提醒。",
+    "expiryNotifyEmail": "到期邮件提醒",
+    "expiryNotifyEmailDesc": "账号即将到期时发送邮件。",
+    "notificationSaveFailed": "通知设置保存失败，请重试",
+    "notificationAdminDisabled": "此管道目前未启用或未配置；偏好会保留，启用后生效。",
+    "notificationBindTelegram": "请先绑定 Telegram。",
+    "notificationVerifyEmail": "请先绑定并验证邮箱。",
+    "loginNotifyTelegram": "登录 Telegram 通知",
+    "loginNotifyEmail": "登录邮件通知",
+    "ticketNotifyTelegram": "工单 Telegram 通知"
   },
   "adminConfig": {
     "effectiveValue": "实际生效值",
