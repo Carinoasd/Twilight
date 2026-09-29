@@ -26,13 +26,11 @@ func writePersistedStateForTest(t *testing.T, app *App, mutate func(*store.State
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 后端已收敛为单一 PostgreSQL：模拟「另一进程改库」不再是覆写状态文件，
-	// 而是另开一个连同一测试库的 Store 走 LoadSnapshot 强制落盘（saveLockedForce
-	// 会把持久层 version 递增）。被测 App 的 store 下次 Refresh 即读到这份带更高
-	// version 的新 state，等价于跨进程带外写。
+	// 模拟另一个进程更新业务状态及版本。LoadSnapshot 是灾难恢复操作，
+	// 会主动撤销会话，不能用它模拟普通业务写入后仍持有有效会话的请求。
 	writer := reopenTestStore(t)
 	defer writer.Close()
-	if err := writer.LoadSnapshot(data); err != nil {
+	if _, err := writer.DB().Exec(`UPDATE twilight_state SET state=$1::jsonb, version=version+1 WHERE id=1`, string(data)); err != nil {
 		t.Fatal(err)
 	}
 }

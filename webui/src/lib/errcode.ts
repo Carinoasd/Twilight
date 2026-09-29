@@ -19,6 +19,9 @@
  * 与 internal/api/errcode.go 的 const 块严格 1:1。
  */
 export type ErrCode =
+  | "AUTH_TWO_FACTOR_INVALID"
+  | "AUTH_TWO_FACTOR_CODE_INVALID"
+  | "AUTH_TWO_FACTOR_UNAVAILABLE"
   | "CONFIG_REVISION_CONFLICT"
   | "SCHEDULER_REVISION_CONFLICT"
   // === 鉴权 / 会话 ===
@@ -332,6 +335,9 @@ export const ErrCodes = {
   // 鉴权 / 会话
   LoginRateLimited: "AUTH_LOGIN_RATE_LIMITED",
   LoginInvalid: "AUTH_LOGIN_INVALID",
+  TwoFactorInvalid: "AUTH_TWO_FACTOR_INVALID",
+  TwoFactorCodeInvalid: "AUTH_TWO_FACTOR_CODE_INVALID",
+  TwoFactorUnavailable: "AUTH_TWO_FACTOR_UNAVAILABLE",
   AccountDisabled: "AUTH_ACCOUNT_DISABLED",
   AccountExpired: "AUTH_ACCOUNT_EXPIRED",
   SessionCreateFailed: "AUTH_SESSION_CREATE_FAILED",

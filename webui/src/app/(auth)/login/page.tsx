@@ -14,6 +14,8 @@ import { sanitizeExternalUrl } from "@/lib/safe-url";
 import { friendlyError } from "@/lib/validators";
 import { safeProtectedRedirectTarget } from "@/lib/auth-routes";
 import { useI18n } from "@/lib/i18n";
+import { TwoFactorLogin } from "@/components/two-factor-login";
+import type { TwoFactorChallenge } from "@/lib/two-factor";
 import { TelegramLogin } from "@/components/telegram-login";
 import { AuthBrand, AUTH_PRIMARY_BTN, AUTH_GHOST_LINK } from "../auth-ui";
 
@@ -36,6 +38,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
+  const [challenge, setChallenge] = useState<TwoFactorChallenge | null>(null);
 
   useEffect(() => {
     if (systemInfo?.setup?.available) {
@@ -70,6 +73,7 @@ export default function LoginPage() {
     setIsLoading(true);
     try {
       const result = await login(username, password);
+      if (result.challenge) { setPassword(""); setChallenge(result.challenge); return; }
       if (result.ok) {
         toast({
           title: t("auth.login.successTitle"),
@@ -133,6 +137,7 @@ export default function LoginPage() {
         </div>
       )}
 
+      {challenge ? <TwoFactorLogin key={challenge.request} challenge={challenge} onSuccess={() => router.replace(loginRedirectTarget())} onCancel={() => { setChallenge(null); setQrBusy(false); }} /> : <>
       <form onSubmit={handleSubmit} className="space-y-5">
         <div className="space-y-2">
           <Label htmlFor="username" className="ml-1">{t("common.username")} / {t("common.email")}</Label>
@@ -179,8 +184,9 @@ export default function LoginPage() {
         </Button>
       </form>
 
-      {systemInfo?.features?.telegram_login && <TelegramLogin disabled={isLoading} onBusyChange={setQrBusy} onSuccess={() => router.replace(loginRedirectTarget())} />}
+      {systemInfo?.features?.telegram_login && <TelegramLogin onChallenge={setChallenge} disabled={isLoading} onBusyChange={setQrBusy} onSuccess={() => router.replace(loginRedirectTarget())} />}
 
+      </>}
       {forgotPasswordEnabled && (
         <div className="text-center text-sm">
           <Link href="/forgot-password" className={AUTH_GHOST_LINK}>

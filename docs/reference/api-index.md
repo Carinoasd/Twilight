@@ -888,3 +888,7 @@ V2 用户端媒体资源（WebUI 媒体页使用）：
 | GET | `/api/v2/system/stats`、`/system/emby-stats`、`/system/emby-viewers` | Admin / User | 统计面补齐 |
 | GET | `/api/v2/system/health/api`、`/database`、`/emby` | Admin | 独立健康探测（与 `/admin/health/*` 等价） |
 | GET | `/api/v2/docs` | Public | 接口文档页 |
+
+## 双重验证
+
+验证器 App、一次性备用码、后台开关、密钥部署、API 契约与恢复操作见 [双重验证（2FA）](../features/two-factor.md)。密码与 Telegram 扫码登录均接入第二步；旧客户端收到 `two_factor_required` 时不能把它当成登录成功。

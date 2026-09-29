@@ -14,6 +14,12 @@ package api
 type ErrCode = string
 
 const (
+	ErrTwoFactorInvalid     = "AUTH_TWO_FACTOR_INVALID"
+	ErrTwoFactorCode        = "AUTH_TWO_FACTOR_CODE_INVALID"
+	ErrTwoFactorUnavailable = "AUTH_TWO_FACTOR_UNAVAILABLE"
+)
+
+const (
 	ErrConfigRevisionConflict    = "CONFIG_REVISION_CONFLICT"
 	ErrSchedulerRevisionConflict = "SCHEDULER_REVISION_CONFLICT"
 	// === 鉴权 / 会话 ===

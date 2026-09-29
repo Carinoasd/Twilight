@@ -1,5 +1,6 @@
 "use client";
 
+import { TwoFactorSettings } from "@/components/two-factor-settings";
 import { TelegramQR } from "@/components/telegram-qr";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1614,6 +1615,7 @@ export default function SettingsPage() {
       </div>
 
       {settings && <div className="order-[70]">
+        <TwoFactorSettings />
         <NotificationPreferences settings={settings} telegramBound={hasTelegramBinding} emailVerified={hasVerifiedEmail}
           onSaved={(patch) => setSettings((current) => current ? { ...current, ...patch } : current)} />
       </div>}

@@ -167,6 +167,7 @@ type Config struct {
 	EmbyWhitelistURL               string
 	TelegramMode                   bool
 	TelegramLoginEnabled           bool
+	TwoFactorEnrollmentEnabled     bool
 	ForceBindTelegram              bool
 	TelegramBotToken               string
 	TelegramAPIURL                 string
@@ -459,6 +460,7 @@ func loadConfig(path string, overrides bool) (Config, error) {
 	cfg.EmbyURLList = parseLinesList(reader.stringListValue(nil, "Emby.emby_url_list", "emby_url_list"))
 	cfg.EmbyWhitelistURLList = parseLinesList(reader.stringListValue(nil, "Emby.emby_url_list_for_whitelist", "emby_url_list_for_whitelist"))
 	cfg.TelegramMode = reader.boolValue(cfg.TelegramMode, "Global.telegram_mode", "telegram_mode")
+	cfg.TwoFactorEnrollmentEnabled = reader.boolValue(cfg.TwoFactorEnrollmentEnabled, "Security.two_factor_enrollment_enabled")
 	cfg.TelegramLoginEnabled = reader.boolValue(cfg.TelegramLoginEnabled, "Telegram.login_enabled")
 	cfg.ForceBindTelegram = reader.boolValue(cfg.ForceBindTelegram, "Global.force_bind_telegram", "force_bind_telegram")
 	cfg.TelegramBotToken = reader.stringValue(cfg.TelegramBotToken, "Telegram.bot_token", "bot_token")

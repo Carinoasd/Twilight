@@ -4,6 +4,7 @@ import { GeistMono } from "geist/font/mono";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeInit } from "@/components/theme-init";
 import { BootstrapLoader } from "@/components/bootstrap-loader";
+import { TwoFactorRecoveryDisplay } from "@/components/two-factor-recovery";
 import { Toaster } from "@/components/ui/toaster";
 import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
 import { LocaleProvider } from "@/lib/i18n";
@@ -107,6 +108,7 @@ export default function RootLayout({
             <ConfirmDialogProvider>
               <ThemeInit />
               {children}
+              <TwoFactorRecoveryDisplay />
               <Toaster />
             </ConfirmDialogProvider>
           </LocaleProvider>

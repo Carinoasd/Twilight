@@ -717,7 +717,7 @@ export default function AdminDatabaseMigrationPage() {
               <Alert className="border-amber-500/40 bg-amber-500/10">
                 <AlertTriangle className="h-4 w-4" />
                 <AlertTitle>{t("adminDatabase.highRiskTitle")}</AlertTitle>
-                <AlertDescription>{t("adminDatabase.highRiskDesc")}</AlertDescription>
+                <AlertDescription>{t("adminDatabase.highRiskDesc")} {t("twoFactor.restoreWarning")}</AlertDescription>
               </Alert>
               <div className="grid gap-2 rounded-md border p-3 text-xs">
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("adminDatabase.targetBackupField")}</span><strong className="break-all text-right">{restorePreview.restored}</strong></div>

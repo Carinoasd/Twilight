@@ -698,5 +698,6 @@ func migrationArchiveSummary(archive migration.Archive, plan migrationResourcePl
 		"resource_count":           resources,
 		"resource_conflict_count":  len(plan.Conflicts),
 		"has_config":               hasConfig,
+		"two_factor_notice":        "Import replaces two-factor settings. Backups without two-factor data clear those settings. The matching deployment encryption key is required.",
 	}
 }

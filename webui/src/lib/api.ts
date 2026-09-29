@@ -305,6 +305,25 @@ class ApiClient {
     }, { apiVersion: "v2", cacheRead: false });
   }
 
+  async twoFactorStatus(signal?: AbortSignal) {
+    return this.request<import("./two-factor").TwoFactorStatus>("/settings/two-factor", { signal, cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+  async setupTwoFactor(password: string, signal?: AbortSignal) {
+    return this.request<import("./two-factor").TwoFactorSetup>("/settings/two-factor/setup", { method: "POST", body: JSON.stringify({ password }), signal, cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+  async enableTwoFactor(request: string, code: string, signal?: AbortSignal) {
+    return this.request<{ recovery_codes: string[] }>("/settings/two-factor/enable", { method: "POST", body: JSON.stringify({ request, code }), signal, cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+  async changeTwoFactor(disable: boolean, password: string, code: string, recovery: boolean, signal?: AbortSignal) {
+    return this.request<{ recovery_codes: string[] | null }>(disable ? "/settings/two-factor" : "/settings/two-factor/recovery-codes", { method: disable ? "DELETE" : "POST", body: JSON.stringify({ password, code, recovery }), signal, cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+  async verifyTwoFactor(request: string, code: string, recovery: boolean, signal?: AbortSignal) {
+    return this.request<V2LoginResponse>("/auth/two-factor", { method: "POST", body: JSON.stringify({ request, code, recovery }), signal, cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+  async cancelTwoFactor(request: string) {
+    return this.request("/auth/two-factor", { method: "DELETE", body: JSON.stringify({ request }), cache: "no-store" }, { apiVersion: "v2", cacheRead: false, dedupe: false });
+  }
+
   // Auth
   async createTelegramLogin(signal?: AbortSignal) {
     return this.request<{ id: string; secret: string; deep_link: string; check_code: string; expires_in: number }>("/auth/telegram/requests", {

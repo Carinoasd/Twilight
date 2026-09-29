@@ -101,6 +101,8 @@ func (s *Store) ImportMigrationArchive(ctx context.Context, archive migration.Ar
 	}
 
 	state := data.state
+	factors := state.TwoFactorAccounts
+	state.TwoFactorAccounts = nil
 	if err := resetSchedulerQueueTx(ctx, tx, &state); err != nil {
 		return MigrationImportSummary{}, err
 	}
@@ -128,6 +130,9 @@ RETURNING version`, string(stateBytes), nextVersion).Scan(&storedVersion)
 	}
 
 	if err := truncateMigrationTables(ctx, tx); err != nil {
+		return MigrationImportSummary{}, err
+	}
+	if err := restoreTwoFactors(ctx, tx, factors); err != nil {
 		return MigrationImportSummary{}, err
 	}
 	if err := insertMigrationRuntimeLogs(ctx, tx, data.runtimeLogs); err != nil {
@@ -195,6 +200,9 @@ func parseMigrationArchive(archive migration.Archive) (parsedMigrationData, erro
 	var result parsedMigrationData
 	if err := decodeMigrationJSON(files["data/state.json"], &result.state); err != nil {
 		return parsedMigrationData{}, fmt.Errorf("invalid migration state: %w", err)
+	}
+	if err := ValidateTwoFactorBackup(result.state); err != nil {
+		return parsedMigrationData{}, err
 	}
 	if err := decodeMigrationJSON(files["data/runtime-logs.json"], &result.runtimeLogs); err != nil {
 		return parsedMigrationData{}, fmt.Errorf("invalid runtime logs: %w", err)

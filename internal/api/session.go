@@ -55,7 +55,8 @@ type sessionRecord struct {
 	ExpiresAt int64 `json:"expires_at"`
 	// DeviceID 是签发会话时的设备（与 store.Device.DeviceID 一致）。管理员封禁设备、
 	// 设备数上限淘汰、用户删除设备时，按 (uid, device_id) 吊销对应会话。
-	DeviceID string `json:"device_id,omitempty"`
+	DeviceID    string `json:"device_id,omitempty"`
+	AuthVersion string `json:"auth_version,omitempty"`
 }
 
 func newSessionStore(ttl time.Duration, redisClient *redis.Client) *sessionStore {
@@ -85,7 +86,7 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	_, _ = db.ExecContext(ctx, `DELETE FROM twilight_sessions WHERE expires_at <= $1`, now)
 	s.migrateLegacyTokens(ctx, db)
 
-	rows, err := db.QueryContext(ctx, `SELECT token, uid, expires_at, device_id FROM twilight_sessions WHERE expires_at > $1`, now)
+	rows, err := db.QueryContext(ctx, `SELECT token, uid, expires_at, device_id, auth_version FROM twilight_sessions WHERE expires_at > $1`, now)
 	if err != nil {
 		zap.L().Warn("failed to load sessions from PostgreSQL", zap.Error(err))
 		return
@@ -97,7 +98,7 @@ func (s *sessionStore) restoreFromPostgres(db *sql.DB) {
 	for rows.Next() {
 		var token string
 		var record sessionRecord
-		if err := rows.Scan(&token, &record.UID, &record.ExpiresAt, &record.DeviceID); err != nil {
+		if err := rows.Scan(&token, &record.UID, &record.ExpiresAt, &record.DeviceID, &record.AuthVersion); err != nil {
 			continue
 		}
 		restored++
@@ -167,16 +168,22 @@ func (s *sessionStore) pgDB() *sql.DB {
 }
 
 func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (string, time.Time, error) {
+	return s.create(ctx, uid, deviceID, "", "", false)
+}
+func (s *sessionStore) CreateVerified(ctx context.Context, uid int64, deviceID, version, proof string) (string, time.Time, error) {
+	return s.create(ctx, uid, deviceID, version, proof, true)
+}
+func (s *sessionStore) create(ctx context.Context, uid int64, deviceID, version, proof string, verified bool) (string, time.Time, error) {
 	for attempt := 0; attempt < maxSessionTokenCreateAttempts; attempt++ {
 		token, err := security.RandomHex(32)
 		if err != nil {
 			return "", time.Time{}, err
 		}
 		expires := time.Now().Add(s.ttl)
-		record := sessionRecord{UID: uid, ExpiresAt: expires.Unix(), DeviceID: deviceID}
+		record := sessionRecord{UID: uid, ExpiresAt: expires.Unix(), DeviceID: deviceID, AuthVersion: version}
 		key := sessionTokenDigest(token)
 
-		inserted, err := s.persistToPostgres(ctx, key, record)
+		inserted, err := s.persistToPostgres(ctx, key, &record, proof, verified)
 		if err != nil {
 			// PG 写入失败就让创建失败：旧实现照样返回 token，会话只存在于 Redis /
 			// 内存，而 DeleteUser 只能从内存表和 PG 的 RETURNING 收集要删的 Redis key，
@@ -225,23 +232,56 @@ func (s *sessionStore) Create(ctx context.Context, uid int64, deviceID string) (
 
 // persistToPostgres 以摘要键 key 写入会话。返回 inserted=false 表示键冲突（需重试），
 // err 非空表示写入失败。
-func (s *sessionStore) persistToPostgres(ctx context.Context, key string, record sessionRecord) (bool, error) {
+func (s *sessionStore) persistToPostgres(ctx context.Context, key string, record *sessionRecord, proof string, verified bool) (bool, error) {
 	db := s.pgDB()
 	if db == nil {
 		return true, nil
 	}
-	result, err := db.ExecContext(ctx,
-		`INSERT INTO twilight_sessions (token, uid, expires_at, device_id) VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (token) DO NOTHING`,
-		key, record.UID, record.ExpiresAt, record.DeviceID)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		zap.L().Warn("failed to persist session to PostgreSQL", zap.Error(err))
 		return false, err
 	}
-	if rows, err := result.RowsAffected(); err == nil && rows == 0 {
-		return false, nil
+	defer tx.Rollback()
+	// Same lock order as factor changes: state, account, request, session.
+	var unused int64
+	if err = tx.QueryRowContext(ctx, `SELECT version FROM twilight_state WHERE id=1 FOR UPDATE`).Scan(&unused); err != nil {
+		return false, err
 	}
-	return true, nil
+	var version string
+	var enabled int64
+	err = tx.QueryRowContext(ctx, `SELECT data->>'version', (data->>'enabled_at')::bigint FROM twilight_two_factor_accounts WHERE uid=$1`, record.UID).Scan(&version, &enabled)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if verified {
+		if record.AuthVersion != version {
+			return false, store.ErrTwoFactorInvalid
+		}
+	} else {
+		if enabled > 0 {
+			return false, store.ErrTwoFactorRequired
+		}
+		record.AuthVersion = version
+	}
+	if proof != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE twilight_two_factor_requests SET state='completed' WHERE hash=$1 AND uid=$2 AND version=$3 AND device_id=$4 AND state='consumed' AND expires_at>$5`, proof, record.UID, version, record.DeviceID, time.Now().Unix())
+		if err != nil {
+			return false, err
+		}
+		n, _ := result.RowsAffected()
+		if n != 1 {
+			return false, store.ErrTwoFactorInvalid
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO twilight_sessions(token,uid,expires_at,device_id,auth_version,auth_request) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(token) DO NOTHING`, key, record.UID, record.ExpiresAt, record.DeviceID, record.AuthVersion, proof)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 0 {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 func (s *sessionStore) deletePostgresToken(ctx context.Context, key string) {
@@ -262,6 +302,11 @@ func (s *sessionStore) GetRecord(ctx context.Context, token string) (sessionReco
 		return sessionRecord{}, false
 	}
 	key := sessionTokenDigest(token)
+	if db := s.pgDB(); db != nil {
+		var record sessionRecord
+		err := db.QueryRowContext(ctx, `SELECT s.uid,s.expires_at,s.device_id,s.auth_version FROM twilight_sessions s LEFT JOIN twilight_two_factor_accounts f ON f.uid=s.uid WHERE s.token=$1 AND s.expires_at>$2 AND s.auth_version=COALESCE(f.data->>'version','')`, key, time.Now().Unix()).Scan(&record.UID, &record.ExpiresAt, &record.DeviceID, &record.AuthVersion)
+		return record, err == nil
+	}
 
 	// 1. Try Redis (fastest path)
 	if s.redis != nil {
@@ -336,6 +381,9 @@ func (s *sessionStore) Delete(ctx context.Context, token string) {
 }
 
 func (s *sessionStore) DeleteUser(ctx context.Context, uid int64) {
+	if s.st != nil {
+		_ = s.st.RevokeTwoFactorRequests(ctx, uid)
+	}
 	// Collect tokens from memory
 	s.mu.Lock()
 	for token, record := range s.items {

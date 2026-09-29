@@ -45,6 +45,8 @@ func run(args []string) error {
 		return runScheduler(args[2:])
 	case "bot":
 		return runBot(args[2:])
+	case "reset-2fa":
+		return runTwoFactorReset(args[2:])
 	case "migrate-json":
 		return runMigrateJSON(args[2:])
 	case "version", "--version", "-v":
@@ -521,5 +523,6 @@ Usage:
   twilight scheduler
   twilight bot
   twilight migrate-json --state-file <path> [--config config.toml] [--force]
+  twilight reset-2fa --uid <uid> --confirm RESET_2FA_<uid> [--config config.toml]
   twilight version`)
 }

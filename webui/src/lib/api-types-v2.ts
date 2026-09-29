@@ -24,8 +24,10 @@ export interface V2LoginRequest {
  * V2 登录响应
  */
 export interface V2LoginResponse {
-  token: string;
-  user: User;
+  two_factor_required?: boolean;
+  request?: string;
+  token?: string;
+  user?: User;
   expires_at?: number;
 }
 

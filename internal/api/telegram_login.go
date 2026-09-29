@@ -118,6 +118,9 @@ func (a *App) handleConsumeTelegramLogin(w http.ResponseWriter, r *http.Request,
 		a.telegramLoginError(w, err)
 		return
 	}
+	if a.beginTwoFactorLogin(w, r, input, user, "telegram", p["id"]) {
+		return
+	}
 	// The grant is already consumed. Session failures require a new QR; retries
 	// must not produce two valid sessions for one Telegram approval.
 	result, err := a.completeLogin(r, input, user)

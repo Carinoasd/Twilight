@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { TwoFactorChallenge } from "@/lib/two-factor";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import { useI18n } from "@/lib/i18n";
@@ -10,7 +11,7 @@ import { TelegramQR, telegramQRUrl } from "@/components/telegram-qr";
 type Request = { id: string; secret: string; deep_link: string; check_code: string; expires_in: number; deadline: number };
 type Status = "idle" | "creating" | "pending" | "scanned" | "consuming" | "expired" | "rejected" | "failed" | "done";
 
-export function TelegramLogin({ onSuccess, onBusyChange, disabled }: { onSuccess: () => void; onBusyChange: (busy: boolean) => void; disabled: boolean }) {
+export function TelegramLogin({ onSuccess, onChallenge, onBusyChange, disabled }: { onChallenge: (challenge: TwoFactorChallenge) => void; onSuccess: () => void; onBusyChange: (busy: boolean) => void; disabled: boolean }) {
   const { t } = useI18n();
   const [request, setRequest] = useState<Request | null>(null);
   const [status, setStatus] = useState<Status>("idle");
@@ -20,8 +21,8 @@ export function TelegramLogin({ onSuccess, onBusyChange, disabled }: { onSuccess
   const active = useRef<Request | null>(null);
   const controller = useRef<AbortController | null>(null);
   const redeeming = useRef(false);
-  const callbacks = useRef({ onSuccess, onBusyChange });
-  callbacks.current = { onSuccess, onBusyChange };
+  const callbacks = useRef({ onSuccess, onBusyChange, onChallenge });
+  callbacks.current = { onSuccess, onBusyChange, onChallenge };
 
   useEffect(() => {
     mounted.current = true;
@@ -90,6 +91,7 @@ export function TelegramLogin({ onSuccess, onBusyChange, disabled }: { onSuccess
           const result = await useAuthStore.getState().loginTelegram(request.id, request.secret);
           redeeming.current = false;
           if (stopped || !mounted.current) return;
+          if (result.challenge) { stop("done"); callbacks.current.onChallenge(result.challenge); return; }
           stop(result.ok ? "done" : "failed");
           if (result.ok) callbacks.current.onSuccess();
         } else if (state === "pending" || state === "scanned") setStatus(state);
