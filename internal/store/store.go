@@ -2274,6 +2274,9 @@ func (s *Store) UpdateUser(uid int64, fn func(*User) error) (User, error) {
 		if err := s.userIdentityConflictLocked(old, u, uid); err != nil {
 			return ErrConflict
 		}
+		if old.TelegramID != u.TelegramID {
+			s.finishTelegramRebindRequestsLocked(uid)
+		}
 		s.state.Users[uid] = u
 		s.maintainUserIndexes(old, u, uid)
 		updated = u
@@ -2329,6 +2332,9 @@ func (s *Store) UpdateUsers(uids []int64, fn func(*User) error) (map[int64]error
 			if cerr := s.userIdentityConflictLocked(old, u, uid); cerr != nil {
 				results[uid] = ErrConflict
 				continue
+			}
+			if old.TelegramID != u.TelegramID {
+				s.finishTelegramRebindRequestsLocked(uid)
 			}
 			s.state.Users[uid] = u
 			s.maintainUserIndexes(old, u, uid)
@@ -2864,6 +2870,9 @@ func (s *Store) bindUserTelegram(uid int64, tgid int64, telegramUsername string,
 		}
 		oldUser := u
 		old = u.TelegramID
+		if old != tgid {
+			s.finishTelegramRebindRequestsLocked(uid)
+		}
 		u.TelegramID = tgid
 		username := strings.TrimPrefix(strings.TrimSpace(telegramUsername), "@")
 		if username != "" {
@@ -5540,6 +5549,25 @@ func (s *Store) ReviewRebindRequest(id, reviewerUID int64, status, note string) 
 		req, ok := s.state.RebindRequests[id]
 		if !ok {
 			return ErrNotFound
+		}
+		switch status {
+		case "approved", "rejected":
+			if req.Status != "pending" {
+				return ErrConflict
+			}
+		case "revoked":
+			if req.Status != "approved" {
+				return ErrConflict
+			}
+		default:
+			return ErrInvalid
+		}
+		if status == "approved" {
+			u, exists := s.state.Users[req.UID]
+			latest, found := s.latestRebindRequestLocked(req.UID)
+			if !exists || u.TelegramID == 0 || u.TelegramID != req.OldTelegramID || u.RebindingInProgress || !found || latest.ID != id {
+				return ErrConflict
+			}
 		}
 		req.Status = status
 		req.AdminNote = note

@@ -582,6 +582,7 @@ curl -X DELETE "http://localhost:5000/api/v1/users/me/devices/abc123" \
 `POST /users/me/telegram/rebind-request`
 
 - 说明：发起换绑申请，进入管理员审核队列。处于待审核、已批准待解绑或正在换绑状态的用户会暂时跳过定时 Telegram 群成员巡检的自动 Web/Emby 禁用；账号到期处理不受影响。
+- 审批仅限一轮换绑：用户或管理员改变 Telegram 身份时，旧的 `approved` 申请变为 `used`，旧的 `pending` 申请变为 `revoked`，保留原始审核元数据。再次换绑需新申请、新审核。单条/批量审核不得重新批准非 `pending` 申请；单条返回 409，批量计入失败。批准时还会校验当前 Telegram 身份与申请一致且不在换绑中。
 - 认证：登录用户（`AuthUser`）
 - 限流：UID，3 / 1 小时
 

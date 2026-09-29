@@ -377,6 +377,7 @@ func (s *Store) ConfirmTelegramLink(ctx context.Context, token string, telegramI
 				return false, ErrConflict
 			}
 			previous := u
+			s.finishTelegramRebindRequestsLocked(u.UID)
 			u.TelegramID, u.TelegramUsername = telegramID, username
 			s.state.Users[u.UID] = u
 			s.maintainUserIndexes(previous, u, u.UID)

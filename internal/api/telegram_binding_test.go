@@ -193,11 +193,9 @@ func TestTelegramStatusDoesNotOfferStaleApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := app.store().CreateRebindRequest(store.RebindRequest{UID: u.UID, OldTelegramID: 222})
+	// Seed a legacy approval; new reviews reject mismatched identities.
+	_, err = app.store().CreateRebindRequest(store.RebindRequest{UID: u.UID, OldTelegramID: 222, Status: "approved"})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.store().ReviewRebindRequest(req.ID, 77, "approved", "old identity"); err != nil {
 		t.Fatal(err)
 	}
 	for _, result := range []telegramStatusResult{app.telegram().status(u), app.telegramStatusFields(u)} {
