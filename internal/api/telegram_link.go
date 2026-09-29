@@ -117,7 +117,7 @@ func (a *App) issueTelegramLink(w http.ResponseWriter, r *http.Request, uid int6
 		"deep_link":      deepLink,
 		"bot_username":   botUsername,
 		"manual_command": "/bind " + token,
-		"expires_in":     telegramLinkTTLSeconds,
+		"expires_in":     max(0, int(link.ExpiresAt-time.Now().Unix())),
 		"poll_interval":  telegramLinkPollSeconds,
 	}
 	if scene == "register" {
@@ -394,6 +394,9 @@ func (a *App) telegramConfirmLinkFromChat(ctx context.Context, chatID, telegramI
 // ---- 清理与诊断 ----
 
 func (a *App) cleanupExpiredTelegramLinks(now int64) int {
+	if err := a.store().CleanupTelegramLogins(context.Background(), now); err != nil {
+		logTelegramLinkFailure("cleanup_login", err)
+	}
 	n, err := a.store().CleanupTelegramLinks(context.Background(), now, 0, 0)
 	logTelegramLinkFailure("cleanup_expired", err)
 	return n

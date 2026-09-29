@@ -124,6 +124,8 @@ emby_url_list_for_whitelist = [
 
 # ───────── Telegram Bot ─────────
 [Telegram]
+# 扫码登录仅限已经绑定 Telegram 的账号，并在 Bot 私聊内二次确认；默认关闭。
+login_enabled = false
 # Telegram Bot API 基础地址（私有部署时可改，比如 https://my-tg-proxy/bot）
 telegram_api_url = "https://api.telegram.org/bot"
 # Bot Token（@BotFather）

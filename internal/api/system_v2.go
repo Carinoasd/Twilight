@@ -13,6 +13,7 @@ func (a *App) handleV2SystemInfo(w http.ResponseWriter, _ *http.Request, _ Param
 		"register":                      cfg.RegisterEnabled,
 		"emby_direct_register":          cfg.EmbyDirectRegisterEnabled,
 		"telegram":                      cfg.TelegramMode,
+		"telegram_login":                cfg.TelegramLoginEnabled && a.telegramAvailable(),
 		"force_bind_telegram":           cfg.ForceBindTelegram,
 		"force_bind_group":              cfg.TelegramForceBindGroup,
 		"force_bind_channel":            cfg.TelegramForceBindChannel,

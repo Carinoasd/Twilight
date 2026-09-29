@@ -1081,6 +1081,7 @@ func configSectionDefs() []configSectionDef {
 			{Key: "playback_reporting_enabled", Label: "使用 Playback Reporting 净时长", Type: "bool", Description: "装了 Emby 的 Playback Reporting 插件时，用它的 PlayDuration − PauseDuration 作为播放时长（扣除暂停）；插件不可用会自动回退活动日志，无需手动关闭"},
 		}},
 		{Key: "Telegram", Title: "Telegram", Description: "Bot、订阅校验和群组管理\n推荐在 Telegram 管理页面操作 Bot 基础设置，高级参数在此调整", Category: "integration", Collapsed: true, Fields: []configFieldDef{
+			{Key: "login_enabled", Label: "Telegram 扫码登录", Type: "bool", Description: "仅已绑定账号可登录，需要在 Bot 私聊确认；默认关闭"},
 			{Key: "telegram_api_url", Label: "Bot API URL", Type: "string", Description: "Telegram Bot API 基础地址"},
 			{Key: "bot_token", Label: "Bot Token", Type: "secret", Description: "Telegram Bot Token"},
 			{Key: "admin_id", Label: "管理员 Telegram ID", Type: "list", Description: "Bot 管理员 ID 列表"},
@@ -1317,6 +1318,7 @@ func configValues(cfg config.Config) map[string]map[string]any {
 			"playback_reporting_enabled": cfg.PlaybackReportingEnabled,
 		},
 		"Telegram": {
+			"login_enabled":    cfg.TelegramLoginEnabled,
 			"telegram_api_url": cfg.TelegramAPIURL, "bot_token": cfg.TelegramBotToken, "admin_id": int64sToAny(cfg.TelegramAdminIDs), "group_id": cfg.TelegramGroupIDs,
 			"force_subscribe":  cfg.TelegramForceSubscribe,
 			"force_bind_group": cfg.TelegramForceBindGroup, "channel_id": cfg.TelegramChannelIDs, "force_bind_channel": cfg.TelegramForceBindChannel,

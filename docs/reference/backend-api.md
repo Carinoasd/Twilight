@@ -290,7 +290,17 @@ JSON 请求体只能包含一个 JSON 值，值后只允许空白字符与 EOF�
 
 > 限速命中只写日志告警，不会写入安全日志 / 登录历史。
 
-#### Telegram 注册绑定链接
+#### Telegram 扫码登录
+
+`Telegram.login_enabled` 默认关闭。开启后，`POST /api/v2/auth/telegram/requests` 返回 `{id, secret, deep_link, check_code, expires_in: 180, poll_interval: 3}`。请求头复用 `X-Twilight-Client: webui` 和 `X-Twilight-Intent: create-telegram-link`。`secret` 只在首次响应出现，客户端保留在当前页面内存，不放入 URL 或持久化存储。
+
+后续 `GET /api/v2/auth/telegram/requests/{id}` 通过 `X-Telegram-Link-Secret` 证明浏览器归属，响应只有 `status`：`pending`、`scanned`、`approved`、`rejected`、`cancelled`、`consumed` 或 `expired`。每 3 秒查询，页面隐藏时暂停。扫码仅认领请求；Bot 私聊里的确认按钮才批准登录。
+
+批准后 `POST /api/v2/auth/telegram/requests/{id}/consume` 携带相同 secret、设备身份及上述意图头，沿用正常登录的 Cookie/用户响应。一次请求仅成功兑换一次；签发会话失败也不恢复许可，必须重新生成。`DELETE /api/v2/auth/telegram/requests/{id}` 使用相同 secret 和意图头取消。所有响应 `no-store`；查询不会创建会话或暴露 UID/TG 身份。
+
+创建按 IP 限制 5 次/分钟，查询按 IP 限制 120 次/分钟，兑换使用正常登录 IP 限制，Bot 扫码每 TG 身份 10 次/分钟。全局最多 1000 个未清理请求。错误码：`TG_LOGIN_UNAVAILABLE`（功能关闭或 Bot 信息不可用）、`TG_LOGIN_INVALID`（归属不符、失效或已消费）、`TG_LOGIN_FAILED`（存储故障）。原有 `/auth/login/telegram` 的直接身份登录仍不可用。
+
+#### Telegram 注册绑定链接契约
 
 `POST /users/telegram/register/link` — 签发注册阶段的 Telegram 绑定链接（公开，IP 限流 5/10 分钟）。调用方必须带 `X-Twilight-Client: webui` 与 `X-Twilight-Intent: create-telegram-link`，后端会拒绝预取请求。
 

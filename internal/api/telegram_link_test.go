@@ -44,6 +44,8 @@ func newFakeTelegramServer(t *testing.T, app *App) *fakeTelegramServer {
 		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
 			f.sent = append(f.sent, asString(body["text"]))
 			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		default:
 			t.Errorf("unexpected telegram path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

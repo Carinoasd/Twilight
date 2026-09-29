@@ -307,7 +307,7 @@ func validateMigrationData(data parsedMigrationData) error {
 // truncateMigrationTables 清空所有按 uid 归属的专表。identity_history 不随迁移包
 // 导出，目标站原有的行若保留，会挂到导入进来、uid 相同的真实账号上。
 func truncateMigrationTables(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `TRUNCATE TABLE twilight_telegram_links, twilight_sessions, twilight_runtime_logs, twilight_audit_logs, twilight_telegram_roster, twilight_telegram_runtime, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily, twilight_telegram_identity_history RESTART IDENTITY`)
+	_, err := tx.ExecContext(ctx, `TRUNCATE TABLE twilight_telegram_logins, twilight_telegram_links, twilight_sessions, twilight_runtime_logs, twilight_audit_logs, twilight_telegram_roster, twilight_telegram_runtime, twilight_playback_records, twilight_playback_events, twilight_playback_segments, twilight_playback_daily, twilight_telegram_identity_history RESTART IDENTITY`)
 	return err
 }
 
