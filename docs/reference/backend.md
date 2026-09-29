@@ -195,6 +195,7 @@ API、Scheduler 与 Bot 都会检测配置文件签名并支持热重载；签�
 | `TWILIGHT_MEDIA_REQUEST_ENABLED` | 求片开关。 |
 | `TWILIGHT_SIGNIN_*` | 签到相关（开关、货币名、每日积分、连签奖励、积分续期开关/自动续期许可/消耗/天数等）；自动续期环境变量为 `TWILIGHT_SIGNIN_AUTO_RENEWAL_ENABLED`。 |
 | `TWILIGHT_NOTIFICATION_ENABLED` / `TWILIGHT_NOTIFICATION_EXPIRY_REMIND_DAYS` | 到期提醒。 |
+| `TWILIGHT_NOTIFICATION_{LOGIN,EXPIRY,TICKET,SCHEDULER}_{TELEGRAM,EMAIL}_ENABLED` | 按事件与管道控制通知；新增到期、工单及排程邮件默认关闭，详见[通知设置](../features/notifications.md)。 |
 | `TWILIGHT_AUTO_CLEANUP_PENDING_EMBY` / `TWILIGHT_AUTO_CLEANUP_PENDING_EMBY_DAYS` | 待补建 Emby 自动清理。 |
 | `TWILIGHT_RATE_LIMIT_*` | 各类限流阈值（全局、登录、注册、找回密码、邮箱发码、上传、管理员图标、API Key 默认）。 |
 

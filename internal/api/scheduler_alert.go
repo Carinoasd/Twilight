@@ -80,11 +80,13 @@ func (a *App) schedulerRetryAt(jobID string, spec map[string]any, now time.Time,
 	return retryAt
 }
 
-// notifySchedulerOutcome 在任务失败时用 Telegram 通知管理员，并在恢复成功时再通知一次。
+// notifySchedulerOutcome 按配置通过 Telegram／邮件通知管理员任务失败与恢复。
 // 节流：同一任务连续失败只在第一次通知（上一轮不是失败才发），且两次通知至少间隔
 // schedulerAlertMinInterval。管理员主动取消的运行不通知。
 func (a *App) notifySchedulerOutcome(st *store.Store, result store.SchedulerRun) {
-	if !a.cfg().SchedulerFailureNotify || !a.telegramAvailable() || st == nil {
+	telegramEnabled := a.cfg().SchedulerNotifyTelegramEnabled && a.telegramAvailable()
+	emailEnabled := a.cfg().SchedulerNotifyEmailEnabled && emailConfigured(a.cfg())
+	if !a.cfg().SchedulerFailureNotify || (!telegramEnabled && !emailEnabled) || st == nil {
 		return
 	}
 	failed := result.Status == "failed" || result.Status == "interrupted"
@@ -119,6 +121,38 @@ func (a *App) notifySchedulerOutcome(st *store.Store, result store.SchedulerRun)
 	}
 	a.schedulerAlertAt[result.JobID] = time.Now()
 	a.schedulerAlertMu.Unlock()
+	if emailEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		seen := map[string]bool{}
+		adminUIDs, _ := st.UserUIDsMatching(0, func(u store.User) bool {
+			return u.Role == store.RoleAdmin && a.notificationEmailAvailable(u)
+		})
+		admins := st.UsersByUIDs(adminUIDs)
+		for _, uid := range adminUIDs {
+			u, exists := admins[uid]
+			if !exists {
+				continue
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			if u.Role != store.RoleAdmin || !a.notificationEmailAvailable(u) {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(u.Email))
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if err := smtpDeliver(ctx, *a.cfg(), u.Email, "Twilight 定时任务通知", redactSensitiveText(text)); err != nil {
+				zap.L().Warn("failed to send scheduler email", zap.String("job_id", result.JobID), zap.Int64("uid", u.UID), zap.Error(err))
+			}
+		}
+		cancel()
+	}
+	if !telegramEnabled {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for _, chatID := range a.schedulerAlertRecipients(st) {

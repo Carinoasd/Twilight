@@ -32,6 +32,12 @@ func newTestApp(t *testing.T) *App {
 	dir := t.TempDir()
 	st := newTestStore(t)
 	app, err := New(config.Config{
+		LoginNotifyTelegramEnabled:     true,
+		LoginNotifyEmailEnabled:        true,
+		ExpiryNotifyTelegramEnabled:    true,
+		TicketNotifyTelegramEnabled:    true,
+		SchedulerNotifyTelegramEnabled: true,
+
 		AppName:                      "Twilight Test",
 		Version:                      "test",
 		Host:                         "127.0.0.1",

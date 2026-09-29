@@ -599,6 +599,8 @@ curl -X DELETE "http://localhost:5000/api/v1/users/me/devices/abc123" \
 `GET /users/me/settings`
 
 - 认证：登录用户（`AuthUser`）
+- 通知偏好包含原有登录／工单 Telegram 开关，以及 `notify_on_ticket_email`、`notify_on_expiry_email`、`notify_on_expiry_telegram`。通过 `PUT /users/me` 或 V2 设置写接口提交 JSON boolean 更新，省略字段保留原值。旧账号到期 Telegram 默认开启，新增邮件默认关闭。
+- V2 对应 `GET /api/v2/settings`；其中 `notification_channels` 按上述个人偏好字段名返回管理员是否启用且配置该管道。它不代表用户已绑定 Telegram 或验证邮箱。完整规则见[通知设置](../features/notifications.md)。
 - 返回的个人安全偏好包含：
   - `password_change_email_required`：修改系统密码是否实际需要邮箱验证码（含全局强制后的生效值）。
   - `emby_password_email_required`：修改 Emby 密码是否实际需要邮箱验证码（含全局强制后的生效值）。

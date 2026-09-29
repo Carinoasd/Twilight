@@ -135,14 +135,14 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 		"ip":     input.IP,
 		"device": userAgent,
 	})
-	if a.telegramAvailable() && user.TelegramID != 0 && user.NotifyOnLoginTelegram {
+	if a.cfg().LoginNotifyTelegramEnabled && a.telegramAvailable() && user.TelegramID != 0 && user.NotifyOnLoginTelegram {
 		template := a.cfg().LoginNotifyTelegramTemplate
 		if template == "" {
 			template = config.DefaultLoginNotifyTelegramTemplate
 		}
 		a.telegramSendMessage(r.Context(), user.TelegramID, RenderTemplate(template, templateParams))
 	}
-	if emailConfigured(a.cfg()) && user.Email != "" && user.EmailVerified && user.NotifyOnLoginEmail {
+	if a.cfg().LoginNotifyEmailEnabled && emailConfigured(a.cfg()) && user.Email != "" && user.EmailVerified && user.NotifyOnLoginEmail {
 		subjectTemplate := a.cfg().LoginNotifyEmailSubjectTemplate
 		if subjectTemplate == "" {
 			subjectTemplate = config.DefaultLoginNotifyEmailSubjectTemplate

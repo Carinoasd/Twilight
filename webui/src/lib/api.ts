@@ -496,7 +496,7 @@ class ApiClient {
     return this.request<UserSettings>("/settings", { cache: "no-store", signal }, { cacheRead: false, dedupe: false });
   }
 
-  async updateMySettings(data: { bgm_mode?: boolean; bgm_manage_mode?: boolean; bgm_token?: string; email?: string; notify_on_login_telegram?: boolean; notify_on_login_email?: boolean; notify_on_ticket_telegram?: boolean; signin_auto_renewal?: boolean; password_change_email_required?: boolean; emby_password_email_required?: boolean; emby_password_old_password_required?: boolean; old_password?: string; verification_id?: string; email_code?: string; code?: string }) {
+  async updateMySettings(data: { bgm_mode?: boolean; bgm_manage_mode?: boolean; bgm_token?: string; email?: string; notify_on_login_telegram?: boolean; notify_on_login_email?: boolean; notify_on_ticket_telegram?: boolean; notify_on_ticket_email?: boolean; notify_on_expiry_email?: boolean; notify_on_expiry_telegram?: boolean; signin_auto_renewal?: boolean; password_change_email_required?: boolean; emby_password_email_required?: boolean; emby_password_old_password_required?: boolean; old_password?: string; verification_id?: string; email_code?: string; code?: string }) {
     return this.request<UserInfo>("/settings/preferences", {
       method: "PUT",
       body: JSON.stringify(data),

@@ -22,7 +22,6 @@ import {
   Star,
   Bot,
   AlertCircle,
-  Bell,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -61,6 +60,7 @@ import { localeLabels, supportedLocales, useI18n, type Locale } from "@/lib/i18n
 import { passwordStrengthLabel, validatePasswordStrength } from "@/lib/password";
 import { friendlyError } from "@/lib/validators";
 import { EmailCodeInput } from "@/components/email-code-input";
+import { NotificationPreferences } from "@/components/notification-preferences";
 import { telegramBotUrl } from "@/lib/safe-url";
 
 export default function SettingsPage() {
@@ -76,9 +76,6 @@ export default function SettingsPage() {
   const [bgmToken, setBgmToken] = useState("");
   const [isBgmLoading, setIsBgmLoading] = useState(false);
   const [embyStatus, setEmbyStatus] = useState<EmbyStatus | null>(null);
-  const [notifyLoginTelegram, setNotifyLoginTelegram] = useState(false);
-  const [notifyLoginEmail, setNotifyLoginEmail] = useState(false);
-  const [notifyTicketTelegram, setNotifyTicketTelegram] = useState(false);
   const [passwordChangeEmailRequired, setPasswordChangeEmailRequired] = useState(false);
   const [embyPasswordEmailRequired, setEmbyPasswordEmailRequired] = useState(false);
   const [embyPasswordOldPasswordRequired, setEmbyPasswordOldPasswordRequired] = useState(false);
@@ -335,9 +332,6 @@ export default function SettingsPage() {
       setBgmTokenSet(settingsRes.data.bgm_token_set ?? false);
       setEmbyStatus(settingsRes.data.emby_status ?? null);
       setTelegramStatus(settingsRes.data.telegram as TelegramStatus);
-      setNotifyLoginTelegram(Boolean(settingsRes.data.notify_on_login_telegram));
-      setNotifyLoginEmail(Boolean(settingsRes.data.notify_on_login_email));
-      setNotifyTicketTelegram(Boolean(settingsRes.data.notify_on_ticket_telegram));
       setPasswordChangeEmailRequired(Boolean(settingsRes.data.password_change_email_required));
       setEmbyPasswordEmailRequired(Boolean(settingsRes.data.emby_password_email_required));
       setEmbyPasswordOldPasswordRequired(Boolean(settingsRes.data.emby_password_old_password_required));
@@ -1597,75 +1591,10 @@ export default function SettingsPage() {
         </Card>
       </div>
 
-      {/* 登录通知 */}
-      <div className="order-[70]">
-        <Card className="glass-card">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Bell className="h-5 w-5" />
-              {t("settings.loginNotifyTitle")}
-            </CardTitle>
-            <CardDescription>
-              {t("settings.loginNotifyDescription")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 space-y-0.5">
-                <Label>{t("settings.loginNotifyTelegram")}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t("settings.loginNotifyTelegramDesc")}
-                </p>
-              </div>
-              <Switch
-                checked={notifyLoginTelegram}
-                onCheckedChange={(v) => {
-                  setNotifyLoginTelegram(v);
-                  api.updateMySettings({ notify_on_login_telegram: v });
-                }}
-                disabled={!hasTelegramBinding}
-                aria-readonly={!hasTelegramBinding}
-              />
-            </div>
-            <Separator />
-            <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 space-y-0.5">
-                <Label>{t("settings.loginNotifyEmail")}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t("settings.loginNotifyEmailDesc")}
-                </p>
-              </div>
-              <Switch
-                checked={notifyLoginEmail}
-                onCheckedChange={(v) => {
-                  setNotifyLoginEmail(v);
-                  api.updateMySettings({ notify_on_login_email: v });
-                }}
-                disabled={!hasVerifiedEmail}
-                aria-readonly={!hasVerifiedEmail}
-              />
-            </div>
-            <Separator />
-            <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0 space-y-0.5">
-                <Label>{t("settings.ticketNotifyTelegram")}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t("settings.ticketNotifyTelegramDesc")}
-                </p>
-              </div>
-              <Switch
-                checked={notifyTicketTelegram}
-                onCheckedChange={(v) => {
-                  setNotifyTicketTelegram(v);
-                  api.updateMySettings({ notify_on_ticket_telegram: v });
-                }}
-                disabled={!hasTelegramBinding}
-                aria-readonly={!hasTelegramBinding}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {settings && <div className="order-[70]">
+        <NotificationPreferences settings={settings} telegramBound={hasTelegramBinding} emailVerified={hasVerifiedEmail}
+          onSaved={(patch) => setSettings((current) => current ? { ...current, ...patch } : current)} />
+      </div>}
 
       {/* Bind Emby Dialog */}
       <Dialog open={bindEmbyOpen} onOpenChange={(open) => {

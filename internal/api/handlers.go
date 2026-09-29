@@ -440,6 +440,11 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 	if !okBool {
 		return
 	}
+	notificationPrefs, notificationErr := parseNotificationPreferences(payload)
+	if notificationErr != nil {
+		fail(w, http.StatusBadRequest, notificationErr.Error())
+		return
+	}
 	notifyLoginTelegramNext, notifyLoginTelegramSet, okBool := requireStrictBoolValue(w, payload, "notify_on_login_telegram")
 	if !okBool {
 		return
@@ -645,6 +650,7 @@ func (a *App) handleUpdateMe(w http.ResponseWriter, r *http.Request, _ Params) {
 				u.BGMManageMode = false
 			}
 		}
+		notificationPrefs.apply(u)
 		if notifyLoginTelegramSet {
 			u.NotifyOnLoginTelegram = notifyLoginTelegramNext
 		}
@@ -1254,6 +1260,8 @@ func (a *App) handleUserSettings(w http.ResponseWriter, r *http.Request, _ Param
 
 	ok(w, "OK", map[string]any{
 		"bgm_mode": u.BGMMode, "bgm_token_set": u.BGMToken != "", "api_key_enabled": u.LegacyAPIKeyStatus,
+		"notification_channels":  a.notificationChannels(),
+		"notify_on_ticket_email": u.NotifyOnTicketEmail, "notify_on_expiry_email": u.NotifyOnExpiryEmail, "notify_on_expiry_telegram": u.ExpiryTelegramNotificationsEnabled(),
 		"notify_on_login_telegram": u.NotifyOnLoginTelegram, "notify_on_login_email": u.NotifyOnLoginEmail, "notify_on_ticket_telegram": u.NotifyOnTicketTelegram,
 		"signin_auto_renewal":                 u.SigninAutoRenewal,
 		"password_change_email_required":      a.passwordChangeEmailRequired(u, emailPurposeChangePass),

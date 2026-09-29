@@ -1108,15 +1108,15 @@ func (a *App) enqueueTicketNotification(scope, event string, ticketID, targetUID
 	if send == nil {
 		return
 	}
-	// Telegram 未配置时不存在任何可送达对象：直接不启协程，避免每次工单动作都
+	// 所有通知管道关闭或未配置时直接不启协程，避免每次工单动作都
 	// 空跑一个「已跳过」通知并产生无意义的运行日志写入。
-	if !a.telegramAvailable() {
+	if !(a.cfg().TicketNotifyTelegramEnabled && a.telegramAvailable()) && !(a.cfg().TicketNotifyEmailEnabled && emailConfigured(a.cfg())) {
 		return
 	}
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				zap.L().Warn("工单 Telegram 通知任务异常", zap.Int64("ticket_id", ticketID), zap.String("scope", scope), zap.String("event", event), zap.String("panic", redactSensitiveText(fmt.Sprint(recovered))))
+				zap.L().Warn("工单通知任务异常", zap.Int64("ticket_id", ticketID), zap.String("scope", scope), zap.String("event", event), zap.String("panic", redactSensitiveText(fmt.Sprint(recovered))))
 			}
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), ticketNotificationTimeout)
@@ -1136,17 +1136,21 @@ func (a *App) enqueueTicketNotification(scope, event string, ticketID, targetUID
 		// Debug 供排障。只有真正失败才以 Warn 输出到默认级别控制台。
 		switch {
 		case result.Failures > 0:
-			zap.L().Warn("工单 Telegram 通知部分失败", fields...)
+			zap.L().Warn("工单通知部分失败", fields...)
 		case result.Skipped != "":
-			zap.L().Debug("工单 Telegram 通知已跳过", append(fields, zap.String("skipped", result.Skipped))...)
+			zap.L().Debug("工单通知已跳过", append(fields, zap.String("skipped", result.Skipped))...)
 		default:
-			zap.L().Debug("工单 Telegram 通知已发送", fields...)
+			zap.L().Debug("工单通知已发送", fields...)
 		}
 	}()
 }
 
 // notifyTicketAdmins 在新工单 / 工单变动后向已在个人设置中开启工单 TG 通知的管理员推送。
 func (a *App) notifyTicketAdmins(ctx context.Context, event string, ticket store.Ticket, actor store.User) {
+	a.notifyTicketAdminsEmail(event, ticket, actor)
+	if !a.cfg().TicketNotifyTelegramEnabled {
+		return
+	}
 	a.enqueueTicketNotification("admin", event, ticket.ID, ticket.UID, func(sendCtx context.Context) ticketNotificationResult {
 		if !a.telegramAvailable() {
 			return ticketNotificationResult{Skipped: "telegram_unavailable"}
@@ -1317,6 +1321,10 @@ func (a *App) ticketNotificationPhoto(ticket store.Ticket) (string, string, []by
 
 // notifyTicketOwner 工单变动后向工单所属用户发送 Telegram 通知。
 func (a *App) notifyTicketOwner(ctx context.Context, updated, existing store.Ticket) {
+	a.notifyTicketOwnerEmail(updated, existing)
+	if !a.cfg().TicketNotifyTelegramEnabled {
+		return
+	}
 	a.enqueueTicketNotification("owner", "updated", updated.ID, updated.UID, func(sendCtx context.Context) ticketNotificationResult {
 		owner, found := a.store().User(updated.UID)
 		if !found {

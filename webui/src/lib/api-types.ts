@@ -208,7 +208,10 @@ export interface UserInfo {
   };
   notify_on_login_telegram?: boolean;  // 登录时发送 Telegram 通知
   notify_on_login_email?: boolean;  // 登录时发送邮件通知
-  notify_on_ticket_telegram?: boolean;  // 工单变动时发送 Telegram 通知
+  notify_on_ticket_telegram?: boolean;
+  notify_on_ticket_email?: boolean;
+  notify_on_expiry_email?: boolean;
+  notify_on_expiry_telegram?: boolean;  // 到期 Telegram 提醒
   signin_auto_renewal?: boolean;  // 到期时自动使用签到积分续期
   password_change_email_required?: boolean;
   emby_password_email_required?: boolean;
@@ -354,6 +357,7 @@ export interface ApiKeyItem {
 }
 
 export interface UserSettings {
+  notification_channels?: Record<string, boolean>;
   bgm_mode: boolean;
   bgm_manage_mode?: boolean;
   bgm_token_set: boolean;
@@ -361,6 +365,9 @@ export interface UserSettings {
   notify_on_login_telegram?: boolean;
   notify_on_login_email?: boolean;
   notify_on_ticket_telegram?: boolean;
+  notify_on_ticket_email?: boolean;
+  notify_on_expiry_email?: boolean;
+  notify_on_expiry_telegram?: boolean;
   signin_auto_renewal?: boolean;
   password_change_email_required?: boolean;
   emby_password_email_required?: boolean;
