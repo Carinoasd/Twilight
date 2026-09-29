@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readTwoFactorChallenge, type TwoFactorChallenge } from "@/lib/two-factor";
 import { persist } from "zustand/middleware";
 import { api, type UserInfo } from "@/lib/api";
 import { ApiError, clearApiRequestCaches } from "@/lib/api-request";
@@ -37,6 +38,7 @@ function validateUserPayload(raw: unknown): Partial<UserInfo> | null {
 }
 
 export interface LoginResult {
+  challenge?: TwoFactorChallenge;
   ok: boolean;
   message?: string;
   /**
@@ -76,7 +78,9 @@ interface AuthState {
   login: (username: string, password: string) => Promise<LoginResult>;
 
   loginTelegram: (id: string, secret: string) => Promise<LoginResult>;
-  authenticate: (credentials: { username: string; password: string } | { id: string; secret: string }) => Promise<LoginResult>;
+  verifyTwoFactor: (request: string, code: string, recovery: boolean) => Promise<LoginResult>;
+  cancelAuthentication: () => void;
+  authenticate: (credentials: { username: string; password: string } | { id: string; secret: string } | { request: string; code: string; recovery: boolean }) => Promise<LoginResult>;
   logout: () => Promise<void>;
   fetchUser: (options?: { silent?: boolean }) => Promise<FetchUserResult>;
   setUser: (user: UserInfo | null) => void;
@@ -214,18 +218,24 @@ export const useAuthStore = create<AuthState>()(
 
       login: (username, password) => get().authenticate({ username, password }),
       loginTelegram: (id, secret) => get().authenticate({ id, secret }),
+      verifyTwoFactor: (request, code, recovery) => get().authenticate({ request, code, recovery }),
+      cancelAuthentication: () => { bumpAuthGeneration(); },
       authenticate: async (credentials) => {
         const generation = bumpAuthGeneration();
         const controller = new AbortController();
         inFlight.loginController = controller;
         try {
-          const res = "id" in credentials
+          const res = "request" in credentials
+            ? await api.verifyTwoFactor(credentials.request, credentials.code, credentials.recovery, controller.signal)
+            : "id" in credentials
             ? await api.consumeTelegramLogin(credentials.id, credentials.secret, controller.signal)
             : await api.login(credentials.username, credentials.password, controller.signal);
           if (generation !== inFlight.generation) {
             return { ok: false, message: translate("authStore.sessionChanged"), errorCode: "AUTH_SESSION_CHANGED" };
           }
           if (res.success && res.data) {
+            const challenge = readTwoFactorChallenge(res.data);
+            if (challenge) return { ok: false, challenge };
             // 校验后端 user payload 的最小形状，
             // 失败时回退为登录失败 + 自定义 errorCode，避免污染 store。
             const baseUser = validateUserPayload((res.data as { user?: unknown }).user);
@@ -408,6 +418,10 @@ function clearLocalSession(): void {
   } catch {
     // 浏览器禁用 localStorage 时静默失败
   }
+}
+
+export function endRevokedSession(): void {
+  clearLocalSession(); broadcastAuth({ type: "logout" });
 }
 
 if (typeof window !== "undefined") {

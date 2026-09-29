@@ -121,6 +121,7 @@ type PostgresTargetStatus struct {
 }
 
 type State struct {
+	TwoFactorAccounts       map[int64]TwoFactorAccount             `json:"two_factor_accounts,omitempty"` // Backup-only; runtime records live in a dedicated table.
 	NextUserID              int64                                  `json:"next_user_id"`
 	NextAPIKeyID            int64                                  `json:"next_api_key_id"`
 	NextRequestID           int64                                  `json:"next_request_id"`
@@ -1353,6 +1354,10 @@ func (s *Store) Snapshot() ([]byte, error) {
 	// runtime logs 落在独立表 `twilight_runtime_logs`，不会进入 `twilight_state`
 	// 的 jsonb。Snapshot 必须把它们也读出来塞进 State，否则备份/恢复时 state 与
 	// runtime 两条线时点错位。
+	state.TwoFactorAccounts, err = snapshotTwoFactors(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	logs, nextID, err := snapshotRuntimeLogs(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -1464,6 +1469,11 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		return err
 	}
 	state.ensure()
+	if err := ValidateTwoFactorBackup(state); err != nil {
+		return err
+	}
+	factors := state.TwoFactorAccounts
+	state.TwoFactorAccounts = nil
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 快照里的 runtime_logs 单独接管：回写到独立表 twilight_runtime_logs，不进
@@ -1500,6 +1510,9 @@ func (s *Store) LoadSnapshot(data []byte) error {
 		return err
 	}
 	raw, version, err := s.saveStateInTxLocked(ctx, tx, true)
+	if err == nil {
+		err = restoreTwoFactors(ctx, tx, factors)
+	}
 	if err == nil {
 		_, err = tx.ExecContext(ctx, `DELETE FROM twilight_telegram_links; DELETE FROM twilight_telegram_logins`)
 	}

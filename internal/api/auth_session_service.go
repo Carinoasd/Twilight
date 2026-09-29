@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/prejudice-studio/twilight/internal/store"
 	"go.uber.org/zap"
 )
 
@@ -12,9 +13,12 @@ import (
 // V1 compatibility routes and V2 resources cannot drift apart.
 func (a *App) refreshSession(ctx context.Context, token string, uid int64) (string, time.Time, error) {
 	// 续期沿用原会话的设备归属，否则续期后的会话脱离设备，封禁 / 淘汰设备时吊销不到。
-	record, _ := a.sessions().GetRecord(ctx, token)
+	record, valid := a.sessions().GetRecord(ctx, token)
+	if !valid || record.UID != uid {
+		return "", time.Time{}, store.ErrTwoFactorInvalid
+	}
 	a.sessions().Delete(ctx, token)
-	return a.sessions().Create(ctx, uid, record.DeviceID)
+	return a.sessions().CreateVerified(ctx, uid, record.DeviceID, record.AuthVersion, "")
 }
 
 // revokeDeviceSessions 吊销某用户某台设备上的全部会话（封禁 / 淘汰 / 删除设备时调用）。
@@ -29,6 +33,7 @@ func (a *App) revokeSession(ctx context.Context, token string) {
 }
 
 func (a *App) revokeAllSessions(ctx context.Context, uid int64) {
+	_ = a.store().RevokeTwoFactorRequests(ctx, uid)
 	if err := a.store().RevokeTelegramLogins(ctx, uid); err != nil {
 		zap.L().Warn("revoke telegram login requests failed", zap.Int64("uid", uid))
 	}

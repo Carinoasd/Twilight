@@ -1,5 +1,6 @@
 "use client";
 
+import { TwoFactorReadiness } from "@/components/admin/two-factor-readiness";
 import Link from "next/link";
 import { ClipboardList, ScrollText, ShieldAlert, MonitorSmartphone } from "lucide-react";
 import { AdminConfigSections } from "@/components/admin/config-section-editor";
@@ -44,6 +45,7 @@ export default function AdminSecurityCenterPage() {
         })}
       </div>
 
+      <TwoFactorReadiness />
       <AdminConfigSections
         sectionKeys={["Security", "RateLimit", "AuditLog", "DeviceLimit"]}
         title={t("adminSecurity.configTitle")}

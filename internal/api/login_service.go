@@ -90,16 +90,25 @@ func (a *App) authenticateLogin(ctx context.Context, input loginInput) (store.Us
 
 	if security.NeedsRehash(user.PasswordHash) {
 		if hash, err := security.HashPassword(input.Password); err == nil {
-			_, _ = a.store().UpdateUser(user.UID, func(existing *store.User) error {
+			updated, updateErr := a.store().UpdateUser(user.UID, func(existing *store.User) error {
+				if existing.PasswordHash != user.PasswordHash {
+					return store.ErrConflict
+				}
 				existing.PasswordHash = hash
 				return nil
 			})
+			if updateErr == nil {
+				user = updated
+			}
 		}
 	}
 	return user, nil
 }
 
 func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) (loginResult, error) {
+	return a.completeVerifiedLogin(r, input, user, "", "")
+}
+func (a *App) completeVerifiedLogin(r *http.Request, input loginInput, user store.User, version, proof string) (loginResult, error) {
 	deviceID := loginDeviceID(input.DeviceID, input.UserAgent, input.IP)
 	// 管理员封禁的设备不能再登录：先于签发会话拦截，并顺手吊销该设备上残留的会话
 	// （封禁发生在本修复之前、当时没有吊销的旧会话）。
@@ -108,7 +117,14 @@ func (a *App) completeLogin(r *http.Request, input loginInput, user store.User) 
 		a.auditWithUser(r, user.UID, user.Username, "login_blocked_device", "user", user.UID, map[string]any{"ip": input.IP, "device": deviceID})
 		return loginResult{}, loginFail(http.StatusForbidden, ErrDeviceBlocked, "该设备已被管理员封禁，无法登录")
 	}
-	token, expiry, err := a.sessions().Create(r.Context(), user.UID, deviceID)
+	var token string
+	var expiry time.Time
+	var err error
+	if proof != "" {
+		token, expiry, err = a.sessions().CreateVerified(r.Context(), user.UID, deviceID, version, proof)
+	} else {
+		token, expiry, err = a.sessions().Create(r.Context(), user.UID, deviceID)
+	}
 	if err != nil {
 		return loginResult{}, loginFail(http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 	}
@@ -187,6 +203,9 @@ func (a *App) handleLoginResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		statusFromError(w, err)
+		return
+	}
+	if a.beginTwoFactorLogin(w, r, input, user, "password", "") {
 		return
 	}
 	result, err := a.completeLogin(r, input, user)

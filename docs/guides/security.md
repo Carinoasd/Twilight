@@ -298,3 +298,7 @@ Git 自动更新（`internal/api/system_update.go`）：
 - [ ] 数据库备份 / 恢复 / 迁移预检已在测试环境跑过
 - [ ] Git 自动更新预检显示行为可接受（worktree 状态、stash 策略），且仓库 URL 不含凭据
 - [ ] 关键日志可追溯但不泄密（依赖统一脱敏，自建日志不要打印明文凭据）
+
+## 双重验证
+
+验证器 App、一次性备用码、后台开关、密钥部署、API 契约与恢复操作见 [双重验证（2FA）](../features/two-factor.md)。密码与 Telegram 扫码登录均接入第二步；旧客户端收到 `two_factor_required` 时不能把它当成登录成功。

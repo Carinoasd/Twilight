@@ -259,6 +259,7 @@ type principal struct {
 	APIKey     store.APIKey
 	Token      string
 	FromCookie bool
+	Session    sessionRecord
 }
 
 type auditRequestState struct {
@@ -560,6 +561,11 @@ func (a *App) reloadConfigLocked() (map[string]any, error) {
 
 	// 原子切换：在此之前任何 return 都不会污染当前运行时；之后读端就是新状态。
 	a.runtime.Store(&nextState)
+	if !next.TwoFactorEnrollmentEnabled {
+		if err := nextState.store.CancelTwoFactorSetups(context.Background()); err != nil {
+			zap.L().Warn("cancel two-factor setups failed")
+		}
+	}
 	if embyConnectionChanged(previous, next) {
 		a.invalidateEmbyConfigurationCaches()
 	}
@@ -1092,11 +1098,11 @@ func (a *App) authenticateUser(r *http.Request) (*principal, bool) {
 			fromCookie = true
 		}
 	}
-	uid, ok := a.sessions().Get(r.Context(), token)
+	record, ok := a.sessions().GetRecord(r.Context(), token)
 	if !ok {
 		return nil, false
 	}
-	u, ok := a.store().User(uid)
+	u, ok := a.store().User(record.UID)
 	if !ok {
 		return nil, false
 	}
@@ -1107,7 +1113,7 @@ func (a *App) authenticateUser(r *http.Request) (*principal, bool) {
 	if !u.Active {
 		return nil, false
 	}
-	return &principal{User: u, Token: token, FromCookie: fromCookie}, true
+	return &principal{User: u, Token: token, FromCookie: fromCookie, Session: record}, true
 }
 
 func (a *App) authenticateAPIKey(r *http.Request) (*principal, bool) {

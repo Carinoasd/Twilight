@@ -167,6 +167,10 @@ func (a *App) handleDatabaseRestore(w http.ResponseWriter, r *http.Request, _ Pa
 		return
 	}
 	currentState.EnsureForMigration()
+	if err := store.ValidateTwoFactorBackup(targetState); err != nil {
+		a.twoFactorError(w, err)
+		return
+	}
 	backupInfo, err := databaseBackupInfo(target)
 	if err != nil {
 		failWithCode(w, http.StatusBadRequest, ErrDBBackupInvalid, "备份文件无效")
@@ -190,7 +194,7 @@ func (a *App) handleDatabaseRestore(w http.ResponseWriter, r *http.Request, _ Pa
 		"media_requests":         len(targetState.MediaRequests),
 		"announcements":          len(targetState.Announcements),
 		"warnings": []string{
-			"restore will replace the active database state",
+			"restore will replace the active database state, including two-factor settings; old backups without two-factor data will clear those settings",
 			"the server will create a protective backup before applying this restore",
 		},
 	}
@@ -429,6 +433,7 @@ func (a *App) databaseMigrationSummary(driver string, state store.State, dryRun 
 func databaseStateCounts(state store.State) map[string]int {
 	return map[string]int{
 		"users":               len(state.Users),
+		"two_factor_accounts": len(state.TwoFactorAccounts),
 		"api_keys":            len(state.APIKeys),
 		"regcodes":            len(state.RegCodes),
 		"invite_codes":        len(state.InviteCodes),

@@ -749,14 +749,11 @@ func (a *App) handleUpdateUsername(w http.ResponseWriter, r *http.Request, _ Par
 // 与 handleAdminResetPassword / handleForgotPassword 的「改密即吊销旧会话」口径一致。
 // 失败时已写响应，返回 ok=false，调用方直接 return。
 func (a *App) rotateSessionsAfterPasswordChange(w http.ResponseWriter, r *http.Request, uid int64) (string, bool) {
-	// 新会话沿用当前会话的设备归属。
-	var deviceID string
-	if p := current(r); p.Token != "" {
-		record, _ := a.sessions().GetRecord(r.Context(), p.Token)
-		deviceID = record.DeviceID
-	}
+	// 密码写入会撤销旧的第二步请求及会话；沿用请求鉴权时已验证的
+	// 设备和因素版本，不能在密码写入后再读取已被删除的旧会话。
+	record := current(r).Session
 	a.sessions().DeleteUser(r.Context(), uid)
-	token, expires, err := a.sessions().Create(r.Context(), uid, deviceID)
+	token, expires, err := a.sessions().CreateVerified(r.Context(), uid, record.DeviceID, record.AuthVersion, "")
 	if err != nil {
 		failWithCode(w, http.StatusInternalServerError, ErrSessionCreateFailed, "创建会话失败")
 		return "", false

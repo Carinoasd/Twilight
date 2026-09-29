@@ -275,6 +275,9 @@ func (a *App) runSchedulerJob(r *http.Request, jobID string) (map[string]any, []
 		}
 		return map[string]any{"success": true, "configured": true, "new_entries": count, "since_hours": sinceHours}, []string{fmt.Sprintf("synced %d Emby activity log entries from the last %d hours", count, sinceHours)}, nil
 	case "cleanup_sessions":
+		if err := a.store().CleanupTwoFactorRequests(r.Context()); err != nil {
+			return nil, nil, err
+		}
 		expiredSessions := a.sessions().CleanupExpired(r.Context())
 		cfg := a.cfg()
 		expiredEmailCodes := 0

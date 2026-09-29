@@ -607,6 +607,10 @@ CREATE TABLE IF NOT EXISTS twilight_playback_daily (
 		_ = db.Close()
 		return nil, status, err
 	}
+	if err := prepareTwoFactorSchema(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, status, err
+	}
 	if err := prepareTelegramLoginSchema(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, status, err

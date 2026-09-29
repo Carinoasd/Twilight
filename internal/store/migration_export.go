@@ -50,6 +50,10 @@ func (s *Store) ExportMigrationFiles(ctx context.Context) ([]migration.InputFile
 	if err != nil {
 		return nil, err
 	}
+	state.TwoFactorAccounts, err = snapshotTwoFactors(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	runtimeLogs, err := migrationRuntimeLogsTx(ctx, tx)
 	if err != nil {
 		return nil, err
