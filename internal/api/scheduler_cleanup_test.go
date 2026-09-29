@@ -136,10 +136,15 @@ func schedulerJobsForTest(t *testing.T, app *App) (map[string]map[string]any, ma
 func TestSchedulerJobsTimezoneAndDisabledNextRun(t *testing.T) {
 	app := newTestApp(t)
 	app.cfg().SchedulerTimezone = "Asia/Tokyo"
+	app.cfg().SchedulerEnabled = true
 	app.cfg().SchedulerExpiredCheckTime = "03:00"
 	app.cfg().SchedulerGroupMembershipCheckTime = "03:10"
 	app.cfg().SchedulerTelegramBindingsCheckTime = "03:20"
 	app.cfg().SystemUpdateEnabled = false
+	// This cycle already completed; without it an overdue daily job is due now.
+	if err := app.store().AddSchedulerRun(store.SchedulerRun{JobID: "check_expired", Type: "auto", Status: "success", StartedAt: time.Now().Unix(), FinishedAt: time.Now().Unix()}); err != nil {
+		t.Fatal(err)
+	}
 	jobs, data := schedulerJobsForTest(t, app)
 	if asString(data["timezone"]) != "Asia/Tokyo" || int(numeric(data["utc_offset_seconds"])) != 9*3600 {
 		t.Fatalf("timezone not reported: %#v", data)

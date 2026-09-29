@@ -36,32 +36,48 @@ const (
 // schedulerRetryDue 判断每日任务是否该补一次失败重试：本日这轮自动执行失败、还没重试过、
 // 距失败已超过 Scheduler.retry_failed_after_minutes。每个每日周期最多重试一次。
 func (a *App) schedulerRetryDue(jobID string, spec map[string]any, now time.Time, snapshot store.SchedulerRunSnapshot) bool {
+	retryAt := a.schedulerRetryAt(jobID, spec, now, snapshot)
+	return retryAt > 0 && retryAt <= now.Unix()
+}
+
+// schedulerRetryAt shares retry eligibility between the worker and the admin list.
+func (a *App) schedulerRetryAt(jobID string, spec map[string]any, now time.Time, snapshot store.SchedulerRunSnapshot) int64 {
 	minutes := a.cfg().SchedulerRetryFailedAfterMinutes
 	if minutes <= 0 || !schedulerRetryableJobs[jobID] || !snapshot.HasLatestAuto {
-		return false
+		return 0
 	}
 	if t := strings.ToLower(asString(spec["type"])); t != "cron_daily" && t != "daily" {
-		return false
+		return 0
 	}
 	if schedulerSnapshotRecentlyRunning(snapshot, now) {
-		return false
+		return 0
 	}
 	last := snapshot.LatestAuto
 	if last.Status != "failed" || last.Trigger == schedulerRetryTrigger {
-		return false
+		return 0
 	}
 	// 只重试「今天这一轮」的失败，昨天遗留的失败不在今天补。
 	hour := clamp(int(numeric(spec["hour"])), 0, 23)
 	minute := clamp(int(numeric(spec["minute"])), 0, 59)
 	dueToday := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location()).Unix()
 	if last.StartedAt < dueToday {
-		return false
+		return 0
 	}
 	finished := last.FinishedAt
 	if finished == 0 {
 		finished = last.StartedAt
 	}
-	return finished > 0 && now.Unix()-finished >= int64(minutes)*60
+	if finished <= 0 {
+		return 0
+	}
+	retryAt := finished + int64(minutes)*60
+	// Eligibility expires at the end of this local daily cycle. Do not advertise
+	// a delayed retry that tomorrow's scheduler would deliberately skip.
+	endOfDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location()).Unix()
+	if retryAt >= endOfDay {
+		return 0
+	}
+	return retryAt
 }
 
 // notifySchedulerOutcome 在任务失败时用 Telegram 通知管理员，并在恢复成功时再通知一次。

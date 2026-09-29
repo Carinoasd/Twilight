@@ -85,9 +85,9 @@ func (a *App) handleSchedulerJobs(w http.ResponseWriter, r *http.Request, _ Para
 		running := activeJobIDs[jobID] || schedulerSnapshotRecentlyRunning(snapshot, now)
 		// 被配置关闭的任务（如未开启的 system_auto_update）永远不会自动入队，
 		// 不能再显示「下次运行时间」误导管理员。
-		enabledByConfig := schedulerJobEnabledByConfig(a.cfg().SystemUpdateEnabled, job)
-		if enabledByConfig {
-			item["next_run_at"] = zeroNil(schedulerNextRunAtFromSnapshot(spec, now, snapshot))
+		enabledByConfig := a.cfg().SchedulerEnabled && schedulerJobEnabledByConfig(a.cfg().SystemUpdateEnabled, job)
+		if enabledByConfig && !running {
+			item["next_run_at"] = zeroNil(a.schedulerNextAutomaticRunAt(jobID, spec, now, snapshot))
 		} else {
 			item["next_run_at"] = nil
 		}
