@@ -227,9 +227,13 @@ type User struct {
 	// 目前只有群成员巡检写 DisabledReasonTelegramMembership；回群自动启用只处理
 	// 这个原因，绝不会把管理员手动停权的人重新放出来。Active 由其他路径改变时
 	// 由 normalizeUserStateMarkers 自动清空，避免旧原因残留。
-	DisabledReason      string  `json:"disabled_reason,omitempty"`
-	RebindingInProgress bool    `json:"rebinding_in_progress"`
-	RebindingSince      int64   `json:"rebinding_since,omitempty"`
+	DisabledReason      string `json:"disabled_reason,omitempty"`
+	RebindingInProgress bool   `json:"rebinding_in_progress"`
+	RebindingSince      int64  `json:"rebinding_since,omitempty"`
+	// RebindEmbySuspended 表示“这次 Telegram 换绑流程亲自禁用了远端 Emby”。换绑完成后
+	// 只恢复带这个标记的账号：换绑前就已被管理员单独封禁或因到期停用的 Emby，换绑
+	// 结束时不能被顺手解封。
+	RebindEmbySuspended bool    `json:"rebind_emby_suspended,omitempty"`
 	SeenAnnouncementIDs []int64 `json:"seen_announcement_ids,omitempty"`
 }
 

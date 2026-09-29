@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2, Copy, Bot, Check, AlertCircle, Send } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,10 +37,23 @@ export default function RebindGuard() {
         await fetchUser();
         router.replace("/dashboard");
       }
-    } catch {
+    } catch (error: any) {
       completeRef.current = false;
+      if (error?.message) {
+        toast({ title: t("settings.rebindCompleteFailed"), description: error.message, variant: "destructive" });
+      }
     }
-  }, [fetchUser, router]);
+  }, [fetchUser, router, t, toast]);
+
+  // 新 Telegram 已经绑上（例如在 Bot 里确认后关了网页，再回来）：服务端通常已自动
+  // 结束换绑；若因资格校验等原因还没结束，这里补一次，避免卡在“请获取绑定链接”
+  // 却又因为“已绑定”无法签发新链接。
+  useEffect(() => {
+    if (user?.rebinding_in_progress && user?.telegram_id) {
+      setIsBound(true);
+      void completeRebind();
+    }
+  }, [user?.rebinding_in_progress, user?.telegram_id, completeRebind]);
 
   // 统一的绑定链接状态轮询：带超时中断 + 请求中断，绑定成功即收尾换绑。
   useTelegramLinkStatus({

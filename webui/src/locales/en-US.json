@@ -839,7 +839,7 @@
     "unbindSuccess": "Unbound successfully",
     "unbindFailed": "Unbind failed",
     "rebindRequiredTitle": "Telegram rebinding required",
-    "rebindRequiredDescription": "Unbinding complete. Please bind a new Telegram account to continue using the system.",
+    "rebindRequiredDescription": "Unbinding complete. Your Emby account is paused. Bind a new Telegram account now; Emby is restored automatically once binding completes.",
     "rebindCompleteTitle": "Binding complete",
     "rebindCompleteDescription": "Telegram successfully bound, returning to home...",
     "rebindInstructions": "Get a bind link below, then open it in Telegram to verify.",
@@ -912,7 +912,8 @@
     "submitApplication": "Submit request",
     "ticketNotifyTelegram": "Ticket Notifications",
     "ticketNotifyTelegramDesc": "Receive notifications via Telegram when an admin replies to or processes your tickets",
-    "openTelegramLink": "Open @{username} in Telegram and bind"
+    "openTelegramLink": "Open @{username} in Telegram and bind",
+    "rebindCompleteFailed": "Rebinding not finished"
   },
   "tickets": {
     "olderMessages": "Older replies",

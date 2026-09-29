@@ -839,7 +839,7 @@
     "unbindSuccess": "解除綁定成功",
     "unbindFailed": "解除綁定失敗",
     "rebindRequiredTitle": "需要重新綁定 Telegram",
-    "rebindRequiredDescription": "解綁已完成，請立即綁定新的 Telegram 帳號以繼續使用系統",
+    "rebindRequiredDescription": "解綁已完成，Emby 帳號已暫停使用。請立即綁定新的 Telegram 帳號，綁定完成後 Emby 會自動恢復。",
     "rebindCompleteTitle": "綁定完成",
     "rebindCompleteDescription": "Telegram 已成功綁定，正在返回主頁...",
     "rebindInstructions": "點選下方按鈕取得綁定連結，然後在 Telegram 中開啟完成驗證",
@@ -912,7 +912,8 @@
     "submitApplication": "提交申請",
     "ticketNotifyTelegram": "工單變動通知",
     "ticketNotifyTelegramDesc": "管理員回覆或處理工單時通過已綁定的 Telegram Bot 發送通知",
-    "openTelegramLink": "在 Telegram 中開啟 @{username} 並綁定"
+    "openTelegramLink": "在 Telegram 中開啟 @{username} 並綁定",
+    "rebindCompleteFailed": "換綁尚未完成"
   },
   "tickets": {
     "olderMessages": "較早回覆",
